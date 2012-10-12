@@ -269,7 +269,7 @@ pcl::gpu::DeviceArray<pcl::gpu::TsdfVolume::PointType>
 pcl::gpu::TsdfVolume::fetchCloud (DeviceArray<PointType>& cloud_buffer) const
 {
   if (cloud_buffer.empty ())
-    cloud_buffer.create (DEFAULT_CLOUD_BUFFER_SIZE);
+    cloud_buffer.create (DEFAULT_CLOUD_BUFFER_SIZE/2);
 
   float3 device_volume_size = device_cast<const float3> (size_);
   size_t size = device::extractCloud (volume_, device_volume_size, cloud_buffer);

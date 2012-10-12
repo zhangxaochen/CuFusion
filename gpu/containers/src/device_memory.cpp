@@ -145,7 +145,7 @@ void pcl::gpu::DeviceMemory::create(size_t sizeBytes_arg)
             release();
 
         sizeBytes_ = sizeBytes_arg;
-		printf_s("[CUDA]: allocating memory %d.\n", sizeBytes_ );
+	printf( "[CUDA] Allocating memory %d bytes.\n", sizeBytes_ );
                         
         cudaSafeCall( cudaMalloc(&data_, sizeBytes_) );
         
@@ -257,7 +257,7 @@ void pcl::gpu::DeviceMemory2D::create(int rows_arg, int colsBytes_arg)
               
         colsBytes_ = colsBytes_arg;
         rows_ = rows_arg;
-		printf_s("[CUDA]: allocating memory %d x %d = %d.\n", colsBytes_, rows_, colsBytes_ * rows_ );
+	printf( "[CUDA] Allocating memory %d x %d = %d bytes.\n", colsBytes_, rows_, colsBytes_ * rows_ );
                         
         cudaSafeCall( cudaMallocPitch( (void**)&data_, &step_, colsBytes_, rows_) );        
 
