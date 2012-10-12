@@ -1,0 +1,39 @@
+message(STATUS "DOXYGEN_FOUND ${DOXYGEN_FOUND}")
+message(STATUS "HTML_HELP_COMPILER ${HTML_HELP_COMPILER}")
+if(DOXYGEN_FOUND)
+  if(HTML_HELP_COMPILER)
+    set(DOCUMENTATION_HTML_HELP YES)
+  else(HTML_HELP_COMPILER)
+    set(DOCUMENTATION_HTML_HELP NO)
+  endif(HTML_HELP_COMPILER)
+  if(DOXYGEN_DOT_EXECUTABLE)
+    set(HAVE_DOT YES)
+  else(DOXYGEN_DOT_EXECUTABLE)
+    set(HAVE_DOT NO)
+  endif(DOXYGEN_DOT_EXECUTABLE)
+
+  set(STRIPPED_HEADERS "${PCL_SOURCE_DIR}/${PCL_MODULES_NAMES}/include")
+  string(REPLACE ";" "/include \\\n\t\t\t\t\t\t\t\t\t\t\t\t ${PCL_SOURCE_DIR}/" STRIPPED_HEADERS "${STRIPPED_HEADERS}")
+  set(DOC_SOURCE_DIR "\"${PCL_SOURCE_DIR}\"\\")
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/html")
+  set(doxyfile "${CMAKE_CURRENT_BINARY_DIR}/doxyfile")
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/doxyfile.in" ${doxyfile})
+  add_custom_target(doc ${DOXYGEN_EXECUTABLE} ${doxyfile})
+  if(USE_PROJECT_FOLDERS)
+    set_target_properties(doc PROPERTIES FOLDER "Documentation")
+  endif(USE_PROJECT_FOLDERS)
+  if(DOCUMENTATION_HTML_HELP STREQUAL YES)
+    install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/html"
+            DESTINATION "${DOC_INSTALL_DIR}"
+            COMPONENT doc
+            FILES_MATCHING PATTERN *.chm
+            )
+  else(DOCUMENTATION_HTML_HELP STREQUAL YES)
+    install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/html" 
+            DESTINATION "${DOC_INSTALL_DIR}"
+            COMPONENT doc
+            PATTERN "*.md5" EXCLUDE
+            PATTERN "*.map" EXCLUDE
+            PATTERN "*.chm" EXCLUDE)
+  endif(DOCUMENTATION_HTML_HELP STREQUAL YES)
+endif(DOXYGEN_FOUND)
