@@ -1115,6 +1115,7 @@ print_cli_help ()
   cout << "    --registration, -r              : enable registration mode" << endl; 
   cout << "    --integrate-colors, -ic         : enable color integration mode (allows to get cloud with colors)" << endl;   
   cout << "    -volume_size <size_in_meters>   : define integration volume size" << endl;
+  cout << "    -record <oni_file>              : record the stream to .oni file" << endl;
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
   cout << "";
@@ -1144,7 +1145,7 @@ main (int argc, char* argv[])
   
   bool triggered_capture = false;
   
-  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir;
+  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, record_file;
   try
   {    
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
@@ -1209,6 +1210,9 @@ main (int argc, char* argv[])
       
   if (pc::find_switch (argc, argv, "--integrate-colors") || pc::find_switch (argc, argv, "-ic"))      
     app.toggleColorIntegration();
+
+  //if (pc::parse_argument (argc, argv, "-record", record_file) > 0)
+  //  app.initRecording( record_file );
 
   // executing
   try { app.startMainLoop (triggered_capture); }  
