@@ -856,8 +856,11 @@ struct KinFuApp
     {
       boost::unique_lock<boost::mutex> lock(data_ready_mutex_);
 
-      if (!triggered_capture)
+      if (!triggered_capture) {
           capture_.start (); // Start stream
+          pcl::OpenNIGrabber * current_device = ( pcl::OpenNIGrabber * )( &capture_ );
+          cout << "Synchronization mode : " << ( current_device->getDevice()->isSynchronized() ? "On" : "Off" ) << endl;
+	  }
           
       while (!exit_ && !scene_cloud_view_.cloud_viewer_.wasStopped () && !image_view_.viewerScene_.wasStopped ())
       { 
@@ -869,7 +872,7 @@ struct KinFuApp
         catch (const std::bad_alloc& /*e*/) { cout << "Bad alloc" << endl; break; }
         catch (const std::exception& /*e*/) { cout << "Exception" << endl; break; }
         
-        scene_cloud_view_.cloud_viewer_.spinOnce (3);                  
+        scene_cloud_view_.cloud_viewer_.spinOnce (3);
       }
       
       if (!triggered_capture)     
@@ -1177,6 +1180,8 @@ main (int argc, char* argv[])
     else
     {
       capture.reset( new pcl::OpenNIGrabber() );
+	  boost::shared_ptr<pcl::OpenNIGrabber> current_device = boost::static_pointer_cast<pcl::OpenNIGrabber>( capture );
+	  cout << "Synchronization mode : " << ( current_device->getDevice()->isSynchronized() ? "On" : "Off" ) << endl;
   
       //capture.reset( new pcl::ONIGrabber("d:/onis/20111013-224932.oni", true, true) );
       //capture.reset( new pcl::ONIGrabber("d:/onis/reg20111229-180846.oni, true, true) );    
@@ -1190,9 +1195,9 @@ main (int argc, char* argv[])
   float volume_size = 3.f;
   pc::parse_argument (argc, argv, "-volume_size", volume_size);
 
-  cout << "Volumn size is set to : " << volume_size << endl;
+  cout << "Volume size is set to : " << volume_size << endl;
   cout << "Resolution is set to : " << pcl::device::VOLUME_X << endl;
-        
+  
   KinFuApp app (*capture, volume_size);
 
   

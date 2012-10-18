@@ -244,6 +244,11 @@ pcl::OpenNIGrabber::start ()
       block_signals ();
       device_->startIRStream ();
     }
+
+	if ( sync_required_ ) {
+		startSynchronization ();
+	}
+
     running_ = true;
   }
   catch (openni_wrapper::OpenNIException& ex)
