@@ -116,6 +116,8 @@ namespace pcl
       virtual float 
       getFramesPerSecond () const;
 
+	  bool data_updated_;
+
     protected:
       /** \brief internal OpenNI (openni_wrapper) callback that handles image streams */
       void

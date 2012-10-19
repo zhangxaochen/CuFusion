@@ -69,6 +69,7 @@ ONIGrabber::ONIGrabber (const std::string& file_name, bool repeat, bool stream)
   , rgb_frame_id_ ("/openni_rgb_optical_frame")
   , depth_frame_id_ ("/openni_depth_optical_frame")
   , running_ (false)
+  , data_updated_ (false)
   , image_width_ ()
   , image_height_ ()
   , depth_width_ ()
@@ -186,14 +187,21 @@ ONIGrabber::start ()
   }
   else
   {
-    if (device_->hasImageStream ())
+	data_updated_ = false;
+    if (device_->hasImageStream ()) {
       device_->trigger ();
+	  data_updated_ = true;
+	}
 
-    if (device_->hasDepthStream ())
+    if (device_->hasDepthStream ()) {
       device_->trigger ();
+	  data_updated_ = true;
+	}
 
-    if (device_->hasIRStream ())
+    if (device_->hasIRStream ()) {
       device_->trigger ();
+	  data_updated_ = true;
+	}
   }
 }
 

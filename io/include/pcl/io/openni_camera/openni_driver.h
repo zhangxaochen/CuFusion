@@ -205,9 +205,6 @@ namespace openni_wrapper
     static void
     getDeviceType (const std::string& connection_string, unsigned short& vendorId, unsigned short& productId);
 
-	xn::Context & getContext() {
-		return context_;
-	}
   protected:
 
     struct PCL_EXPORTS DeviceContext
