@@ -416,6 +416,22 @@ namespace openni_wrapper
       XnUInt64 
       getDepthOutputFormat () const;
 
+      xn::Context & getContext() {
+        return context_;
+      }
+
+	  xn::DepthGenerator & getDepthGenerator() {
+        return depth_generator_;
+      }
+
+	  xn::ImageGenerator & getImageGenerator() {
+        return image_generator_;
+      }
+
+	  xn::IRGenerator & getIRGenerator() {
+        return ir_generator_;
+      }
+
     private:
       // make OpenNIDevice non copyable
       OpenNIDevice (OpenNIDevice const &);

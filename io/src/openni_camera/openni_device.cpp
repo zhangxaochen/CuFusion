@@ -125,15 +125,20 @@ openni_wrapper::OpenNIDevice::OpenNIDevice (
 
 #if (XN_MINOR_VERSION >= 3)
 // create the production nodes
+
   XnStatus status = context_.CreateProductionTree (const_cast<xn::NodeInfo&>(depth_node), depth_generator_);
+  //xn::EnumerationErrors errors;
+  //XnStatus status = context_.CreateAnyProductionTree(XN_NODE_TYPE_DEPTH, NULL, depth_generator_, &errors);
   if (status != XN_STATUS_OK)
     THROW_OPENNI_EXCEPTION ("creating depth generator failed. Reason: %s", xnGetStatusString (status));
 
   status = context_.CreateProductionTree (const_cast<xn::NodeInfo&>(image_node), image_generator_);
+  //status = context.CreateAnyProductionTree(XN_NODE_TYPE_IMAGE, NULL, image_generator_, &errors);
   if (status != XN_STATUS_OK)
     THROW_OPENNI_EXCEPTION ("creating image generator failed. Reason: %s", xnGetStatusString (status));
 
   status = context_.CreateProductionTree (const_cast<xn::NodeInfo&>(ir_node), ir_generator_);
+  //status = context.CreateAnyProductionTree(XN_NODE_TYPE_IR, NULL, ir_generator_, &errors);
   if (status != XN_STATUS_OK)
     THROW_OPENNI_EXCEPTION ("creating IR generator failed. Reason: %s", xnGetStatusString (status));
 #else
