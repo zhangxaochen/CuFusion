@@ -517,6 +517,10 @@ struct SceneCloudView
         cloud_ptr_->width = (int)cloud_ptr_->points.size ();
         cloud_ptr_->height = 1;
       }
+<<<<<<< HEAD
+=======
+
+>>>>>>> origin/Kintinuous
 	  if (integrate_colors)
       {
         kinfu.colorVolume().fetchColors(extracted, point_colors_device_);
