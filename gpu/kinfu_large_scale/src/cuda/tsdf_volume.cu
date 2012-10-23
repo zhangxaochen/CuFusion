@@ -72,12 +72,12 @@ namespace pcl
       //compute relative indices
       int idX, idY;
       
-      if(x <= minBounds.x)
+      if(x < minBounds.x)
         idX = x + buffer.voxels_size.x;
       else
         idX = x;
       
-      if(y <= minBounds.y)
+      if(y < minBounds.y)
         idY = y + buffer.voxels_size.y;
       else
         idY = y;	 
@@ -96,7 +96,7 @@ namespace pcl
               int z_step = buffer.voxels_size.y * volume.step / sizeof(*pos);
                                   
               ///Get the size of the whole TSDF memory
-              int size = buffer.tsdf_memory_end - buffer.tsdf_memory_start;
+              int size = buffer.tsdf_memory_end - buffer.tsdf_memory_start + 1;
                                 
               ///Move along z axis
     #pragma unroll
@@ -121,7 +121,7 @@ namespace pcl
               int z_step = buffer.voxels_size.y * volume.step / sizeof(*pos);
                            
               ///Get the size of the whole TSDF memory 
-              int size = buffer.tsdf_memory_end - buffer.tsdf_memory_start;
+              int size = buffer.tsdf_memory_end - buffer.tsdf_memory_start + 1;
                             
               ///Move pointer to the Z origin
               pos+= minBounds.z * z_step;
@@ -446,7 +446,7 @@ namespace pcl
         
         // As the pointer is incremented in the for loop, we have to make sure that the pointer is never outside the memory
         if(pos > buffer.tsdf_memory_end)
-          pos -= (buffer.tsdf_memory_end - buffer.tsdf_memory_start);
+          pos -= (buffer.tsdf_memory_end - buffer.tsdf_memory_start + 1);
         
         float inv_z = 1.0f / (v_z + Rcurr_inv.data[2].z * z_scaled);
         if (inv_z < 0)
