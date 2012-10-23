@@ -309,9 +309,12 @@ namespace pcl
       */    
     void 
     updateColorVolume(const Intr& intr, float tranc_dist, const Mat33& R_inv, const float3& t, const MapArr& vmap, 
-            const PtrStepSz<uchar3>& colors, const float3& volume_size, PtrStep<uchar4> color_volume, int max_weight = 1);
+            const PtrStepSz<uchar3>& colors, const float3& volume_size, PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer* buffer, int max_weight = 1);
 
-    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    void 
+    clearColorSlice (PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer* buffer, int shiftX, int shiftY, int shiftZ);
+
+	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Raycast and view generation        
     /** \brief Generation vertex and normal maps from volume for current camera pose
       * \param[in] intr camera intrinsices

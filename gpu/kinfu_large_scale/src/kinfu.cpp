@@ -267,7 +267,7 @@ pcl::gpu::KinfuTracker::allocateBufffers (int rows, int cols)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool
-pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw)
+pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcolor)
 {  
   
   device::Intr intr (fx_, fy_, cx_, cy_);
@@ -541,14 +541,24 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw)
   // Ray casting
   /*Mat33& device_Rcurr = device_cast<Mat33> (Rcurr);*/
   {          
-    raycast (intr, device_cam_rot_local_curr, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), device_volume_size, tsdf_volume_->data (), getCyclicalBufferStructure (), vmaps_g_prev_[0], nmaps_g_prev_[0]);
-    
+    raycast (intr, device_cam_rot_local_curr, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), device_volume_size, tsdf_volume_->data (), getCyclicalBufferStructure (), vmaps_g_prev_[0], nmaps_g_prev_[0]);    
+  }
+  {
+  if ( pcolor && color_volume_ )
+    {
+      const float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
+
+	  device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_cam_rot_local_curr_inv, device_cam_trans_local_curr, vmaps_g_prev_[0], 
+		*pcolor, device_volume_size, color_volume_->data(), getCyclicalBufferStructure(), color_volume_->getMaxWeight());
+    }
+  }
+  {
     // POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
     Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
     float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
     
     //~ PCL_INFO ("Raycasting with cube origin at %f, %f, %f\n", cube_origin.x, cube_origin.y, cube_origin.z);
-    
+
     MapArr& vmap_temp = vmaps_g_prev_[0];
     MapArr& nmap_temp = nmaps_g_prev_[0];
     
@@ -562,8 +572,8 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw)
     pcl::device::sync ();
   }
 
-  if(has_shifted && perform_last_scan_)
-    extractAndMeshWorld ();
+  //if(has_shifted && perform_last_scan_)
+  //  extractAndMeshWorld ();
 
   ++global_time_;
   return (true);
@@ -663,6 +673,7 @@ pcl::gpu::KinfuTracker::initColorIntegration(int max_weight)
   cyclical_.initBuffer(tsdf_volume_, color_volume_);
 }
 
+/*
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool 
 pcl::gpu::KinfuTracker::operator() (const DepthMap& depth, const View& colors)
@@ -674,18 +685,33 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth, const View& colors)
     const float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
     device::Intr intr(fx_, fy_, cx_, cy_);
 
-    Matrix3frm R_inv = rmats_.back().inverse();
-    Vector3f   t     = tvecs_.back();
-    
-    Mat33&  device_Rcurr_inv = device_cast<Mat33> (R_inv);
-    float3& device_tcurr = device_cast<float3> (t);
-    
-    device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_Rcurr_inv, device_tcurr, vmaps_g_prev_[0], 
-        colors, device_volume_size, color_volume_->data(), color_volume_->getMaxWeight());
+	Matrix3frm cam_rot_global_curr = rmats_.back();
+	Vector3f cam_trans_global_curr = tvecs_.back();
+	Matrix3frm cam_rot_local_curr_inv = cam_rot_global_curr.inverse ();
+	Mat33&  device_cam_rot_local_curr_inv = device_cast<Mat33> (cam_rot_local_curr_inv);
+	Mat33&  device_cam_rot_local_curr = device_cast<Mat33> (cam_rot_global_curr); 
+	float3& device_cam_trans_local_curr_tmp = device_cast<float3> (cam_trans_global_curr);
+	float3 device_cam_trans_local_curr;
+	device_cam_trans_local_curr.x = device_cam_trans_local_curr_tmp.x - (getCyclicalBufferStructure ())->origin_metric.x;
+	device_cam_trans_local_curr.y = device_cam_trans_local_curr_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
+	device_cam_trans_local_curr.z = device_cam_trans_local_curr_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;  
+
+	device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_cam_rot_local_curr_inv, device_cam_trans_local_curr, vmaps_g_prev_[0], 
+		colors, device_volume_size, color_volume_->data(), getCyclicalBufferStructure(), color_volume_->getMaxWeight());
+
+ //   Matrix3frm R_inv = rmats_.back().inverse();
+ //   Vector3f   t     = tvecs_.back();
+ //   
+ //   Mat33&  device_Rcurr_inv = device_cast<Mat33> (R_inv);
+ //   float3& device_tcurr = device_cast<float3> (t);
+ //   
+ //   device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_Rcurr_inv, device_tcurr, vmaps_g_prev_[0], 
+	//	colors, device_volume_size, color_volume_->data(), getCyclicalBufferStructure(), color_volume_->getMaxWeight());
   }
 
   return res;
 }
+*/
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 

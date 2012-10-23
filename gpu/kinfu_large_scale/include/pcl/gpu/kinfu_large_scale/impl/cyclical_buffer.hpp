@@ -153,6 +153,7 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
 
   // clear buffer slice and update the world model
   pcl::device::clearTSDFSlice (volume->data (), &buffer_, offset_x, offset_y, offset_z);
+  pcl::device::clearColorSlice (color->data (), &buffer_, offset_x, offset_y, offset_z);
 
   // insert current slice in the world if it contains any points
   if (current_slice->points.size () != 0) {

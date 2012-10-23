@@ -59,8 +59,94 @@ namespace pcl
           *pos = make_uchar4 (0, 0, 0, 0);
       }
     }
+
+    __global__ void
+    clearColorSliceKernel (PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer buffer, int3 minBounds, int3 maxBounds)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+           
+      //compute relative indices
+      int idX, idY;
+      
+      if(x < minBounds.x)
+        idX = x + buffer.voxels_size.x;
+      else
+        idX = x;
+      
+      if(y < minBounds.y)
+        idY = y + buffer.voxels_size.y;
+      else
+        idY = y;	 
+              
+      if ( x < buffer.voxels_size.x && y < buffer.voxels_size.y)
+      {
+          if( (idX >= minBounds.x && idX <= maxBounds.x) || (idY >= minBounds.y && idY <= maxBounds.y) )
+          {
+              // BLACK ZONE => clear on all Z values
+         
+              ///Pointer to the first x,y,0			
+              uchar4 *pos = color_volume.ptr(y) + x;
+              
+              ///Get the step on Z
+              int z_step = buffer.voxels_size.y * color_volume.step / sizeof(*pos);
+                                  
+              ///Get the size of the whole TSDF memory
+              int size = buffer.color_memory_end - buffer.color_memory_start + 1;
+                                
+              ///Move along z axis
+    #pragma unroll
+              for(int z = 0; z < buffer.voxels_size.z; ++z, pos+=z_step)
+              {
+                ///If we went outside of the memory, make sure we go back to the begining of it
+                if(pos > buffer.color_memory_end)
+                  pos = pos - size;
+                  
+                *pos = make_uchar4 (0, 0, 0, 0);
+              }
+           }
+           else /* if( idX > maxBounds.x && idY > maxBounds.y)*/
+           {
+             
+              ///RED ZONE  => clear only appropriate Z
+             
+              ///Pointer to the first x,y,0
+              uchar4 *pos = color_volume.ptr(y) + x;
+              
+              ///Get the step on Z
+              int z_step = buffer.voxels_size.y * color_volume.step / sizeof(*pos);
+                           
+              ///Get the size of the whole TSDF memory 
+              int size = buffer.color_memory_end - buffer.color_memory_start + 1;
+                            
+              ///Move pointer to the Z origin
+              pos+= minBounds.z * z_step;
+              
+              ///If the Z offset is negative, we move the pointer back
+              if(maxBounds.z < 0)
+                pos += maxBounds.z * z_step;
+                
+              ///We make sure that we are not already before the start of the memory
+              if(pos < buffer.color_memory_start)
+                  pos = pos + size;
+
+              int nbSteps = abs(maxBounds.z);
+              
+          #pragma unroll				
+              for(int z = 0; z < nbSteps; ++z, pos+=z_step)
+              {
+                ///If we went outside of the memory, make sure we go back to the begining of it
+                if(pos > buffer.color_memory_end)
+                  pos = pos - size;
+                  
+                *pos = make_uchar4 (0, 0, 0, 0);
+              }
+           } //else /* if( idX > maxBounds.x && idY > maxBounds.y)*/
+       } // if ( x < VOLUME_X && y < VOLUME_Y)
+    } // clearColorSliceKernel
   }
 }
+
 
 void
 pcl::device::initColorVolume (PtrStep<uchar4> color_volume)
@@ -128,7 +214,7 @@ namespace pcl
       }
 
       __device__ __forceinline__ void
-      operator () () const
+      operator () ( pcl::gpu::tsdf_buffer buffer ) const
       {
         int x = threadIdx.x + blockIdx.x * blockDim.x;
         int y = threadIdx.y + blockIdx.y * blockDim.y;
@@ -175,6 +261,9 @@ namespace pcl
             if (update)
             {
               uchar4 *ptr = color_volume.ptr (VOLUME_Y * z + y) + x;
+
+			  shift_color_pointer( &ptr, buffer );
+
               uchar3 rgb = colors.ptr (coo.y)[coo.x];
               uchar4 volume_rgbw = *ptr;
 
@@ -201,15 +290,15 @@ namespace pcl
     };
 
     __global__ void
-    updateColorVolumeKernel (const ColorVolumeImpl cvi) {
-      cvi ();
+    updateColorVolumeKernel (const ColorVolumeImpl cvi, pcl::gpu::tsdf_buffer buffer) {
+      cvi (buffer);
     }
   }
 }
 
 void
 pcl::device::updateColorVolume (const Intr& intr, float tranc_dist, const Mat33& R_inv, const float3& t,
-                                const MapArr& vmap, const PtrStepSz<uchar3>& colors, const float3& volume_size, PtrStep<uchar4> color_volume, int max_weight)
+                                const MapArr& vmap, const PtrStepSz<uchar3>& colors, const float3& volume_size, PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer* buffer, int max_weight)
 {
   ColorVolumeImpl cvi;
   cvi.vmap = vmap;
@@ -229,7 +318,7 @@ pcl::device::updateColorVolume (const Intr& intr, float tranc_dist, const Mat33&
   dim3 block (ColorVolumeImpl::CTA_SIZE_X, ColorVolumeImpl::CTA_SIZE_Y);
   dim3 grid (divUp (VOLUME_X, block.x), divUp (VOLUME_Y, block.y));
 
-  updateColorVolumeKernel<<<grid, block>>>(cvi);
+  updateColorVolumeKernel<<<grid, block>>>(cvi, *buffer);
   cudaSafeCall ( cudaGetLastError () );
   cudaSafeCall (cudaDeviceSynchronize ());
 }
@@ -272,3 +361,59 @@ pcl::device::exctractColors (const PtrStep<uchar4>& color_volume, const pcl::gpu
   cudaSafeCall ( cudaGetLastError () );
   cudaSafeCall (cudaDeviceSynchronize ());
 };
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void 
+pcl::device::clearColorSlice (PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer* buffer, int shiftX, int shiftY, int shiftZ)
+{
+    int newX = buffer->origin_GRID.x + shiftX;
+    int newY = buffer->origin_GRID.y + shiftY;
+
+    int3 minBounds, maxBounds;
+    
+    //X
+    if(newX >= 0)
+    {
+     minBounds.x = buffer->origin_GRID.x;
+     maxBounds.x = newX;    
+    }
+    else
+    {
+     minBounds.x = newX + buffer->voxels_size.x; 
+     maxBounds.x = buffer->origin_GRID.x + buffer->voxels_size.x;
+    }
+    
+    if(minBounds.x > maxBounds.x)
+     std::swap(minBounds.x, maxBounds.x);
+      
+   
+    //Y
+    if(newY >= 0)
+    {
+     minBounds.y = buffer->origin_GRID.y;
+     maxBounds.y = newY;
+    }
+    else
+    {
+     minBounds.y = newY + buffer->voxels_size.y; 
+     maxBounds.y = buffer->origin_GRID.y + buffer->voxels_size.y;
+    }
+    
+    if(minBounds.y > maxBounds.y)
+     std::swap(minBounds.y, maxBounds.y);
+    
+    //Z
+     minBounds.z = buffer->origin_GRID.z;
+     maxBounds.z = shiftZ;
+  
+    // call kernel
+    dim3 block (32, 16);
+    dim3 grid (1, 1, 1);
+    grid.x = divUp (buffer->voxels_size.x, block.x);      
+    grid.y = divUp (buffer->voxels_size.y, block.y);
+    
+    clearColorSliceKernel<<<grid, block>>>(color_volume, *buffer, minBounds, maxBounds);
+    cudaSafeCall ( cudaGetLastError () );
+    cudaSafeCall (cudaDeviceSynchronize ());
+   
+}
