@@ -483,7 +483,7 @@ struct SceneCloudView
 
       if (integrate_colors)
       {
-        kinfu.colorVolume().fetchColors(extracted, point_colors_device_);
+        kinfu.colorVolume().fetchColors(extracted, point_colors_device_, kinfu.getCyclicalBufferStructure());
         point_colors_device_.download(point_colors_ptr_->points);
         point_colors_ptr_->width = (int)point_colors_ptr_->points.size ();
         point_colors_ptr_->height = 1;
@@ -520,7 +520,7 @@ struct SceneCloudView
 
 	  if (integrate_colors)
       {
-        kinfu.colorVolume().fetchColors(extracted, point_colors_device_);
+        kinfu.colorVolume().fetchColors(extracted, point_colors_device_, kinfu.getCyclicalBufferStructure());
         point_colors_device_.download(point_colors_ptr_->points);
         point_colors_ptr_->width = (int)point_colors_ptr_->points.size ();
         point_colors_ptr_->height = 1;

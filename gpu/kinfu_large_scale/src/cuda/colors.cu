@@ -239,7 +239,7 @@ namespace pcl
   namespace device
   {
     __global__ void
-    extractColorsKernel (const float3 cell_size, const PtrStep<uchar4> color_volume, const PtrSz<PointType> points, uchar4 *colors)
+    extractColorsKernel (const float3 cell_size, const PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer buffer, const PtrSz<PointType> points, uchar4 *colors)
     {
       int idx = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -251,19 +251,24 @@ namespace pcl
         v.y = __float2int_rd (p.y / cell_size.y);
         v.z = __float2int_rd (p.z / cell_size.z);
 
-        uchar4 rgbw = color_volume.ptr (VOLUME_Y * v.z + v.y)[v.x];
-        colors[idx] = make_uchar4 (rgbw.z, rgbw.y, rgbw.x, 0); //bgra
+        const uchar4* tmp_pos = &(color_volume.ptr (buffer.voxels_size.y * v.z + v.y)[v.x]);
+        uchar4* pos = const_cast<uchar4*> (tmp_pos);
+        shift_color_pointer (&pos, buffer);
+		colors[idx] = make_uchar4 ( pos->z, pos->y, pos->x, 0 ); //bgra
+
+        //uchar4 rgbw = color_volume.ptr (VOLUME_Y * v.z + v.y)[v.x];
+        //colors[idx] = make_uchar4 (rgbw.z, rgbw.y, rgbw.x, 0); //bgra
       }
     }
   }
 }
 
 void
-pcl::device::exctractColors (const PtrStep<uchar4>& color_volume, const float3& volume_size, const PtrSz<PointType>& points, uchar4* colors)
+pcl::device::exctractColors (const PtrStep<uchar4>& color_volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, const PtrSz<PointType>& points, uchar4* colors)
 {
   const int block = 256;
   float3 cell_size = make_float3 (volume_size.x / VOLUME_X, volume_size.y / VOLUME_Y, volume_size.z / VOLUME_Z);
-  extractColorsKernel<<<divUp (points.size, block), block>>>(cell_size, color_volume, points, colors);
+  extractColorsKernel<<<divUp (points.size, block), block>>>(cell_size, color_volume, *buffer, points, colors);
   cudaSafeCall ( cudaGetLastError () );
   cudaSafeCall (cudaDeviceSynchronize ());
 };

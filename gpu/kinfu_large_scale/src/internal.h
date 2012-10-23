@@ -426,7 +426,7 @@ namespace pcl
       * \param[out] colors output array with colors.
       */
     void 
-    exctractColors(const PtrStep<uchar4>& color_volume, const float3& volume_size, const PtrSz<PointType>& points, uchar4* colors);
+    exctractColors(const PtrStep<uchar4>& color_volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, const PtrSz<PointType>& points, uchar4* colors);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Utility

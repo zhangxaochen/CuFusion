@@ -63,6 +63,18 @@ namespace pcl
       }       
     }
 
+	__device__ __forceinline__ static void
+	shift_color_pointer(uchar4 ** value, pcl::gpu::tsdf_buffer buffer)
+	{
+	  ///Shift the pointer by (@origin - @start)
+	  *value += (buffer.color_rolling_buff_origin - buffer.color_memory_start);
+  
+	  ///If we land outside of the memory, make sure to "modulo" the new value
+	  if(*value > buffer.color_memory_end)
+	  {
+		*value -= (buffer.color_memory_end - buffer.color_memory_start);
+	  }       
+	}
 
     __device__ __forceinline__ void
     pack_tsdf (float tsdf, int weight, short2& value)
