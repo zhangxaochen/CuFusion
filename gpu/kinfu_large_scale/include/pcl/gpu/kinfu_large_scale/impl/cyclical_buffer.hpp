@@ -163,9 +163,9 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
   shiftOrigin (volume, offset_x, offset_y, offset_z);
   
   // push existing data in the TSDF buffer
-  if (previously_existing_slice->points.size () != 0 ) {
-    volume->pushSlice(previously_existing_slice, getBuffer () );
-  }
+  //if (previously_existing_slice->points.size () != 0 ) {
+  //  volume->pushSlice(previously_existing_slice, getBuffer () );
+  //}
 }
 
 void 

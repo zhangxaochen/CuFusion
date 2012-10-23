@@ -276,13 +276,13 @@ pcl::gpu::TsdfVolume::fetchCloudHost (PointCloud<PointType>& cloud, bool connect
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 pcl::gpu::DeviceArray<pcl::gpu::TsdfVolume::PointType>
-pcl::gpu::TsdfVolume::fetchCloud (DeviceArray<PointType>& cloud_buffer) const
+pcl::gpu::TsdfVolume::fetchCloud (DeviceArray<PointType>& cloud_buffer, const pcl::gpu::tsdf_buffer* buffer) const
 {
   if (cloud_buffer.empty ())
     cloud_buffer.create (DEFAULT_CLOUD_BUFFER_SIZE);
 
   float3 device_volume_size = device_cast<const float3> (size_);
-  size_t size = device::extractCloud (volume_, device_volume_size, cloud_buffer);
+  size_t size = device::extractCloud (volume_, buffer, device_volume_size, cloud_buffer);
   return (DeviceArray<PointType> (cloud_buffer.ptr (), size));
 }
 
@@ -294,6 +294,15 @@ pcl::gpu::TsdfVolume::fetchNormals (const DeviceArray<PointType>& cloud, DeviceA
   normals.create (cloud.size ());
   const float3 device_volume_size = device_cast<const float3> (size_);
   device::extractNormals (volume_, device_volume_size, cloud, (device::PointType*)normals.ptr ());
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void
+pcl::gpu::TsdfVolume::fetchNormalsInSpace (const DeviceArray<PointType>& cloud, const pcl::gpu::tsdf_buffer* buffer) const
+{
+  const float3 device_volume_size = device_cast<const float3> (size_);
+  device::extractNormalsInSpace (volume_, buffer, device_volume_size, cloud);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

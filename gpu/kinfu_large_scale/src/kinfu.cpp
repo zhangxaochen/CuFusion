@@ -484,13 +484,26 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw)
   tvecs_.push_back (tcurr);
   */
   
+  /*
   //check for shift
   bool has_shifted = cyclical_.checkForShift(tsdf_volume_, getCameraPose (), 0.6 * volume_size_, true, perform_last_scan_, force_shift_);
   force_shift_ = false;
  
   if(has_shifted)
     PCL_WARN ("SHIFTING\n");
-    
+  */
+
+  bool has_shifted = false;
+  if ( force_shift_ ) {
+	has_shifted = cyclical_.checkForShift(tsdf_volume_, getCameraPose (), 0.6 * volume_size_, true, perform_last_scan_, force_shift_);
+	force_shift_ = false;
+  } else {
+    force_shift_ = cyclical_.checkForShift(tsdf_volume_, getCameraPose (), 0.6 * volume_size_, false, perform_last_scan_, force_shift_);
+  }
+ 
+  if(has_shifted)
+    PCL_WARN ("SHIFTING\n");
+
   // get NEW local rotation 
   Matrix3frm cam_rot_local_curr_inv = cam_rot_global_curr.inverse ();
   Mat33&  device_cam_rot_local_curr_inv = device_cast<Mat33> (cam_rot_local_curr_inv);

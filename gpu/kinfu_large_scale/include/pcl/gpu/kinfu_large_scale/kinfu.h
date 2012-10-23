@@ -217,6 +217,14 @@ namespace pcl
 			force_shift_ = true;
 		}
 
+		void clearForceShift() {
+			force_shift_ = false;
+		}
+
+		bool shiftNextTime() {
+			return force_shift_;
+		}
+
       private:
 
 		/** \brief Immediate shifting */
