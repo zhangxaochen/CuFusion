@@ -42,7 +42,7 @@
 
 
 bool 
-pcl::gpu::CyclicalBuffer::checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift, const bool last_shift, const bool force_shift)
+pcl::gpu::CyclicalBuffer::checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift, const bool last_shift, const bool force_shift)
 {
   bool result = false;
 
@@ -67,14 +67,14 @@ pcl::gpu::CyclicalBuffer::checkForShift (const pcl::gpu::TsdfVolume::Ptr volume,
 
   // perform shifting operations
   if (result)
-    performShift (volume, targetPoint, last_shift);
+    performShift (volume, color, targetPoint, last_shift);
 
   return (result);
 }
 
 
 void
-pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::PointXYZ &target_point, const bool last_shift)
+pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const pcl::PointXYZ &target_point, const bool last_shift)
 {
   // compute new origin and offsets
   int offset_x, offset_y, offset_z;
@@ -160,7 +160,7 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
   }
 
   // shift buffer addresses
-  shiftOrigin (volume, offset_x, offset_y, offset_z);
+  shiftOrigin (volume, color, offset_x, offset_y, offset_z);
   
   // push existing data in the TSDF buffer
   //if (previously_existing_slice->points.size () != 0 ) {

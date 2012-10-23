@@ -41,6 +41,7 @@
 
 #include <pcl/point_types.h>
 #include <pcl/gpu/kinfu_large_scale/tsdf_volume.h>
+#include <pcl/gpu/kinfu_large_scale/color_volume.h>
 #include <pcl/gpu/kinfu_large_scale/tsdf_buffer.h>
 #include <Eigen/Core>
 #include <cuda_runtime.h>
@@ -111,7 +112,7 @@ namespace pcl
           * \param[in] last_shift if set to true, the whole cube will be shifted. This is used to push the whole cube to the world model.
           * \return true is the cube needs to be or has been shifted.
           */
-        bool checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift = true, const bool last_shift = false, const bool force_shift = false);
+        bool checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift = true, const bool last_shift = false, const bool force_shift = false);
         
         /** \brief Perform shifting operations:
             Compute offsets.
@@ -125,7 +126,7 @@ namespace pcl
           * \param[in] target_point target point around which the new cube will be centered
           * \param[in] last_shift if set to true, the whole cube will be shifted. This is used to push the whole cube to the world model.
           */
-        void performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::PointXYZ &target_point, const bool last_shift = false);
+        void performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const pcl::PointXYZ &target_point, const bool last_shift = false);
 
         /** \brief Sets the distance threshold between cube's center and target point that triggers a shift.
           * \param[in] threshold the distance in meters at which to trigger shift.
@@ -177,24 +178,32 @@ namespace pcl
         /** \brief Initializes memory pointers of the  cyclical buffer (start, end, current origin)
           * \param[in] tsdf_volume pointer to the TSDF volume managed by this cyclical buffer
           */ 
-        void initBuffer (pcl::gpu::TsdfVolume::Ptr tsdf_volume)
+        void initBuffer (pcl::gpu::TsdfVolume::Ptr tsdf_volume, pcl::gpu::ColorVolume::Ptr color_volume)
         {
           PtrStep<short2> localVolume = tsdf_volume->data();
           
           buffer_.tsdf_memory_start = &(localVolume.ptr (0)[0]);
           buffer_.tsdf_memory_end = &(localVolume.ptr (buffer_.voxels_size.y * (buffer_.voxels_size.z - 1) + (buffer_.voxels_size.y - 1) )[buffer_.voxels_size.x - 1]);
           buffer_.tsdf_rolling_buff_origin = buffer_.tsdf_memory_start;
-        }
+
+		  if ( color_volume ) {
+			  PtrStep<uchar4> localColor = color_volume->data();
+          
+			  buffer_.color_memory_start = &(localColor.ptr (0)[0]);
+			  buffer_.color_memory_end = &(localColor.ptr (buffer_.voxels_size.y * (buffer_.voxels_size.z - 1) + (buffer_.voxels_size.y - 1) )[buffer_.voxels_size.x - 1]);
+			  buffer_.color_rolling_buff_origin = buffer_.color_memory_start;
+		  }
+		}
         
         /** \brief Reset buffer structure
           * \param[in] tsdf_volume pointer to the TSDF volume managed by this cyclical buffer
           */ 
-        void resetBuffer (pcl::gpu::TsdfVolume::Ptr tsdf_volume)
+        void resetBuffer (pcl::gpu::TsdfVolume::Ptr tsdf_volume, pcl::gpu::ColorVolume::Ptr color_volume)
         {
           buffer_.origin_GRID.x = 0; buffer_.origin_GRID.y = 0; buffer_.origin_GRID.z = 0;
           buffer_.origin_GRID_global.x = 0.f; buffer_.origin_GRID_global.y = 0.f; buffer_.origin_GRID_global.z = 0.f;
           buffer_.origin_metric.x = 0.f; buffer_.origin_metric.y = 0.f; buffer_.origin_metric.z = 0.f;
-          initBuffer (tsdf_volume);
+          initBuffer (tsdf_volume, color_volume);
         }
         
         /** \brief Return a pointer to the world model
@@ -229,7 +238,7 @@ namespace pcl
           * \param[in] offset_y offset in indices on axis Y
           * \param[in] offset_z offset in indices on axis Z
           */ 
-        void shiftOrigin (pcl::gpu::TsdfVolume::Ptr tsdf_volume, const int offset_x, const int offset_y, const int offset_z)
+        void shiftOrigin (pcl::gpu::TsdfVolume::Ptr tsdf_volume, pcl::gpu::ColorVolume::Ptr color_volume, const int offset_x, const int offset_y, const int offset_z)
         {
           // shift rolling origin (making sure they keep in [0 - NbVoxels[ )
           buffer_.origin_GRID.x += offset_x;
@@ -255,7 +264,12 @@ namespace pcl
           buffer_.tsdf_memory_start = &(localVolume.ptr (0)[0]);
           buffer_.tsdf_memory_end = &(localVolume.ptr (buffer_.voxels_size.y * (buffer_.voxels_size.z - 1) + (buffer_.voxels_size.y - 1) )[buffer_.voxels_size.x - 1]);
           buffer_.tsdf_rolling_buff_origin = &(localVolume.ptr (buffer_.voxels_size.y * (buffer_.origin_GRID.z) + (buffer_.origin_GRID.y) )[buffer_.origin_GRID.x]);
-          
+
+          PtrStep<uchar4> localColor = color_volume->data();
+          buffer_.color_memory_start = &(localColor.ptr (0)[0]);
+          buffer_.color_memory_end = &(localColor.ptr (buffer_.voxels_size.y * (buffer_.voxels_size.z - 1) + (buffer_.voxels_size.y - 1) )[buffer_.voxels_size.x - 1]);
+          buffer_.color_rolling_buff_origin = &(localColor.ptr (buffer_.voxels_size.y * (buffer_.origin_GRID.z) + (buffer_.origin_GRID.y) )[buffer_.origin_GRID.x]);
+
           // update global origin
           buffer_.origin_GRID_global.x += offset_x;
           buffer_.origin_GRID_global.y += offset_y;

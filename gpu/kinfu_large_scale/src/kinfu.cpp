@@ -111,7 +111,7 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
   reset ();
   
   // initialize cyclical buffer
-  cyclical_.initBuffer(tsdf_volume_);
+  //cyclical_.initBuffer(tsdf_volume_, color_volume_);
 
 }
 
@@ -217,16 +217,12 @@ pcl::gpu::KinfuTracker::reset ()
   tvecs_.push_back (init_tcam_);
 
   tsdf_volume_->reset ();
-  
-  // reset cyclical buffer as well
-  cyclical_.resetBuffer (tsdf_volume_);
-  
-
-   
-
     
   if (color_volume_) // color integration mode is enabled
     color_volume_->reset ();    
+
+  // reset cyclical buffer as well
+  cyclical_.resetBuffer (tsdf_volume_, color_volume_);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -495,10 +491,10 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw)
 
   bool has_shifted = false;
   if ( force_shift_ ) {
-	has_shifted = cyclical_.checkForShift(tsdf_volume_, getCameraPose (), 0.6 * volume_size_, true, perform_last_scan_, force_shift_);
+	has_shifted = cyclical_.checkForShift(tsdf_volume_, color_volume_, getCameraPose (), 0.6 * volume_size_, true, perform_last_scan_, force_shift_);
 	force_shift_ = false;
   } else {
-    force_shift_ = cyclical_.checkForShift(tsdf_volume_, getCameraPose (), 0.6 * volume_size_, false, perform_last_scan_, force_shift_);
+    force_shift_ = cyclical_.checkForShift(tsdf_volume_, color_volume_, getCameraPose (), 0.6 * volume_size_, false, perform_last_scan_, force_shift_);
   }
  
   if(has_shifted)
@@ -664,6 +660,7 @@ void
 pcl::gpu::KinfuTracker::initColorIntegration(int max_weight)
 {     
   color_volume_ = pcl::gpu::ColorVolume::Ptr( new ColorVolume(*tsdf_volume_, max_weight) );  
+  cyclical_.initBuffer(tsdf_volume_, color_volume_);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
