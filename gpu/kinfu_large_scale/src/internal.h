@@ -390,7 +390,7 @@ namespace pcl
       * \return number of point stored to passed buffer
       */ 
     PCL_EXPORTS size_t 
-    extractCloud (const PtrStep<short2>& volume, const float3& volume_size, PtrSz<PointType> output);
+    extractCloud (const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, PtrSz<PointType> output);
 
     /** \brief Perform point cloud extraction of a slice from tsdf volume
       * \param[in] volume tsdf volume on GPU
@@ -416,7 +416,10 @@ namespace pcl
     void 
     extractNormals (const PtrStep<short2>& volume, const float3& volume_size, const PtrSz<PointType>& input, NormalType* output);
 
-    /** \brief Performs colors exctraction from color volume
+	void 
+    extractNormalsInSpace (const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, const PtrSz<PointType>& input);
+
+	/** \brief Performs colors exctraction from color volume
       * \param[in] color_volume color volume
       * \param[in] volume_size volume size
       * \param[in] points points for which color are computed

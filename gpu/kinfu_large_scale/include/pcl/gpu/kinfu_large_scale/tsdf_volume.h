@@ -128,7 +128,7 @@ namespace pcl
         * \return DeviceArray with disabled reference counting that points to filled part of cloud_buffer.
         */
       DeviceArray<PointType>
-      fetchCloud (DeviceArray<PointType>& cloud_buffer) const;
+      fetchCloud (DeviceArray<PointType>& cloud_buffer, const pcl::gpu::tsdf_buffer* buffer) const;
 
         /** \brief Push a point cloud of previously scanned tsdf slice to the TSDF volume
           * \param[in] existingCloud point cloud pointer to the existing data. This data will be pushed to the TSDf volume. The points with indices outside the range [0 ... VOLUME_X - 1][0 ... VOLUME_Y - 1][0 ... VOLUME_Z - 1] will not be added.
@@ -154,6 +154,9 @@ namespace pcl
 
       void
       fetchNormals (const DeviceArray<PointType>& cloud, DeviceArray<PointType>& normals) const;
+
+  	  void
+	  fetchNormalsInSpace (const DeviceArray<PointType>& cloud, const pcl::gpu::tsdf_buffer* buffer) const;
 
       /** \brief Computes normals as gradient of tsdf for given points
         * \param[in] cloud Points where normals are computed.

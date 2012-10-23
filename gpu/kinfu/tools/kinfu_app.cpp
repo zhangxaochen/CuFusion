@@ -1237,7 +1237,7 @@ print_cli_help ()
   cout << "    --registration, -r              : enable registration mode" << endl; 
   cout << "    --integrate-colors, -ic         : enable color integration mode (allows to get cloud with colors)" << endl;   
   cout << "    -volume_size <size_in_meters>   : define integration volume size" << endl;
-  cout << "    -record <oni_file>              : record the stream to .oni file" << endl;
+  cout << "    -record                         : record the stream to .oni file" << endl;
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
   cout << "";
