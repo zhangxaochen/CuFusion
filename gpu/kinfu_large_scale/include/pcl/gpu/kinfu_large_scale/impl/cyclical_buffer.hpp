@@ -135,7 +135,8 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
   double new_origin_x = buffer_.origin_GRID_global.x + offset_x;
   double new_origin_y = buffer_.origin_GRID_global.y + offset_y;
   double new_origin_z = buffer_.origin_GRID_global.z + offset_z;
-  
+
+  /*
   world_model_.getExistingData (buffer_.origin_GRID_global.x, buffer_.origin_GRID_global.y, buffer_.origin_GRID_global.z,
                                 offset_x, offset_y, offset_z,
                                 buffer_.voxels_size.x - 1, buffer_.voxels_size.y - 1, buffer_.voxels_size.z - 1,
@@ -150,15 +151,18 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
   PCL_INFO ("world contains %d points after update\n", world_model_.getWorldSize ());
   world_model_.cleanWorldFromNans ();                               
   PCL_INFO ("world contains %d points after cleaning\n", world_model_.getWorldSize ());
+  */
 
   // clear buffer slice and update the world model
   pcl::device::clearTSDFSlice (volume->data (), &buffer_, offset_x, offset_y, offset_z);
   pcl::device::clearColorSlice (color->data (), &buffer_, offset_x, offset_y, offset_z);
 
+  /*
   // insert current slice in the world if it contains any points
   if (current_slice->points.size () != 0) {
     world_model_.addSlice(current_slice);
   }
+  */
 
   // shift buffer addresses
   shiftOrigin (volume, color, offset_x, offset_y, offset_z);

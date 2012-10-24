@@ -648,7 +648,7 @@ struct KinFuLSApp
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
-    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0)
+    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -733,6 +733,55 @@ struct KinFuLSApp
   }
 
   void
+  toggleScriptRecord()
+  {
+	record_script_ = true;
+	cout << "Script record: " << ( record_script_ ? "On" : "Off ( requires triggerd mode )" ) << endl;
+  }
+
+  void
+  toggleScriptPlay( string script_file )
+  {
+    FILE * f = fopen( script_file.c_str(), "r" );
+	if ( f != NULL ) {
+      char buffer[1024];
+	  while ( fgets( buffer, 1024, f ) != NULL ) {
+		if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
+		  script_frames_.push( ScriptAction( buffer[ 0 ], atoi( buffer + 2 ) ) );
+		}
+	  }
+      play_script_ = true;
+	  cout << "Script contains " << script_frames_.size() << " shifting actions." << endl;
+	  fclose ( f );
+	}
+	cout << "Script play: " << ( play_script_ ? "On" : "Off ( requires triggerd mode )" ) << endl;
+  }
+
+  void
+  writeScriptFile()
+  {
+    time_t rawtime;
+    struct tm *timeinfo;
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    char strFileName[ 1024 ];
+    sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.script",
+        timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+
+    printf("Creating script file %s\n", strFileName);
+	FILE * f = fopen( strFileName, "w" );
+
+	if ( f != NULL ) {
+	  while ( script_frames_.empty() == false ) {
+		fprintf( f, "%c %d\n", script_frames_.front().action_, script_frames_.front().frame_ );
+		script_frames_.pop();
+	  }
+	}
+
+	fclose( f );
+  }
+
+  void
   toggleIndependentCamera()
   {
     independent_camera_ = !independent_camera_;
@@ -754,8 +803,23 @@ struct KinFuLSApp
   void execute(const PtrStepSz<const unsigned short>& depth, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool has_data)
   {        
     bool has_image = false;
-    frame_counter_++;
+
+	if ( has_data ) {
+      frame_counter_++;
+	}
     
+	if ( record_script_ ) {
+	  if ( kinfu_->shiftNextTime() ) {
+		script_frames_.push( ScriptAction( 'g', frame_counter_ ) );
+	  }
+	}
+	if ( play_script_ ) {
+	  if ( script_frames_.empty() == false && frame_counter_ == script_frames_.front().frame_ && 'g' == script_frames_.front().action_ ) {
+  		script_frames_.pop();
+	  	kinfu_->forceShift();
+	  }
+	}
+
 	if ( kinfu_->shiftNextTime() ) {
 		scene_cloud_view_.show( *kinfu_, integrate_colors_ );
 		if(scene_cloud_view_.point_colors_ptr_->points.empty()) // no colors
@@ -801,6 +865,14 @@ struct KinFuLSApp
 		if ( has_data == false ) {
 			kinfu_->clearForceShift();
 		}
+	}
+
+	if ( play_script_ ) {
+	  if ( script_frames_.empty() == false && frame_counter_ == script_frames_.front().frame_ && 'q' == script_frames_.front().action_ ) {
+  		script_frames_.pop();
+		exit_ = true;
+		return;
+	  }
 	}
 
     if (has_data)
@@ -984,10 +1056,18 @@ struct KinFuLSApp
 
 			while (!exit_ && !scene_cloud_view_.cloud_viewer_.wasStopped () && !image_view_.viewerScene_.wasStopped () && !this->kinfu_->isFinished ())
 			{ 
-				if (triggered_capture)
-					capture_.start(); // Triggers new frame
+				//if (triggered_capture)
+				//	capture_.start(); // Triggers new frame
 
-				bool has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
+				//bool has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
+				bool has_data;
+				if (triggered_capture) {
+					capture_.start(); // Triggers new frame
+					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
+					has_data = has_data && ( ( pcl::ONIGrabber * )( &capture_ ) )->data_updated_;
+				} else {
+					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
+				}
 
 				try { this->execute (depth_, rgb24_, has_data); }
 				catch (const std::bad_alloc& /*e*/) { cout << "Bad alloc" << endl; break; }
@@ -1001,6 +1081,13 @@ struct KinFuLSApp
 
 			if (!triggered_capture)     
 				capture_.stop (); // Stop stream
+
+			if ( record_script_ ) {
+				script_frames_.push( ScriptAction( 'q', frame_counter_ ) );
+				writeScriptFile ();
+			}
+
+			cout << "Total " << frame_counter_ << " frames processed." << endl;
 		}
 		c.disconnect();
 	}
@@ -1056,8 +1143,8 @@ struct KinFuLSApp
     cout << "   1,2,3 : save cloud to PCD(binary), PCD(ASCII), PLY(ASCII)" << endl;
     cout << "    7,8  : save mesh to PLY, VTK" << endl;
     cout << "   X, V  : TSDF volume utility" << endl;
-    cout << "   L, l  : On the next shift, KinFu will extract the whole current cube, extract the world and stop" << endl;
-    cout << "   S, s  : On the next shift, KinFu will extract the world and stop" << endl;
+    //cout << "   L, l  : On the next shift, KinFu will extract the whole current cube, extract the world and stop" << endl;
+    //cout << "   S, s  : On the next shift, KinFu will extract the world and stop" << endl;
     cout << endl;
   }  
 
@@ -1069,6 +1156,16 @@ struct KinFuLSApp
   int file_index_;
   Eigen::Matrix4f transformation_;
   Eigen::Matrix4f transformation_inverse_;
+
+  struct ScriptAction {
+	  char action_;
+	  int frame_;
+	  ScriptAction( char a, int f ) : action_(a), frame_(f) {}
+  };
+
+  queue< ScriptAction > script_frames_;
+  bool record_script_;
+  bool play_script_;
 
   bool independent_camera_;
   int frame_counter_;
@@ -1126,8 +1223,8 @@ struct KinFuLSApp
       case (int)'c': case (int)'C': app->scene_cloud_view_.clearClouds (true); break;
       case (int)'i': case (int)'I': app->toggleIndependentCamera (); break;
       case (int)'b': case (int)'B': app->scene_cloud_view_.toggleCube(app->kinfu_->volume().getSize()); break;
-      case (int)'l': case (int)'L': app->kinfu_->performLastScan (); break;
-	  case (int)'s': case (int)'S': app->kinfu_->extractAndMeshWorld (); break;
+      //case (int)'l': case (int)'L': app->kinfu_->performLastScan (); break;
+	  //case (int)'s': case (int)'S': app->kinfu_->extractAndMeshWorld (); break;
       case (int)'7': case (int)'8': app->writeMesh (key - (int)'0'); break;  
       case (int)'1': case (int)'2': case (int)'3': app->writeCloud (key - (int)'0'); break;      
       case '*': app->image_view_.toggleImagePaint (); break;
@@ -1256,6 +1353,9 @@ print_cli_help ()
   cout << "    --volume_size <in_meters>, -vs      : define integration volume size" << endl;
   cout << "    --shifting_distance <in_meters>, -sd : define shifting threshold (distance target-point / cube center)" << endl;
   cout << "    --snapshot_rate <X_frames>, -sr     : Extract RGB textures every <X_frames>. Default: 45  " << endl;
+  cout << "    --record                            : record the stream to .oni file" << endl;
+  cout << "    --record_script                     : record playback script file" << endl;
+  cout << "    --play_script <script file>         : playback script file" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -1292,7 +1392,7 @@ main (int argc, char* argv[])
 	xnLogSetMaskMinSeverity(XN_LOG_MASK_ALL, XN_LOG_VERBOSE);
   }
 
-  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir;
+  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file;
   try
   {    
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
@@ -1372,6 +1472,13 @@ main (int argc, char* argv[])
     
   if (pc::find_switch (argc, argv, "--extract-textures") || pc::find_switch (argc, argv, "-et"))      
     app.enable_texture_extraction_ = true;
+
+  if (triggered_capture) {
+    if (pc::find_switch (argc, argv, "--record_script"))
+	  app.toggleScriptRecord();
+	else if (pc::parse_argument (argc, argv, "--play_script", script_file) > 0)
+	  app.toggleScriptPlay( script_file );
+  }
 
   // executing
   if (triggered_capture) std::cout << "Capture mode: triggered\n";

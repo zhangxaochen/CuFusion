@@ -453,6 +453,7 @@ namespace pcl
             continue;
 
         // project to current cam
+		// old code
         int2 coo =
         {
           __float2int_rn (v_x * inv_z + intr.cx),
@@ -482,6 +483,51 @@ namespace pcl
             pack_tsdf (tsdf_new, weight_new, *pos);
           }
         }
+
+		/*
+		// this time, we need an interpolation to get the depth value
+		float2 coof = { v_x * inv_z + intr.cx, v_y * inv_z + intr.cy };
+        int2 coo =
+        {
+          __float2int_rd (v_x * inv_z + intr.cx),
+          __float2int_rd (v_y * inv_z + intr.cy)
+        };
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols - 1 && coo.y < depthScaled.rows - 1 )         //6
+        {
+          //float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+		  float a = coof.x - coo.x;
+		  float b = coof.y - coo.y;
+		  float d00 = depthScaled.ptr (coo.y)[coo.x];
+		  float d01 = depthScaled.ptr (coo.y+1)[coo.x];
+		  float d10 = depthScaled.ptr (coo.y)[coo.x+1];
+		  float d11 = depthScaled.ptr (coo.y+1)[coo.x+1];
+
+          float Dp_scaled = 0;
+
+		  if ( d00 != 0 && d01 != 0 && d10 != 0 && d11 != 0 && a > 0 && a < 1 && b > 0 && b < 1 )
+		    Dp_scaled = ( 1 - b ) * ( ( 1 - a ) * d00 + ( a ) * d10 ) + ( b ) * ( ( 1 - a ) * d01 + ( a ) * d11 );
+
+          float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters
+          {
+            float tsdf = fmin (1.0f, sdf * tranc_dist_inv);
+
+            //read and unpack
+            float tsdf_prev;
+            int weight_prev;
+            unpack_tsdf (*pos, tsdf_prev, weight_prev);
+
+            const int Wrk = 1;
+
+            float tsdf_new = (tsdf_prev * weight_prev + Wrk * tsdf) / (weight_prev + Wrk);
+            int weight_new = min (weight_prev + Wrk, Tsdf::MAX_WEIGHT);
+
+            pack_tsdf (tsdf_new, weight_new, *pos);
+          }		  
+		}
+		*/
       }       // for(int z = 0; z < VOLUME_Z; ++z)
     }      // __global__
 
