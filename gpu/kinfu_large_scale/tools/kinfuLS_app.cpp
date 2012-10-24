@@ -647,8 +647,8 @@ struct KinFuLSApp
 {
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
-  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
-    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false)
+  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
+    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -730,6 +730,14 @@ struct KinFuLSApp
       integrate_colors_ = true;      
     }    
     cout << "Color integration: " << (integrate_colors_ ? "On" : "Off ( requires registration mode )") << endl;
+  }
+
+  void toggleRecording()
+  {
+    if ( use_device_ && registration_ ) {
+      recording_ = true;
+	}
+    cout << "Recording ONI: " << (recording_ ? "On" : "Off ( requires registration mode )") << endl;
   }
 
   void
@@ -985,8 +993,62 @@ struct KinFuLSApp
       image_wrapper->fillRGB(rgb24_.cols, rgb24_.rows, (unsigned char*)&source_image_data_[0]);
       rgb24_.data = &source_image_data_[0];    
       
+	  if ( recording_ ) {
+		xn_depth_.CopyFrom( depth_wrapper->getDepthMetaData() );
+		xn_image_.CopyFrom( image_wrapper->getMetaData() );
+	  }
     }
     data_ready_cond_.notify_one();
+  }
+
+void startRecording() {
+    pcl::OpenNIGrabber * current_grabber = ( pcl::OpenNIGrabber * )( &capture_ );
+	openni_wrapper::OpenNIDevice & device = * current_grabber->getDevice();
+	xn::Context & context = device.getContext();
+    cout << "Synchronization mode : " << ( device.isSynchronized() ? "On" : "Off" ) << endl;
+
+	xn::EnumerationErrors errors;
+    XnStatus rc;
+	rc = device.getContext().CreateAnyProductionTree( XN_NODE_TYPE_RECORDER, NULL, xn_recorder_, &errors );
+    CHECK_RC_ERR(rc, "Create recorder", errors);
+
+    time_t rawtime;
+    struct tm *timeinfo;
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    XnChar strFileName[XN_FILE_MAX_PATH];
+    sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.oni",
+        timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    xn_recorder_.SetDestination(XN_RECORD_MEDIUM_FILE, strFileName);
+    printf("Creating recording file %s\n", strFileName);
+
+	//XnUInt64 nprop;
+	//device.getDepthGenerator().GetIntProperty( "InputFormat", nprop );
+	//cout << nprop << endl;
+	//device.getDepthGenerator().GetIntProperty( "OutputFormat", nprop );
+	//cout << nprop << endl;
+	//device.getImageGenerator().GetIntProperty( "InputFormat", nprop );
+	//cout << nprop << endl;
+	//device.getImageGenerator().GetIntProperty( "OutputFormat", nprop );
+	//cout << nprop << endl;
+
+    // Create mock nodes based on the depth generator, to save depth
+	rc = context.CreateMockNodeBasedOn( device.getDepthGenerator(), NULL, xn_mock_depth_ );
+    CHECK_RC(rc, "Create depth node");
+    rc = xn_recorder_.AddNodeToRecording( xn_mock_depth_, XN_CODEC_16Z_EMB_TABLES );
+    CHECK_RC(rc, "Add depth node");
+	xn_mock_depth_.SetData( xn_depth_ );
+
+    // Create mock nodes based on the image generator, to save image
+	rc = context.CreateMockNodeBasedOn( device.getImageGenerator(), NULL, xn_mock_image_ );
+    CHECK_RC(rc, "Create image node");
+    rc = xn_recorder_.AddNodeToRecording( xn_mock_image_, XN_CODEC_JPEG );
+    CHECK_RC(rc, "Add image node");
+	xn_mock_image_.SetData( xn_image_ );
+  }
+
+  void stopRecording() {
+    xn_recorder_.Release();
   }
 
 	void source_cb3(const pcl::PointCloud<pcl::PointXYZRGBA>::ConstPtr & DC3)
@@ -1051,8 +1113,12 @@ struct KinFuLSApp
 		{
 			boost::unique_lock<boost::mutex> lock(data_ready_mutex_);
 
-			if (!triggered_capture) 
+			if (!triggered_capture) {
 				capture_.start ();
+        		if ( recording_ ) {
+				  startRecording();
+				}
+			}
 
 			while (!exit_ && !scene_cloud_view_.cloud_viewer_.wasStopped () && !image_view_.viewerScene_.wasStopped () && !this->kinfu_->isFinished ())
 			{ 
@@ -1069,7 +1135,14 @@ struct KinFuLSApp
 					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
 				}
 
-				try { this->execute (depth_, rgb24_, has_data); }
+				try { 
+					this->execute (depth_, rgb24_, has_data); 
+					if ( recording_ && has_data ) {
+					xn_mock_depth_.SetData( xn_depth_, frame_counter_ - 1, frame_counter_ - 1 );
+					xn_mock_image_.SetData( xn_image_, frame_counter_ - 1, frame_counter_ - 1 );
+					xn_recorder_.Record();
+					}
+				}
 				catch (const std::bad_alloc& /*e*/) { cout << "Bad alloc" << endl; break; }
 				catch (const std::exception& /*e*/) { cout << "Exception" << endl; break; }
 
@@ -1079,8 +1152,12 @@ struct KinFuLSApp
 			exit_ = true;
 			boost::this_thread::sleep (boost::posix_time::millisec (100));
 
-			if (!triggered_capture)     
+			if (!triggered_capture) {
 				capture_.stop (); // Stop stream
+				if ( recording_ ) {
+					stopRecording();
+				}
+			}
 
 			if ( record_script_ ) {
 				script_frames_.push( ScriptAction( 'q', frame_counter_ ) );
@@ -1167,11 +1244,20 @@ struct KinFuLSApp
   bool record_script_;
   bool play_script_;
 
+  bool use_device_;
+  bool recording_;
+
   bool independent_camera_;
   int frame_counter_;
   bool enable_texture_extraction_;
   pcl::gpu::ScreenshotManager screenshot_manager_;
   int snapshot_rate_;
+
+  xn::MockDepthGenerator xn_mock_depth_;
+  xn::MockImageGenerator xn_mock_image_;
+  xn::DepthMetaData xn_depth_;
+  xn::ImageMetaData xn_image_;
+  xn::Recorder xn_recorder_;
 
   bool registration_;
   bool integrate_colors_;
@@ -1385,6 +1471,7 @@ main (int argc, char* argv[])
   boost::shared_ptr<pcl::Grabber> capture;
   bool triggered_capture = false;
   bool pcd_input = false;
+  bool use_device = false;
   
   if (pc::find_switch (argc, argv, "--verbose")) {
   	xnLogInitSystem();
@@ -1398,6 +1485,7 @@ main (int argc, char* argv[])
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
     {
       capture.reset (new pcl::OpenNIGrabber (openni_device));
+	  use_device = true;
     }
     else if (pc::parse_argument (argc, argv, "-oni", oni_file) > 0)
     {
@@ -1425,6 +1513,7 @@ main (int argc, char* argv[])
     else
     {
       capture.reset( new pcl::OpenNIGrabber() );
+	  use_device = true;
   
       //capture.reset( new pcl::ONIGrabber("d:/onis/20111013-224932.oni", true, true) );
       //capture.reset( new pcl::ONIGrabber("d:/onis/reg20111229-180846.oni, true, true) );    
@@ -1447,7 +1536,7 @@ main (int argc, char* argv[])
   pc::parse_argument (argc, argv, "--snapshot_rate", snapshot_rate);
   pc::parse_argument (argc, argv, "-sr", snapshot_rate);
 
-  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate);
+  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device);
   
   if (pc::parse_argument (argc, argv, "-eval", eval_folder) > 0)
     app.toggleEvaluationMode(eval_folder, match_file);
@@ -1470,6 +1559,9 @@ main (int argc, char* argv[])
   if (pc::find_switch (argc, argv, "--integrate-colors") || pc::find_switch (argc, argv, "-ic"))      
     app.toggleColorIntegration();
     
+  if (pc::find_switch (argc, argv, "--record") )
+    app.toggleRecording();
+
   if (pc::find_switch (argc, argv, "--extract-textures") || pc::find_switch (argc, argv, "-et"))      
     app.enable_texture_extraction_ = true;
 
