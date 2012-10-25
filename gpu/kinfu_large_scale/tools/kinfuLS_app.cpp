@@ -859,9 +859,12 @@ struct KinFuLSApp
 
 		//cout << "Update transformation matrix from:" << endl;
 		//cout << transformation_ << endl;
+		transformation_ = Eigen::Matrix4f::Identity();
 		transformation_(0,3) = kinfu_->getCyclicalBufferStructure()->origin_metric.x;
 		transformation_(1,3) = kinfu_->getCyclicalBufferStructure()->origin_metric.y;
 		transformation_(2,3) = kinfu_->getCyclicalBufferStructure()->origin_metric.z;
+
+		transformation_ = kinfu_->getInitTrans() * transformation_;
 
 		writeTransformation( file_index_, transformation_ );
 		//transformation_ = transformation_ * aff.matrix() * transformation_inverse_;

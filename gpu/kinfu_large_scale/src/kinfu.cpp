@@ -131,6 +131,8 @@ pcl::gpu::KinfuTracker::setInitialCameraPose (const Eigen::Affine3f& pose)
 {
   init_Rcam_ = pose.rotation ();
   init_tcam_ = pose.translation ();
+  init_rev_ = pose.matrix().inverse();
+  init_trans_ = Eigen::Matrix4f::Identity();
   reset ();
 }
 
@@ -195,8 +197,11 @@ pcl::gpu::KinfuTracker::extractAndMeshWorld ()
 void
 pcl::gpu::KinfuTracker::reset ()
 {
-  if (global_time_)
+  if (global_time_) {
     PCL_WARN ("Reset\n");
+	// update init_trans_ to transform current coordinate to global_time_0 coordinate
+	init_trans_ = init_trans_ * getCameraPose().matrix() * init_rev_;
+  }
     
   // dump current world to a pcd file
   /*
@@ -591,6 +596,13 @@ pcl::gpu::KinfuTracker::getCameraPose (int time) const
   aff.translation () = tvecs_[time];
   return (aff);
 }
+
+Eigen::Matrix4f
+pcl::gpu::KinfuTracker::getInitTrans() const
+{
+	return init_trans_;
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 size_t

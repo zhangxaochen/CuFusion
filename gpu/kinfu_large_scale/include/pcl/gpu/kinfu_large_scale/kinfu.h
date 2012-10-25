@@ -160,6 +160,9 @@ namespace pcl
         Eigen::Affine3f
         getCameraPose (int time = -1) const;
 
+		Eigen::Matrix4f
+		getInitTrans() const;
+
         /** \brief Returns number of poses including initial */
         size_t
         getNumberOfPoses () const;
@@ -268,6 +271,9 @@ namespace pcl
 
         /** \brief Initial camera position in volume coo space. */
         Vector3f   init_tcam_;
+
+		Eigen::Matrix4f init_rev_;
+		Eigen::Matrix4f init_trans_;
 
         /** \brief array with IPC iteration numbers for each pyramid level */
         int icp_iterations_[LEVELS];
