@@ -80,6 +80,7 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
   int offset_x, offset_y, offset_z;
   computeAndSetNewCubeMetricOrigin (target_point, offset_x, offset_y, offset_z);
     
+  /*
   // extract current slice from the TSDF volume (coordinates are in indices! (see fetchSliceAsCloud() )
   DeviceArray<PointXYZ> points;
   DeviceArray<float> intensities;
@@ -128,6 +129,7 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
   global_cloud_transformation.translation ()[2] = buffer_.origin_GRID_global.z;
   global_cloud_transformation.linear () = Eigen::Matrix3f::Identity ();
   transformPointCloud (*current_slice, *current_slice, global_cloud_transformation);
+  */
 
   // retrieve existing data from the world model
   PointCloud<PointXYZI>::Ptr previously_existing_slice (new  PointCloud<PointXYZI>);

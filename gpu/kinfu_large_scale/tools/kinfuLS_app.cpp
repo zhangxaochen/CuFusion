@@ -1129,10 +1129,10 @@ void startRecording() {
 				bool has_data;
 				if (triggered_capture) {
 					capture_.start(); // Triggers new frame
-					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
+					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
 					has_data = has_data && ( ( pcl::ONIGrabber * )( &capture_ ) )->data_updated_;
 				} else {
-					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
+					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
 				}
 
 				try { 
@@ -1150,7 +1150,7 @@ void startRecording() {
 				//~ cout << "In main loop" << endl;                  
 			} 
 			exit_ = true;
-			boost::this_thread::sleep (boost::posix_time::millisec (100));
+			boost::this_thread::sleep (boost::posix_time::millisec (300));
 
 			if (!triggered_capture) {
 				capture_.stop (); // Stop stream
