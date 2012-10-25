@@ -44,6 +44,8 @@
 #include <pcl/point_cloud.h>
 #include <Eigen/Core>
 
+#include <pcl/gpu/kinfu_large_scale/tsdf_buffer.h>
+
 namespace pcl
 {
   namespace gpu
@@ -85,7 +87,7 @@ namespace pcl
         * \param[out] colors output array for colors
         */
       void
-      fetchColors (const DeviceArray<PointType>& cloud, DeviceArray<RGB>& colors) const; 
+      fetchColors (const DeviceArray<PointType>& cloud, DeviceArray<RGB>& colors, const pcl::gpu::tsdf_buffer* buffer) const; 
 
     private:
       /** \brief Volume resolution */

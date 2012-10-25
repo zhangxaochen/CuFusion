@@ -96,7 +96,7 @@ namespace pcl
       }
 
       __device__ __forceinline__ void
-      operator () () const
+      operator () (pcl::gpu::tsdf_buffer buffer) const
       {
         int x = threadIdx.x + blockIdx.x * CTA_SIZE_X;
         int y = threadIdx.y + blockIdx.y * CTA_SIZE_Y;
@@ -128,7 +128,7 @@ namespace pcl
           if (x < VOLUME_X && y < VOLUME_Y)
           {
             int W;
-            float F = fetch (x, y, z, W);
+            float F = fetch (buffer, x, y, z, W);
 
             if (W != 0 && F != 1.f)
             {
@@ -138,7 +138,7 @@ namespace pcl
               if (x + 1 < VOLUME_X)
               {
                 int Wn;
-                float Fn = fetch (x + 1, y, z, Wn);
+                float Fn = fetch (buffer, x + 1, y, z, Wn);
 
                 if (Wn != 0 && Fn != 1.f)
                   if ( (F > 0 && Fn < 0) || (F < 0 && Fn > 0) )
@@ -160,7 +160,7 @@ namespace pcl
               if (y + 1 < VOLUME_Y)
               {
                 int Wn;
-                float Fn = fetch (x, y + 1, z, Wn);
+                float Fn = fetch (buffer, x, y + 1, z, Wn);
 
                 if (Wn != 0 && Fn != 1.f)
                   if ( (F > 0 && Fn < 0) || (F < 0 && Fn > 0) )
@@ -182,7 +182,7 @@ namespace pcl
               // if (z + 1 < VOLUME_Z) // guaranteed by loop
               {
                 int Wn;
-                float Fn = fetch (x, y, z + 1, Wn);
+                float Fn = fetch (buffer, x, y, z + 1, Wn);
 
                 if (Wn != 0 && Fn != 1.f)
                   if ((F > 0 && Fn < 0) || (F < 0 && Fn > 0))
@@ -407,9 +407,9 @@ namespace pcl
     };
 
     __global__ void
-    extractKernel (const FullScan6 fs) 
+    extractKernel (const FullScan6 fs, pcl::gpu::tsdf_buffer buffer) 
     {
-      fs ();
+      fs (buffer);
     }
 
     __global__ void
@@ -422,7 +422,7 @@ namespace pcl
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 size_t
-pcl::device::extractCloud (const PtrStep<short2>& volume, const float3& volume_size, PtrSz<PointType> output_xyz)
+pcl::device::extractCloud (const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, PtrSz<PointType> output_xyz)
 {
   FullScan6 fs;
   fs.volume = volume;
@@ -434,7 +434,7 @@ pcl::device::extractCloud (const PtrStep<short2>& volume, const float3& volume_s
   dim3 block (CTA_SIZE_X, CTA_SIZE_Y);
   dim3 grid (divUp (VOLUME_X, block.x), divUp (VOLUME_Y, block.y));
 
-  extractKernel<<<grid, block>>>(fs);
+  extractKernel<<<grid, block>>>(fs, *buffer);
   cudaSafeCall ( cudaGetLastError () );
   cudaSafeCall ( cudaDeviceSynchronize () );
 
@@ -726,3 +726,175 @@ using namespace pcl::device;
 template void pcl::device::extractNormals<PointType>(const PtrStep<short2>&volume, const float3 &volume_size, const PtrSz<PointType>&input, PointType * output);
 template void pcl::device::extractNormals<float8>(const PtrStep<short2>&volume, const float3 &volume_size, const PtrSz<PointType>&input, float8 * output);
 
+namespace pcl
+{
+  namespace device
+  {
+    struct ExtractNormalsInSpace
+    {
+      float3 cell_size;
+      PtrStep<short2> volume;
+      mutable PtrSz<PointType> points;
+
+      __device__ __forceinline__ float
+      readTsdf (pcl::gpu::tsdf_buffer buffer, int x, int y, int z) const
+      {
+        const short2* tmp_pos = &(volume.ptr (buffer.voxels_size.y * z + y)[x]);
+        short2* pos = const_cast<short2*> (tmp_pos);
+        shift_tsdf_pointer (&pos, buffer);
+        return unpack_tsdf (*pos);
+      }
+
+      __device__ __forceinline__ float3
+      fetchPoint (int idx) const
+      {
+        PointType p = points.data[idx];
+        return make_float3 (p.x, p.y, p.z);
+      }
+      __device__ __forceinline__ void
+      storeNormal (int idx, float3 normal) const
+      {
+        PointType n;
+        n.x = normal.x; n.y = normal.y; n.z = normal.z;
+        points[idx] = n;
+      }
+
+      __device__ __forceinline__ int3
+      getVoxel (const float3& point) const
+      {
+        int vx = __float2int_rd (point.x / cell_size.x);        // round to negative infinity
+        int vy = __float2int_rd (point.y / cell_size.y);
+        int vz = __float2int_rd (point.z / cell_size.z);
+
+        return make_int3 (vx, vy, vz);
+      }
+
+      __device__ __forceinline__ void
+      operator () ( pcl::gpu::tsdf_buffer buffer ) const
+      {
+        int idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+        if (idx >= points.size)
+          return;
+        const float qnan = numeric_limits<float>::quiet_NaN ();
+        float3 n = make_float3 (qnan, qnan, qnan);
+
+        float3 point = fetchPoint (idx);
+        int3 g = getVoxel (point);
+
+        if (g.x > 1 && g.y > 1 && g.z > 1 && g.x < VOLUME_X - 2 && g.y < VOLUME_Y - 2 && g.z < VOLUME_Z - 2)
+        {
+          float3 t;
+
+          t = point;
+          t.x += cell_size.x;
+          float Fx1 = interpolateTrilineary (buffer, t);
+
+          t = point;
+          t.x -= cell_size.x;
+          float Fx2 = interpolateTrilineary (buffer, t);
+
+          n.x = (Fx1 - Fx2);
+
+          t = point;
+          t.y += cell_size.y;
+          float Fy1 = interpolateTrilineary (buffer, t);
+
+          t = point;
+          t.y -= cell_size.y;
+          float Fy2 = interpolateTrilineary (buffer, t);
+
+          n.y = (Fy1 - Fy2);
+
+          t = point;
+          t.z += cell_size.z;
+          float Fz1 = interpolateTrilineary (buffer, t);
+
+          t = point;
+          t.z -= cell_size.z;
+          float Fz2 = interpolateTrilineary (buffer, t);
+
+          n.z = (Fz1 - Fz2);
+
+          n = normalized (n);
+        }
+        storeNormal (idx, n);
+      }
+
+      __device__ __forceinline__ float
+      interpolateTrilineary (pcl::gpu::tsdf_buffer buffer, const float3& point) const
+      {
+        int3 g = getVoxel (point);
+
+		// old code
+		/*
+        float vx = (g.x + 0.5f) * cell_size.x;
+        float vy = (g.y + 0.5f) * cell_size.y;
+        float vz = (g.z + 0.5f) * cell_size.z;
+
+        g.x = (point.x < vx) ? (g.x - 1) : g.x;
+        g.y = (point.y < vy) ? (g.y - 1) : g.y;
+        g.z = (point.z < vz) ? (g.z - 1) : g.z;
+
+        float a = (point.x - (g.x + 0.5f) * cell_size.x) / cell_size.x;
+        float b = (point.y - (g.y + 0.5f) * cell_size.y) / cell_size.y;
+        float c = (point.z - (g.z + 0.5f) * cell_size.z) / cell_size.z;
+
+        float res = readTsdf (g.x + 0, g.y + 0, g.z + 0) * (1 - a) * (1 - b) * (1 - c) +
+                    readTsdf (g.x + 0, g.y + 0, g.z + 1) * (1 - a) * (1 - b) * c +
+                    readTsdf (g.x + 0, g.y + 1, g.z + 0) * (1 - a) * b * (1 - c) +
+                    readTsdf (g.x + 0, g.y + 1, g.z + 1) * (1 - a) * b * c +
+                    readTsdf (g.x + 1, g.y + 0, g.z + 0) * a * (1 - b) * (1 - c) +
+                    readTsdf (g.x + 1, g.y + 0, g.z + 1) * a * (1 - b) * c +
+                    readTsdf (g.x + 1, g.y + 1, g.z + 0) * a * b * (1 - c) +
+                    readTsdf (g.x + 1, g.y + 1, g.z + 1) * a * b * c;
+        return res;
+		*/
+
+		// new code
+		float a = point.x/ cell_size.x - (g.x + 0.5f); if (a<0) { g.x--; a+=1.0f; };
+        float b = point.y/ cell_size.y - (g.y + 0.5f); if (b<0) { g.y--; b+=1.0f; };
+        float c = point.z/ cell_size.z - (g.z + 0.5f); if (c<0) { g.z--; c+=1.0f; };
+
+        float res = (1 - a) * ( 
+						(1 - b) * ( readTsdf (buffer, g.x + 0, g.y + 0, g.z + 0) * (1 - c) +
+								    readTsdf (buffer, g.x + 0, g.y + 0, g.z + 1) *    c  )
+							+ b * (	readTsdf (buffer, g.x + 0, g.y + 1, g.z + 0) * (1 - c) +
+									readTsdf (buffer, g.x + 0, g.y + 1, g.z + 1) *    c  )
+					) + a * (
+						(1 - b) * ( readTsdf (buffer, g.x + 1, g.y + 0, g.z + 0) * (1 - c) +
+									readTsdf (buffer, g.x + 1, g.y + 0, g.z + 1) *    c  )
+							+ b * (	readTsdf (buffer, g.x + 1, g.y + 1, g.z + 0) * (1 - c) +
+									readTsdf (buffer, g.x + 1, g.y + 1, g.z + 1) *    c  )
+					);
+
+        return res;
+      }
+    };
+
+    __global__ void
+    extractNormalsInSpaceKernel (const ExtractNormalsInSpace en, pcl::gpu::tsdf_buffer buffer) {
+      en (buffer);
+    }
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void
+pcl::device::extractNormalsInSpace (const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, 
+                             const PtrSz<PointType>& points)
+{
+  ExtractNormalsInSpace en;
+  en.volume = volume;
+  en.cell_size.x = volume_size.x / VOLUME_X;
+  en.cell_size.y = volume_size.y / VOLUME_Y;
+  en.cell_size.z = volume_size.z / VOLUME_Z;
+  en.points = points;
+
+  dim3 block (256);
+  dim3 grid (divUp (points.size, block.x));
+
+  extractNormalsInSpaceKernel<<<grid, block>>>(en, *buffer);
+  cudaSafeCall ( cudaGetLastError () );
+  cudaSafeCall (cudaDeviceSynchronize ());
+}

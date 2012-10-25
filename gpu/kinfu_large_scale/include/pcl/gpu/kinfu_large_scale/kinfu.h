@@ -144,14 +144,14 @@ namespace pcl
           * \param[in] Depth next frame with values in millimeters
           * \return true if can render 3D view.
           */
-        bool operator() (const DepthMap& depth);
+        bool operator() (const DepthMap& depth, const View * pcolor = NULL);
 
         /** \brief Processes next frame (both depth and color integration). Please call initColorIntegration before invpoking this.
           * \param[in] depth next depth frame with values in millimeters
           * \param[in] colors next RGB frame
           * \return true if can render 3D view.
           */
-        bool operator() (const DepthMap& depth, const View& colors);
+        //bool operator() (const DepthMap& depth, const View& colors);
 
         /** \brief Returns camera pose at given time, default the last pose
           * \param[in] time Index of frame for which camera pose is returned.
@@ -159,6 +159,9 @@ namespace pcl
           */
         Eigen::Affine3f
         getCameraPose (int time = -1) const;
+
+		Eigen::Matrix4f
+		getInitTrans() const;
 
         /** \brief Returns number of poses including initial */
         size_t
@@ -217,6 +220,14 @@ namespace pcl
 			force_shift_ = true;
 		}
 
+		void clearForceShift() {
+			force_shift_ = false;
+		}
+
+		bool shiftNextTime() {
+			return force_shift_;
+		}
+
       private:
 
 		/** \brief Immediate shifting */
@@ -260,6 +271,9 @@ namespace pcl
 
         /** \brief Initial camera position in volume coo space. */
         Vector3f   init_tcam_;
+
+		Eigen::Matrix4f init_rev_;
+		Eigen::Matrix4f init_trans_;
 
         /** \brief array with IPC iteration numbers for each pyramid level */
         int icp_iterations_[LEVELS];

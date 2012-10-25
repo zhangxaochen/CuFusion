@@ -309,9 +309,12 @@ namespace pcl
       */    
     void 
     updateColorVolume(const Intr& intr, float tranc_dist, const Mat33& R_inv, const float3& t, const MapArr& vmap, 
-            const PtrStepSz<uchar3>& colors, const float3& volume_size, PtrStep<uchar4> color_volume, int max_weight = 1);
+            const PtrStepSz<uchar3>& colors, const float3& volume_size, PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer* buffer, int max_weight = 1);
 
-    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    void 
+    clearColorSlice (PtrStep<uchar4> color_volume, pcl::gpu::tsdf_buffer* buffer, int shiftX, int shiftY, int shiftZ);
+
+	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Raycast and view generation        
     /** \brief Generation vertex and normal maps from volume for current camera pose
       * \param[in] intr camera intrinsices
@@ -390,7 +393,7 @@ namespace pcl
       * \return number of point stored to passed buffer
       */ 
     PCL_EXPORTS size_t 
-    extractCloud (const PtrStep<short2>& volume, const float3& volume_size, PtrSz<PointType> output);
+    extractCloud (const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, PtrSz<PointType> output);
 
     /** \brief Perform point cloud extraction of a slice from tsdf volume
       * \param[in] volume tsdf volume on GPU
@@ -416,14 +419,17 @@ namespace pcl
     void 
     extractNormals (const PtrStep<short2>& volume, const float3& volume_size, const PtrSz<PointType>& input, NormalType* output);
 
-    /** \brief Performs colors exctraction from color volume
+	void 
+    extractNormalsInSpace (const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, const PtrSz<PointType>& input);
+
+	/** \brief Performs colors exctraction from color volume
       * \param[in] color_volume color volume
       * \param[in] volume_size volume size
       * \param[in] points points for which color are computed
       * \param[out] colors output array with colors.
       */
     void 
-    exctractColors(const PtrStep<uchar4>& color_volume, const float3& volume_size, const PtrSz<PointType>& points, uchar4* colors);
+    exctractColors(const PtrStep<uchar4>& color_volume, const pcl::gpu::tsdf_buffer* buffer, const float3& volume_size, const PtrSz<PointType>& points, uchar4* colors);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Utility
