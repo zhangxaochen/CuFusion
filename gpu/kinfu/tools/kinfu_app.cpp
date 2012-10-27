@@ -349,7 +349,8 @@ struct ImageView
     viewerScene_.setPosition (0, 0);
     viewerDepth_.setWindowTitle ("Kinect Depth stream");
     viewerDepth_.setPosition (640, 0);
-    //viewerColor_.setWindowTitle ("Kinect RGB stream");
+    viewerColor_.setWindowTitle ("Kinect RGB stream");
+	viewerColor_.setPosition (640, 500);
   }
 
   void
@@ -374,8 +375,6 @@ struct ImageView
     view_device_.download (view_host_, cols);
     viewerScene_.showRGBImage (reinterpret_cast<unsigned char*> (&view_host_[0]), view_device_.cols (), view_device_.rows ());    
 
-    //viewerColor_.showRGBImage ((unsigned char*)&rgb24.data, rgb24.cols, rgb24.rows);
-
 #ifdef HAVE_OPENCV
     if (accumulate_views_)
     {
@@ -390,6 +389,13 @@ struct ImageView
   showDepth (const PtrStepSz<const unsigned short>& depth) 
   { 
     viewerDepth_.showShortImage (depth.data, depth.cols, depth.rows, 0, 5000, true); 
+  }
+  
+  void
+  showImage (const PtrStepSz<const KinfuTracker::PixelRGB> & rgb24)
+  {
+	const unsigned short * test = ( unsigned short * )rgb24.data;
+	viewerColor_.showRGBImage ((unsigned char *)rgb24.data, rgb24.cols, rgb24.rows, "short_image");
   }
   
   void
@@ -417,7 +423,7 @@ struct ImageView
 
   visualization::ImageViewer viewerScene_;
   visualization::ImageViewer viewerDepth_;
-  //visualization::ImageViewer viewerColor_;
+  visualization::ImageViewer viewerColor_;
 
   KinfuTracker::View view_device_;
   KinfuTracker::View colors_device_;
@@ -747,6 +753,9 @@ struct KinFuApp
       
       image_view_.showDepth (depth);
       //image_view_.showGeneratedDepth(kinfu_, kinfu_.getCameraPose());
+
+	  if (integrate_colors_)
+		  image_view_.showImage (rgb24);
     }
 
     if (scan_)
