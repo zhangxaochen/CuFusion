@@ -59,6 +59,12 @@ namespace pcl
 {
   namespace gpu
   {        
+    struct FramedTransformation {
+      int frame_;
+      Eigen::Matrix4f transformation_;
+      FramedTransformation( int f, Eigen::Matrix4f t ) : frame_( f ), transformation_( t ) {}
+    };
+
     /** \brief KinfuTracker class encapsulates implementation of Microsoft Kinect Fusion algorithm
       * \author Anatoly Baskeheev, Itseez Ltd, (myname.mysurname@mycompany.com)
       */
@@ -144,7 +150,7 @@ namespace pcl
           * \param[in] Depth next frame with values in millimeters
           * \return true if can render 3D view.
           */
-        bool operator() (const DepthMap& depth, const View * pcolor = NULL);
+        bool operator() (const DepthMap& depth, const View * pcolor = NULL, FramedTransformation * frame_ptr = NULL);
 
         /** \brief Processes next frame (both depth and color integration). Please call initColorIntegration before invpoking this.
           * \param[in] depth next depth frame with values in millimeters

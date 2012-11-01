@@ -272,7 +272,7 @@ pcl::gpu::KinfuTracker::allocateBufffers (int rows, int cols)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool
-pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcolor)
+pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcolor, FramedTransformation * frame_ptr)
 {  
   
   device::Intr intr (fx_, fy_, cx_, cy_);
@@ -440,6 +440,26 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr (level_index),
                           vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A.data (), b.data ());
 */
+
+		Eigen::Matrix<double, 6, 1> b_rgbd;
+		if ( frame_ptr != NULL ) {
+			Eigen::Matrix4f trans_rgbd = frame_ptr->transformation_ * getCameraPose( 0 ).matrix();		// <--- global should be like this
+			Eigen::Matrix4f trans_last = getCameraPose().matrix();
+			Eigen::Matrix4f trans_shift = trans_rgbd * trans_last.inverse();
+			// hack
+			b_rgbd( 0, 0 ) = ( trans_shift( 0, 1 ) - trans_shift( 1, 0 ) ) / 2.0;
+			b_rgbd( 1, 0 ) = ( trans_shift( 1, 2 ) - trans_shift( 2, 1 ) ) / 2.0;
+			b_rgbd( 2, 0 ) = ( trans_shift( 2, 0 ) - trans_shift( 0, 2 ) ) / 2.0;
+			b_rgbd( 3, 0 ) = trans_shift( 0, 3 );
+			b_rgbd( 4, 0 ) = trans_shift( 1, 3 );
+			b_rgbd( 5, 0 ) = trans_shift( 2, 3 );
+			cout << trans_shift << endl;
+			cout << b_rgbd << endl;
+
+			//A += 100.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
+			//b += 100.0 * b_rgbd;
+		}
+
         //checking nullspace
         double det = A.determinant ();
 
@@ -455,6 +475,11 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 
         Eigen::Matrix<float, 6, 1> result = A.llt ().solve (b).cast<float>();
         //Eigen::Matrix<float, 6, 1> result = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(b);
+
+		if ( frame_ptr != NULL ) {
+			//cout << result << endl;
+			//result = b_rgbd.cast<float>();
+		}
 
         float alpha = result (0);
         float beta  = result (1);
