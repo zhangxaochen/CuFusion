@@ -304,9 +304,11 @@ boost::shared_ptr<pcl::PolygonMesh> convertToMesh(const DeviceArray<PointXYZ>& t
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 struct RGBDTrajectory {
-	vector< Eigen::Matrix4f > data_;
+	vector< pcl::gpu::FramedTransformation > data_;
+	int index_;
 	void loadFromFile( string filename ) {
 		data_.clear();
+		index_ = 0;
 		int id1, id2, frame;
 		Matrix4f trans;
 		FILE * f = fopen( filename.c_str(), "r" );
@@ -315,13 +317,17 @@ struct RGBDTrajectory {
 		  while ( fgets( buffer, 1024, f ) != NULL ) {
 			if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
 			  sscanf( buffer, "%d %d %d", &id1, &id2, &frame);
-				fscanf_s( f, "%f %f %f %f", &trans(0,0), &trans(0,1), &trans(0,2), &trans(0,3) );
-				fscanf_s( f, "%f %f %f %f", &trans(1,0), &trans(1,1), &trans(1,2), &trans(1,3) );
-				fscanf_s( f, "%f %f %f %f", &trans(2,0), &trans(2,1), &trans(2,2), &trans(2,3) );
-				fscanf_s( f, "%f %f %f %f", &trans(3,0), &trans(3,1), &trans(3,2), &trans(3,3) );
+			  fgets( buffer, 1024, f );
+			  sscanf( buffer, "%f %f %f %f", &trans(0,0), &trans(0,1), &trans(0,2), &trans(0,3) );
+			  fgets( buffer, 1024, f );
+		      sscanf( buffer, "%f %f %f %f", &trans(1,0), &trans(1,1), &trans(1,2), &trans(1,3) );
+			  fgets( buffer, 1024, f );
+		      sscanf( buffer, "%f %f %f %f", &trans(2,0), &trans(2,1), &trans(2,2), &trans(2,3) );
+			  fgets( buffer, 1024, f );
+		      sscanf( buffer, "%f %f %f %f", &trans(3,0), &trans(3,1), &trans(3,2), &trans(3,3) );
+			  data_.push_back( FramedTransformation( frame, trans ) );
 			}
 		  }
-		  // qianyi : todo
 		  fclose ( f );
 		}
 	}
@@ -683,7 +689,8 @@ struct KinFuLSApp
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
-    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 ))
+    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
+	use_rgbdslam_ (false)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -802,6 +809,34 @@ struct KinFuLSApp
   }
 
   void
+  toggleRGBDSlam( string log_file )
+  {
+	  use_rgbdslam_ = true;
+	  rgbd_traj_.loadFromFile( log_file );
+
+	  // draw on traj buffer
+      Eigen::Vector4f sensor_origin( 0, 0, 0, 1 );
+      Eigen::Vector4f last_sensor_origin;
+	  for (unsigned int i = 1; i < rgbd_traj_.data_.size(); ++i) {
+		Eigen::Matrix4f world2base = rgbd_traj_.data_[ i ].transformation_;
+		Eigen::Affine3f world2base_aff( world2base );
+
+		last_sensor_origin = sensor_origin;
+		sensor_origin = Eigen::Vector4f(world2base_aff.translation()(0), world2base_aff.translation()(1), world2base_aff.translation()(2), 1.0f);
+
+        cv::Point2f p,q; //TODO: Use sub-pixel-accuracy
+		p.x = 320.0 + sensor_origin(0) * 100.0;
+		p.y = 240.0 - sensor_origin(2) * 100.0;
+		q.x = 320.0 + last_sensor_origin(0) * 100.0;
+		q.y = 240.0 - last_sensor_origin(2) * 100.0;
+        cv::line(traj_buffer_, p, q, cv::Scalar( 255, 0, 0 ), 1, 16);
+    }
+
+	  cout << "RGBD slam contains " << rgbd_traj_.data_.size() << " key frames." << endl;
+	  cout << "Use rgbd slam: " << ( use_rgbdslam_ ? "On" : "Off ( requires triggerd mode )" ) << endl;
+  }
+
+  void
   writeScriptFile()
   {
     time_t rawtime;
@@ -846,7 +881,7 @@ struct KinFuLSApp
 
   void drawTrajectory()
   {
-	traj_ = cv::Mat::zeros( 480, 640, CV_8UC3 );
+	traj_ = traj_buffer_.clone();
 	Eigen::Vector4d sensor_origin( 0, 0, 0, 1 );
 	Eigen::Vector4d last_sensor_origin;
     Eigen::Affine3f init_pose = kinfu_->getCameraPose(0);
@@ -864,7 +899,7 @@ struct KinFuLSApp
 		p.y = 240.0 - sensor_origin(2) * 100.0;
 		q.x = 320.0 + last_sensor_origin(0) * 100.0;
 		q.y = 240.0 - last_sensor_origin(2) * 100.0;
-        cv::line(traj_, p, q, cv::Scalar( 0, 128, 0 ), 1, 16);
+        cv::line(traj_, p, q, cv::Scalar( 0, 255, 0 ), 1, 16);
 
 		if ( i == kinfu_->getNumberOfPoses() - 1 ) {
 			Eigen::Vector4d ref = pose.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 1.5, 1.0 ) - init_origin;
@@ -962,9 +997,21 @@ struct KinFuLSApp
       {
         SampledScopeTime fps(time_ms_);
     
+		// check rgbdslam data
+		FramedTransformation * frame_ptr = NULL;
+		if ( use_rgbdslam_ && rgbd_traj_.index_ < rgbd_traj_.data_.size() && rgbd_traj_.data_[ rgbd_traj_.index_ ].frame_ == frame_counter_ ) {
+			// hit
+			//cout << "Frame #" << frame_counter_ << " is key frame with transformation matrix:" << endl;
+			//cout << rgbd_traj_.data_[ rgbd_traj_.index_ ].transformation_ << endl;
+			//cout << rgbd_traj_.data_[ rgbd_traj_.index_ ].transformation_ * kinfu_->getCameraPose( 0 ).matrix() << endl;
+			//cout << kinfu_->getCameraPose().matrix() << endl;
+			frame_ptr = &rgbd_traj_.data_[ rgbd_traj_.index_ ];
+			rgbd_traj_.index_ ++;
+		}
+
         //run kinfu algorithm
         if (integrate_colors_)
-          has_image = (*kinfu_) (depth_device_, &image_view_.colors_device_);
+          has_image = (*kinfu_) (depth_device_, &image_view_.colors_device_, frame_ptr);
         else
           has_image = (*kinfu_) (depth_device_);
       }
@@ -1318,6 +1365,9 @@ void startRecording() {
   bool record_script_;
   bool play_script_;
 
+  bool use_rgbdslam_;
+  RGBDTrajectory rgbd_traj_;
+
   bool use_device_;
   bool recording_;
 
@@ -1360,6 +1410,7 @@ void startRecording() {
   PtrStepSz<const unsigned short> depth_;
   PtrStepSz<const pcl::gpu::PixelRGB> rgb24_;  
   cv::Mat traj_;
+  cv::Mat traj_buffer_;
 
   int time_ms_;
 
@@ -1517,6 +1568,7 @@ print_cli_help ()
   cout << "    --record                            : record the stream to .oni file" << endl;
   cout << "    --record_script                     : record playback script file" << endl;
   cout << "    --play_script <script file>         : playback script file" << endl;
+  cout << "    --use_rgbdslam <log file>           : use rgbdslam estimation" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -1554,7 +1606,7 @@ main (int argc, char* argv[])
 	xnLogSetMaskMinSeverity(XN_LOG_MASK_ALL, XN_LOG_VERBOSE);
   }
 
-  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file;
+  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file;
   try
   {    
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
@@ -1645,6 +1697,9 @@ main (int argc, char* argv[])
 	  app.toggleScriptRecord();
 	else if (pc::parse_argument (argc, argv, "--play_script", script_file) > 0)
 	  app.toggleScriptPlay( script_file );
+
+	if (pc::parse_argument (argc, argv, "--use_rgbdslam", log_file) > 0)
+	  app.toggleRGBDSlam( log_file );
   }
 
   // executing
