@@ -453,8 +453,8 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			b_rgbd( 3, 0 ) = trans_shift( 0, 3 );
 			b_rgbd( 4, 0 ) = trans_shift( 1, 3 );
 			b_rgbd( 5, 0 ) = trans_shift( 2, 3 );
-			cout << trans_shift << endl;
-			cout << b_rgbd << endl;
+			//cout << trans_shift << endl;
+			//cout << b_rgbd << endl;
 
 			//A += 100.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
 			//b += 100.0 * b_rgbd;
