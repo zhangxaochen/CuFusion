@@ -443,10 +443,6 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         //checking nullspace
         double det = A.determinant ();
 
-
-
-    
-  
 		if ( fabs (det) < 1e-15 || pcl_isnan (det) )
         {
           if (pcl_isnan (det)) cout << "qnan" << endl;

@@ -71,6 +71,8 @@
 #include <pcl/io/oni_grabber.h>
 #include <pcl/io/pcd_grabber.h>
 
+#include <opencv2/core/core.hpp>
+
 #include "openni_capture.h"
 #include "color_handler.h"
 #include "evaluation.h"
@@ -301,6 +303,31 @@ boost::shared_ptr<pcl::PolygonMesh> convertToMesh(const DeviceArray<PointXYZ>& t
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+struct RGBDTrajectory {
+	vector< Eigen::Matrix4f > data_;
+	void loadFromFile( string filename ) {
+		data_.clear();
+		int id1, id2, frame;
+		Matrix4f trans;
+		FILE * f = fopen( filename.c_str(), "r" );
+		if ( f != NULL ) {
+		  char buffer[1024];
+		  while ( fgets( buffer, 1024, f ) != NULL ) {
+			if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
+			  sscanf( buffer, "%d %d %d", &id1, &id2, &frame);
+				fscanf_s( f, "%f %f %f %f", &trans(0,0), &trans(0,1), &trans(0,2), &trans(0,3) );
+				fscanf_s( f, "%f %f %f %f", &trans(1,0), &trans(1,1), &trans(1,2), &trans(1,3) );
+				fscanf_s( f, "%f %f %f %f", &trans(2,0), &trans(2,1), &trans(2,2), &trans(2,3) );
+				fscanf_s( f, "%f %f %f %f", &trans(3,0), &trans(3,1), &trans(3,2), &trans(3,3) );
+			}
+		  }
+		  // qianyi : todo
+		  fclose ( f );
+		}
+	}
+};
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct CurrentFrameCloudView
 {
@@ -355,6 +382,8 @@ struct ImageView
     viewerDepth_.setWindowTitle ("Kinect Depth stream");
     viewerDepth_.setPosition (640, 0);
     //viewerColor_.setWindowTitle ("Kinect RGB stream");
+	viewerTraj_.setWindowTitle("Trajectory");
+	viewerTraj_.setPosition(640, 500);
   }
 
   void
@@ -396,6 +425,11 @@ struct ImageView
   { 
     viewerDepth_.showShortImage (depth.data, depth.cols, depth.rows, 0, 5000, true); 
   }
+
+  void
+  showTraj( const cv::Mat & traj ) {
+    viewerTraj_.showRGBImage ( (unsigned char *) traj.data, traj.cols, traj.rows, "short_image" );
+  }
   
   void
   showGeneratedDepth (KinfuTracker& kinfu, const Eigen::Affine3f& pose)
@@ -422,6 +456,7 @@ struct ImageView
 
   visualization::ImageViewer viewerScene_;
   visualization::ImageViewer viewerDepth_;
+  visualization::ImageViewer viewerTraj_;
   //visualization::ImageViewer viewerColor_;
 
   KinfuTracker::View view_device_;
@@ -648,7 +683,7 @@ struct KinFuLSApp
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
-    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice)
+    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 ))
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -684,6 +719,7 @@ struct KinFuLSApp
     scene_cloud_view_.cloud_viewer_.registerKeyboardCallback (keyboard_callback, (void*)this);
     image_view_.viewerScene_.registerKeyboardCallback (keyboard_callback, (void*)this);
     image_view_.viewerDepth_.registerKeyboardCallback (keyboard_callback, (void*)this);
+	image_view_.viewerTraj_.registerKeyboardCallback (keyboard_callback, (void*)this);
         
     scene_cloud_view_.toggleCube(volume_size);
     frame_counter_ = 0;
@@ -807,6 +843,37 @@ struct KinFuLSApp
     image_view_.raycaster_ptr_ = RayCaster::Ptr( new RayCaster(kinfu_->rows (), kinfu_->cols (),
         evaluation_ptr_->fx, evaluation_ptr_->fy, evaluation_ptr_->cx, evaluation_ptr_->cy) );
   }
+
+  void drawTrajectory()
+  {
+	traj_ = cv::Mat::zeros( 480, 640, CV_8UC3 );
+	Eigen::Vector4d sensor_origin( 0, 0, 0, 1 );
+	Eigen::Vector4d last_sensor_origin;
+    Eigen::Affine3f init_pose = kinfu_->getCameraPose(0);
+	Eigen::Vector4d init_origin = Eigen::Vector4d(init_pose.translation()(0), init_pose.translation()(1), init_pose.translation()(2), 0.0);
+    for (unsigned int i = 1; i < kinfu_->getNumberOfPoses(); ++i) {
+	  Eigen::Affine3f pose = kinfu_->getCameraPose(i);
+	  //		cout << i << " debug" << endl;
+			//cout << pose.matrix() << endl;
+
+	  last_sensor_origin = sensor_origin;
+      sensor_origin = Eigen::Vector4d(pose.translation()(0), pose.translation()(1), pose.translation()(2), 1.0) - init_origin;
+
+        cv::Point2f p,q; //TODO: Use sub-pixel-accuracy
+		p.x = 320.0 + sensor_origin(0) * 100.0;
+		p.y = 240.0 - sensor_origin(2) * 100.0;
+		q.x = 320.0 + last_sensor_origin(0) * 100.0;
+		q.y = 240.0 - last_sensor_origin(2) * 100.0;
+        cv::line(traj_, p, q, cv::Scalar( 0, 128, 0 ), 1, 16);
+
+		if ( i == kinfu_->getNumberOfPoses() - 1 ) {
+			Eigen::Vector4d ref = pose.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 1.5, 1.0 ) - init_origin;
+			q.x = 320.0 + ref(0) * 100.0;
+			q.y = 240.0 - ref(2) * 100.0;
+			cv::line(traj_, p, q, cv::Scalar( 0, 0, 255 ), 1, 16);
+		}
+    }
+  }
   
   void execute(const PtrStepSz<const unsigned short>& depth, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool has_data)
   {        
@@ -903,6 +970,10 @@ struct KinFuLSApp
       }
             
       image_view_.showDepth (depth_);
+
+	  // update traj_
+      drawTrajectory();
+	  image_view_.showTraj (traj_);
       //image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
     }
 
@@ -1288,6 +1359,7 @@ void startRecording() {
   std::vector<unsigned short> source_depth_data_;
   PtrStepSz<const unsigned short> depth_;
   PtrStepSz<const pcl::gpu::PixelRGB> rgb24_;  
+  cv::Mat traj_;
 
   int time_ms_;
 
