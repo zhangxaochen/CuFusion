@@ -463,11 +463,23 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         //checking nullspace
         double det = A.determinant ();
 
+		/*
+		if ( global_time_ % 100 == 3 ) {
+			cout << "Determinant : " << det << endl;
+			cout << "Singular matrix :" << endl << A << endl;
+			cout << "Corresponding b :" << endl << b << endl;
+		}
+		*/
+
+
 		if ( fabs (det) < 1e-15 || pcl_isnan (det) )
         {
           if (pcl_isnan (det)) cout << "qnan" << endl;
           
-          PCL_ERROR ("LOST...\n");
+          PCL_ERROR ("LOST ... @%d frame.%d iteration, matrices are\n", global_time_, iter);
+			cout << "Determinant : " << det << endl;
+			cout << "Singular matrix :" << endl << A << endl;
+			cout << "Corresponding b :" << endl << b << endl;
           reset ();
           return (false);
         }
