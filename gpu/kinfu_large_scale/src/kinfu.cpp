@@ -444,8 +444,10 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 		Eigen::Matrix<double, 6, 1> b_rgbd;
 		if ( frame_ptr != NULL ) {
 			Eigen::Matrix4f trans_rgbd = frame_ptr->transformation_ * getCameraPose( 0 ).matrix();		// <--- global should be like this
-			Eigen::Matrix4f trans_last = getCameraPose().matrix();
-			Eigen::Matrix4f trans_shift = trans_rgbd * trans_last.inverse();
+			Eigen::Affine3f aff_last;
+			aff_last.linear() = cam_rot_global_curr;
+			aff_last.translation() = cam_trans_global_curr;
+			Eigen::Matrix4f trans_shift = trans_rgbd * aff_last.matrix().inverse();
 			// hack
 			b_rgbd( 0, 0 ) = ( trans_shift( 0, 1 ) - trans_shift( 1, 0 ) ) / 2.0;
 			b_rgbd( 1, 0 ) = ( trans_shift( 1, 2 ) - trans_shift( 2, 1 ) ) / 2.0;
@@ -453,11 +455,11 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			b_rgbd( 3, 0 ) = trans_shift( 0, 3 );
 			b_rgbd( 4, 0 ) = trans_shift( 1, 3 );
 			b_rgbd( 5, 0 ) = trans_shift( 2, 3 );
-			//cout << trans_shift << endl;
-			//cout << b_rgbd << endl;
+			cout << trans_shift << endl;
+			cout << b_rgbd.transpose() << endl;
 
-			//A += 100.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
-			//b += 100.0 * b_rgbd;
+			A += 100.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
+			b += 100.0 * b_rgbd;
 		}
 
         //checking nullspace
@@ -476,7 +478,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         {
           if (pcl_isnan (det)) cout << "qnan" << endl;
           
-          PCL_ERROR ("LOST ... @%d frame.%d iteration, matrices are\n", global_time_, iter);
+          PCL_ERROR ("LOST ... @%d frame.%d level.%d iteration, matrices are\n", global_time_, level_index, iter);
 			cout << "Determinant : " << det << endl;
 			cout << "Singular matrix :" << endl << A << endl;
 			cout << "Corresponding b :" << endl << b << endl;
@@ -500,10 +502,19 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         Eigen::Matrix3f cam_rot_incremental = (Eigen::Matrix3f)AngleAxisf (gamma, Vector3f::UnitZ ()) * AngleAxisf (beta, Vector3f::UnitY ()) * AngleAxisf (alpha, Vector3f::UnitX ());
         Vector3f cam_trans_incremental = result.tail<3> ();
 
-        //compose
+		//compose
         cam_trans_global_curr = cam_rot_incremental * cam_trans_global_curr + cam_trans_incremental;
         cam_rot_global_curr = cam_rot_incremental * cam_rot_global_curr;
-        /*
+
+		if ( frame_ptr != NULL ) {
+			PCL_WARN( "%d.%d.%d\n", global_time_, level_index, iter );
+			cout << result.transpose() << endl;
+			cout << cam_rot_incremental << endl;
+			cout << cam_trans_incremental << endl;
+			cout << cam_rot_global_curr << endl;
+			cout << cam_trans_global_curr << endl;
+		}
+/*
         tcurr = Rinc * tcurr + tinc;
         Rcurr = Rinc * Rcurr;
         */
