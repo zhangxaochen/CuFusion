@@ -449,17 +449,19 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			aff_last.translation() = cam_trans_global_curr;
 			Eigen::Matrix4f trans_shift = trans_rgbd * aff_last.matrix().inverse();
 			// hack
-			b_rgbd( 0, 0 ) = ( trans_shift( 0, 1 ) - trans_shift( 1, 0 ) ) / 2.0;
-			b_rgbd( 1, 0 ) = ( trans_shift( 1, 2 ) - trans_shift( 2, 1 ) ) / 2.0;
-			b_rgbd( 2, 0 ) = ( trans_shift( 2, 0 ) - trans_shift( 0, 2 ) ) / 2.0;
+			b_rgbd( 0, 0 ) = - ( trans_shift( 1, 2 ) - trans_shift( 2, 1 ) ) / 2.0;		// alpha is beta in the paper
+			b_rgbd( 1, 0 ) = - ( trans_shift( 2, 0 ) - trans_shift( 0, 2 ) ) / 2.0;		// beta is gamma in the paper
+			b_rgbd( 2, 0 ) = - ( trans_shift( 0, 1 ) - trans_shift( 1, 0 ) ) / 2.0;		// gamma is alpha in the paper
 			b_rgbd( 3, 0 ) = trans_shift( 0, 3 );
 			b_rgbd( 4, 0 ) = trans_shift( 1, 3 );
 			b_rgbd( 5, 0 ) = trans_shift( 2, 3 );
-			cout << trans_shift << endl;
-			cout << b_rgbd.transpose() << endl;
 
-			A += 100.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
-			b += 100.0 * b_rgbd;
+			//PCL_WARN( "%d.%d.%d\n", global_time_, level_index, iter );
+			//cout << trans_shift << endl;
+			//cout << b_rgbd.transpose() << endl;
+
+			//A = 10000.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
+			//b = 10000.0 * b_rgbd;
 		}
 
         //checking nullspace
@@ -507,12 +509,15 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         cam_rot_global_curr = cam_rot_incremental * cam_rot_global_curr;
 
 		if ( frame_ptr != NULL ) {
-			PCL_WARN( "%d.%d.%d\n", global_time_, level_index, iter );
-			cout << result.transpose() << endl;
-			cout << cam_rot_incremental << endl;
-			cout << cam_trans_incremental << endl;
-			cout << cam_rot_global_curr << endl;
-			cout << cam_trans_global_curr << endl;
+			//PCL_INFO( "update %d.%d.%d\n", global_time_, level_index, iter );
+			//cout << result.transpose() << endl;
+			//Eigen::Affine3f temp;
+			//temp.linear() = cam_rot_incremental;
+			//temp.translation() = cam_trans_incremental;
+			//cout << temp.matrix() << endl;
+			//temp.linear() = cam_rot_global_curr;
+			//temp.translation() = cam_trans_global_curr;
+			//cout << temp.matrix() << endl;
 		}
 /*
         tcurr = Rinc * tcurr + tinc;
@@ -522,8 +527,23 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
     }
   }
   //save tranform
+
+	if ( frame_ptr != NULL ) {
+		Eigen::Affine3f tmp;
+		tmp.matrix() = frame_ptr->transformation_ * getCameraPose( 0 ).matrix();		// <--- global should be like this
+		cam_rot_global_curr = tmp.linear();
+		cam_trans_global_curr = tmp.translation();
+	}
+
   rmats_.push_back (cam_rot_global_curr); 
   tvecs_.push_back (cam_trans_global_curr);
+
+  if ( frame_ptr != NULL ) {
+		Eigen::Affine3f init_pose = getCameraPose();
+		cout << init_pose.matrix() << endl;
+		cout << frame_ptr->transformation_ * getCameraPose( 0 ).matrix() << endl;
+  }
+
   /*
   rmats_.push_back (Rcurr);
   tvecs_.push_back (tcurr);
