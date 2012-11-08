@@ -880,6 +880,39 @@ struct KinFuApp
     data_ready_cond_.notify_one();
   }
 
+  void source_cb2_trigger(const boost::shared_ptr<openni_wrapper::Image>& image_wrapper, const boost::shared_ptr<openni_wrapper::DepthImage>& depth_wrapper, float)
+  {
+    {
+      boost::mutex::scoped_lock lock(data_ready_mutex_);		// must lock
+      if (exit_)
+          return;
+                  
+      depth_.cols = depth_wrapper->getWidth();
+      depth_.rows = depth_wrapper->getHeight();
+      depth_.step = depth_.cols * depth_.elemSize();
+
+      source_depth_data_.resize(depth_.cols * depth_.rows);
+      depth_wrapper->fillDepthImageRaw(depth_.cols, depth_.rows, &source_depth_data_[0]);
+      depth_.data = &source_depth_data_[0];      
+      
+      rgb24_.cols = image_wrapper->getWidth();
+      rgb24_.rows = image_wrapper->getHeight();
+      rgb24_.step = rgb24_.cols * rgb24_.elemSize(); 
+
+      source_image_data_.resize(rgb24_.cols * rgb24_.rows);
+      image_wrapper->fillRGB(rgb24_.cols, rgb24_.rows, (unsigned char*)&source_image_data_[0]);
+      rgb24_.data = &source_image_data_[0];
+
+	  if ( recording_ ) {
+		xn_depth_.CopyFrom( depth_wrapper->getDepthMetaData() );
+		xn_image_.CopyFrom( image_wrapper->getMetaData() );
+		//xn_mock_depth_.SetData( depth_wrapper->getDepthMetaData() );
+		//xn_mock_image_.SetData( image_wrapper->getMetaData() );
+	  }
+    }
+    data_ready_cond_.notify_one();
+  }
+
   void startRecording() {
     pcl::OpenNIGrabber * current_grabber = ( pcl::OpenNIGrabber * )( &capture_ );
 	openni_wrapper::OpenNIDevice & device = * current_grabber->getDevice();
@@ -939,10 +972,11 @@ struct KinFuApp
     typedef boost::shared_ptr<Image> ImagePtr;
         
     boost::function<void (const ImagePtr&, const DepthImagePtr&, float constant)> func1 = boost::bind (&KinFuApp::source_cb2, this, _1, _2, _3);
+    boost::function<void (const ImagePtr&, const DepthImagePtr&, float constant)> func1t = boost::bind (&KinFuApp::source_cb2_trigger, this, _1, _2, _3);
     boost::function<void (const DepthImagePtr&)> func2 = boost::bind (&KinFuApp::source_cb1, this, _1);
 
     bool need_colors = integrate_colors_ || registration_;
-    boost::signals2::connection c = need_colors ? capture_.registerCallback (func1) : capture_.registerCallback (func2);
+    boost::signals2::connection c = need_colors ? ( triggered_capture ? capture_.registerCallback (func1t) : capture_.registerCallback (func1) ) : capture_.registerCallback (func2);
 
     {
       boost::unique_lock<boost::mutex> lock(data_ready_mutex_);

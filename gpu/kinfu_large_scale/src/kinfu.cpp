@@ -348,6 +348,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   Matrix3frm cam_rot_global_prev = rmats_[global_time_ - 1];            // [Ri|ti] - pos of camera, i.e.
   // Previous global translation
   Vector3f   cam_trans_global_prev = tvecs_[global_time_ - 1];          // transform from camera to global coo space for (i-1)th camera pose
+
   // Previous global inverse rotation
   Matrix3frm cam_rot_global_prev_inv = cam_rot_global_prev.inverse ();  // Rprev.t();
   
@@ -443,7 +444,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 
 		Eigen::Matrix<double, 6, 1> b_rgbd;
 		if ( frame_ptr != NULL ) {
-			Eigen::Matrix4f trans_rgbd = frame_ptr->transformation_ * getCameraPose( 0 ).matrix();		// <--- global should be like this
+			Eigen::Matrix4f trans_rgbd = getCameraPose( 0 ).matrix() * frame_ptr->transformation_;		// <--- global should be like this
 			Eigen::Affine3f aff_last;
 			aff_last.linear() = cam_rot_global_curr;
 			aff_last.translation() = cam_trans_global_curr;
@@ -460,8 +461,8 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			//cout << trans_shift << endl;
 			//cout << b_rgbd.transpose() << endl;
 
-			//A = 10000.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
-			//b = 10000.0 * b_rgbd;
+			//A += 10000.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
+			//b += 10000.0 * b_rgbd;
 		}
 
         //checking nullspace
@@ -528,21 +529,25 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   }
   //save tranform
 
+  /*
 	if ( frame_ptr != NULL ) {
 		Eigen::Affine3f tmp;
-		tmp.matrix() = frame_ptr->transformation_ * getCameraPose( 0 ).matrix();		// <--- global should be like this
+		tmp.matrix() = getCameraPose( 0 ).matrix() * frame_ptr->transformation_;		// <--- global should be like this
 		cam_rot_global_curr = tmp.linear();
 		cam_trans_global_curr = tmp.translation();
 	}
+  */
 
   rmats_.push_back (cam_rot_global_curr); 
   tvecs_.push_back (cam_trans_global_curr);
 
+  /*
   if ( frame_ptr != NULL ) {
-		Eigen::Affine3f init_pose = getCameraPose();
-		cout << init_pose.matrix() << endl;
-		cout << frame_ptr->transformation_ * getCameraPose( 0 ).matrix() << endl;
+		//Eigen::Affine3f init_pose = getCameraPose();
+		//cout << init_pose.matrix() << endl;
+		//cout << getCameraPose( 0 ).matrix() * frame_ptr->transformation_ << endl;
   }
+  */
 
   /*
   rmats_.push_back (Rcurr);
