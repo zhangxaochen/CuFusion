@@ -461,8 +461,10 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			//cout << trans_shift << endl;
 			//cout << b_rgbd.transpose() << endl;
 
+			//if ( level_index == LEVELS - 1 && iter == 0 ) {
 			A = 10000.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
 			b = 10000.0 * b_rgbd;
+			//}
 		}
 
         //checking nullspace
