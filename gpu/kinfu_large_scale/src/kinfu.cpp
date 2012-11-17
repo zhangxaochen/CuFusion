@@ -72,9 +72,9 @@ namespace pcl
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const float shiftingDistance, int fragmentRate, int rows, int cols)
+pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const float shiftingDistance, int fragmentRate, int fragmentStart, int rows, int cols)
 	: cyclical_( DISTANCE_THRESHOLD, pcl::device::VOLUME_SIZE, VOLUME_X), rows_(rows), cols_(cols), global_time_(0), max_icp_distance_(0), integration_metric_threshold_(0.f), perform_last_scan_ (false), finished_(false), force_shift_(false)
-	, fragment_rate_( fragmentRate )
+	, fragment_rate_( fragmentRate ), fragment_start_( fragmentStart )
 {
   //const Vector3f volume_size = Vector3f::Constant (VOLUME_SIZE);
   const Vector3i volume_resolution (VOLUME_X, VOLUME_Y, VOLUME_Z);
@@ -276,11 +276,17 @@ pcl::gpu::KinfuTracker::allocateBufffers (int rows, int cols)
 bool
 pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcolor, FramedTransformation * frame_ptr)
 {  
-
-  if ( fragment_rate_ > 1 && global_time_ == fragment_rate_ ) {
-	  reset();
+  if ( fragment_rate_ > 0 ) {
+	  if ( fragment_start_ == 0 ) {
+		  if ( global_time_ == fragment_rate_ ) {
+			  reset();
+		  }
+	  } else if ( global_time_ == fragment_start_ ) {
+		  fragment_start_ = 0;
+		  reset();
+	  }
   }
-  
+
   device::Intr intr (fx_, fy_, cx_, cy_);
   {
     //ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");

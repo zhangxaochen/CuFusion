@@ -60,9 +60,11 @@ namespace pcl
   namespace gpu
   {        
     struct FramedTransformation {
+      int id1_;
+	  int id2_;
       int frame_;
       Eigen::Matrix4f transformation_;
-      FramedTransformation( int f, Eigen::Matrix4f t ) : frame_( f ), transformation_( t ) {}
+      FramedTransformation( int id1, int id2, int f, Eigen::Matrix4f t ) : id1_( id1 ), id2_( id2 ), frame_( f ), transformation_( t ) {}
     };
 
     /** \brief KinfuTracker class encapsulates implementation of Microsoft Kinect Fusion algorithm
@@ -94,7 +96,7 @@ namespace pcl
           * \param[in] rows height of depth image
           * \param[in] cols width of depth image
           */
-        KinfuTracker (const Eigen::Vector3f &volumeSize, const float shiftingDistance, int fragmentRate = 0, int rows = 480, int cols = 640);
+        KinfuTracker (const Eigen::Vector3f &volumeSize, const float shiftingDistance, int fragmentRate = 0, int fragmentStart = 0, int rows = 480, int cols = 640);
 
         /** \brief Sets Depth camera intrinsics
           * \param[in] fx focal length x 
@@ -234,6 +236,10 @@ namespace pcl
 			return force_shift_;
 		}
 
+		int getGlobalTime() {
+			return global_time_;
+		}
+
       private:
 
 		/** \brief Immediate shifting */
@@ -350,6 +356,7 @@ namespace pcl
         float volume_size_;
 
         int fragment_rate_;
+		int fragment_start_;
         
       public:
 		EIGEN_MAKE_ALIGNED_OPERATOR_NEW

@@ -325,10 +325,20 @@ struct RGBDTrajectory {
 		      sscanf( buffer, "%f %f %f %f", &trans(2,0), &trans(2,1), &trans(2,2), &trans(2,3) );
 			  fgets( buffer, 1024, f );
 		      sscanf( buffer, "%f %f %f %f", &trans(3,0), &trans(3,1), &trans(3,2), &trans(3,3) );
-			  data_.push_back( FramedTransformation( frame, trans ) );
+			  data_.push_back( FramedTransformation( id1, id2, frame, trans ) );
 			}
 		  }
 		  fclose ( f );
+		}
+	}
+	void saveToFile( string filename ) {
+		std::ofstream file( filename.c_str() );
+		if ( file.is_open() ) {
+		  for ( unsigned int i = 0; i < data_.size(); i++ ) {
+			file << data_[ i ].id1_ << "\t" << data_[ i ].id2_ << "\t" << data_[ i ].frame_ << std::endl;
+			file << data_[ i ].transformation_ << std::endl;
+		  }
+		  file.close();
 		}
 	}
 };
@@ -688,9 +698,9 @@ struct KinFuLSApp
 {
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
-  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
+  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
-	use_rgbdslam_ (false)
+	use_rgbdslam_ (false), record_log_ (false)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -705,7 +715,7 @@ struct KinFuLSApp
     if(shiftDistance > 2.5 * vsz)
       PCL_WARN ("WARNING Shifting distance (%.2f) is very large compared to the volume size (%.2f).\nYou can modify it using --shifting_distance.\n", shiftDistance, vsz);
 
-    kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance, fragmentRate);
+    kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance, fragmentRate, fragmentStart);
 
     Eigen::Matrix3f R = Eigen::Matrix3f::Identity ();   // * AngleAxisf( pcl::deg2rad(-30.f), Vector3f::UnitX());
     Eigen::Vector3f t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2f);
@@ -791,6 +801,13 @@ struct KinFuLSApp
   }
 
   void
+  toggleLogRecord()
+  {
+    record_log_ = true;
+	cout << "Log record: " << ( record_log_ ? "On" : "Off" ) << endl;
+  }
+
+  void
   toggleScriptPlay( string script_file )
   {
     FILE * f = fopen( script_file.c_str(), "r" );
@@ -817,9 +834,10 @@ struct KinFuLSApp
 	  // draw on traj buffer
       Eigen::Vector4f sensor_origin( 0, 0, 0, 1 );
       Eigen::Vector4f last_sensor_origin;
+	  Eigen::Matrix4f init_inverse = rgbd_traj_.data_[ 0 ].transformation_.inverse();
 	  for (unsigned int i = 1; i < rgbd_traj_.data_.size(); ++i) {
 		Eigen::Matrix4f world2base = rgbd_traj_.data_[ i ].transformation_;
-		Eigen::Affine3f world2base_aff( world2base );
+		Eigen::Affine3f world2base_aff( init_inverse * world2base );
 
 		last_sensor_origin = sensor_origin;
 		sensor_origin = Eigen::Vector4f(world2base_aff.translation()(0), world2base_aff.translation()(1), world2base_aff.translation()(2), 1.0f);
@@ -861,6 +879,22 @@ struct KinFuLSApp
   }
 
   void
+  writeLogFile()
+  {
+    time_t rawtime;
+    struct tm *timeinfo;
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    char strFileName[ 1024 ];
+    sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.log",
+        timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+
+    printf("Creating log file %s\n", strFileName);
+
+	kinfu_traj_.saveToFile( string( strFileName ) );
+  }
+
+  void
   toggleIndependentCamera()
   {
     independent_camera_ = !independent_camera_;
@@ -885,14 +919,17 @@ struct KinFuLSApp
 	Eigen::Vector4d sensor_origin( 0, 0, 0, 1 );
 	Eigen::Vector4d last_sensor_origin;
     Eigen::Affine3f init_pose = kinfu_->getCameraPose(0);
+	Eigen::Matrix4f init_inverse = init_pose.matrix().inverse();
 	Eigen::Vector4d init_origin = Eigen::Vector4d(init_pose.translation()(0), init_pose.translation()(1), init_pose.translation()(2), 0.0);
     for (unsigned int i = 1; i < kinfu_->getNumberOfPoses(); ++i) {
 	  Eigen::Affine3f pose = kinfu_->getCameraPose(i);
 	  //		cout << i << " debug" << endl;
 			//cout << pose.matrix() << endl;
+	  Eigen::Affine3f pose_1( init_inverse * pose.matrix() );
 
 	  last_sensor_origin = sensor_origin;
-      sensor_origin = Eigen::Vector4d(pose.translation()(0), pose.translation()(1), pose.translation()(2), 1.0) - init_origin;
+      //sensor_origin = Eigen::Vector4d(pose.translation()(0), pose.translation()(1), pose.translation()(2), 1.0) - init_origin;
+	  sensor_origin = Eigen::Vector4d(pose_1.translation()(0), pose_1.translation()(1), pose_1.translation()(2), 1.0);
 
         cv::Point2f p,q; //TODO: Use sub-pixel-accuracy
 		p.x = 320.0 + sensor_origin(0) * 100.0;
@@ -902,7 +939,8 @@ struct KinFuLSApp
         cv::line(traj_, p, q, cv::Scalar( 0, 255, 0 ), 1, 16);
 
 		if ( i == kinfu_->getNumberOfPoses() - 1 ) {
-			Eigen::Vector4d ref = pose.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 1.5, 1.0 ) - init_origin;
+			//Eigen::Vector4d ref = pose.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 1.5, 1.0 ) - init_origin;
+			Eigen::Vector4d ref = pose_1.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 1.5, 1.0 );
 			q.x = 320.0 + ref(0) * 100.0;
 			q.y = 240.0 - ref(2) * 100.0;
 			cv::line(traj_, p, q, cv::Scalar( 0, 0, 255 ), 1, 16);
@@ -1022,6 +1060,11 @@ struct KinFuLSApp
       drawTrajectory();
 	  image_view_.showTraj (traj_);
       //image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
+
+	  if ( kinfu_->getGlobalTime() > 0 ) {
+		  // global_time_ == 0 only when lost and reset, in this case, we lose one frame
+		  kinfu_traj_.data_.push_back( FramedTransformation( kinfu_->getGlobalTime() - 1, kinfu_->getGlobalTime() - 1, frame_counter_, kinfu_->getCameraPose().matrix() ) );
+	  }
     }
 
     if (scan_)
@@ -1320,6 +1363,10 @@ void startRecording() {
 				writeScriptFile ();
 			}
 
+			if ( record_log_ ) {
+				writeLogFile ();
+			}
+
 			cout << "Total " << frame_counter_ << " frames processed." << endl;
 		}
 		c.disconnect();
@@ -1399,9 +1446,11 @@ void startRecording() {
   queue< ScriptAction > script_frames_;
   bool record_script_;
   bool play_script_;
+  bool record_log_;
 
   bool use_rgbdslam_;
   RGBDTrajectory rgbd_traj_;
+  RGBDTrajectory kinfu_traj_;
 
   bool use_device_;
   bool recording_;
@@ -1605,6 +1654,8 @@ print_cli_help ()
   cout << "    --play_script <script file>         : playback script file" << endl;
   cout << "    --use_rgbdslam <log file>           : use rgbdslam estimation" << endl;
   cout << "    --fragment <X_frames>               : fragments the stream every <X_frames>" << endl;
+  cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
+  cout << "    --record_log                        : record transformation log file" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -1702,7 +1753,10 @@ main (int argc, char* argv[])
   int fragment_rate = 0;
   pc::parse_argument (argc, argv, "--fragment", fragment_rate);
 
-  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate);
+  int fragment_start = 0;
+  pc::parse_argument (argc, argv, "--fragment_start", fragment_start);
+
+  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start);
   
   if (pc::parse_argument (argc, argv, "-eval", eval_folder) > 0)
     app.toggleEvaluationMode(eval_folder, match_file);
@@ -1740,6 +1794,9 @@ main (int argc, char* argv[])
 	if (pc::parse_argument (argc, argv, "--use_rgbdslam", log_file) > 0)
 	  app.toggleRGBDSlam( log_file );
   }
+
+  if ( pc::find_switch (argc, argv, "--record_log") )
+	  app.toggleLogRecord();
 
   // executing
   if (triggered_capture) std::cout << "Capture mode: triggered\n";
