@@ -94,7 +94,7 @@ namespace pcl
           * \param[in] rows height of depth image
           * \param[in] cols width of depth image
           */
-        KinfuTracker (const Eigen::Vector3f &volumeSize, const float shiftingDistance, int rows = 480, int cols = 640);
+        KinfuTracker (const Eigen::Vector3f &volumeSize, const float shiftingDistance, int fragmentRate = 0, int rows = 480, int cols = 640);
 
         /** \brief Sets Depth camera intrinsics
           * \param[in] fx focal length x 
@@ -348,6 +348,8 @@ namespace pcl
 
         /** \brief Size of the TSDF volume in meters. */
         float volume_size_;
+
+        int fragment_rate_;
         
       public:
 		EIGEN_MAKE_ALIGNED_OPERATOR_NEW

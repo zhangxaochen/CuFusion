@@ -688,7 +688,7 @@ struct KinFuLSApp
 {
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
-  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
+  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
 	use_rgbdslam_ (false)
   {    
@@ -705,7 +705,7 @@ struct KinFuLSApp
     if(shiftDistance > 2.5 * vsz)
       PCL_WARN ("WARNING Shifting distance (%.2f) is very large compared to the volume size (%.2f).\nYou can modify it using --shifting_distance.\n", shiftDistance, vsz);
 
-    kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance);
+    kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance, fragmentRate);
 
     Eigen::Matrix3f R = Eigen::Matrix3f::Identity ();   // * AngleAxisf( pcl::deg2rad(-30.f), Vector3f::UnitX());
     Eigen::Vector3f t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2f);
@@ -1604,6 +1604,7 @@ print_cli_help ()
   cout << "    --record_script                     : record playback script file" << endl;
   cout << "    --play_script <script file>         : playback script file" << endl;
   cout << "    --use_rgbdslam <log file>           : use rgbdslam estimation" << endl;
+  cout << "    --fragment <X_frames>               : fragments the stream every <X_frames>" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -1698,7 +1699,10 @@ main (int argc, char* argv[])
   pc::parse_argument (argc, argv, "--snapshot_rate", snapshot_rate);
   pc::parse_argument (argc, argv, "-sr", snapshot_rate);
 
-  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device);
+  int fragment_rate = 0;
+  pc::parse_argument (argc, argv, "--fragment", fragment_rate);
+
+  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate);
   
   if (pc::parse_argument (argc, argv, "-eval", eval_folder) > 0)
     app.toggleEvaluationMode(eval_folder, match_file);
