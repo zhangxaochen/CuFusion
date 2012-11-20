@@ -944,19 +944,19 @@ struct KinFuApp
 	//device.getImageGenerator().GetIntProperty( "OutputFormat", nprop );
 	//cout << nprop << endl;
 
-    // Create mock nodes based on the depth generator, to save depth
-	rc = context.CreateMockNodeBasedOn( device.getDepthGenerator(), NULL, xn_mock_depth_ );
-    CHECK_RC(rc, "Create depth node");
-    rc = xn_recorder_.AddNodeToRecording( xn_mock_depth_, XN_CODEC_16Z_EMB_TABLES );
-    CHECK_RC(rc, "Add depth node");
-	xn_mock_depth_.SetData( xn_depth_ );
-
     // Create mock nodes based on the image generator, to save image
 	rc = context.CreateMockNodeBasedOn( device.getImageGenerator(), NULL, xn_mock_image_ );
     CHECK_RC(rc, "Create image node");
     rc = xn_recorder_.AddNodeToRecording( xn_mock_image_, XN_CODEC_JPEG );
     CHECK_RC(rc, "Add image node");
 	xn_mock_image_.SetData( xn_image_ );
+
+    // Create mock nodes based on the depth generator, to save depth
+	rc = context.CreateMockNodeBasedOn( device.getDepthGenerator(), NULL, xn_mock_depth_ );
+    CHECK_RC(rc, "Create depth node");
+    rc = xn_recorder_.AddNodeToRecording( xn_mock_depth_, XN_CODEC_16Z_EMB_TABLES );
+    CHECK_RC(rc, "Add depth node");
+	xn_mock_depth_.SetData( xn_depth_ );
   }
 
   void stopRecording() {
@@ -1002,8 +1002,8 @@ struct KinFuApp
         try {
 		  this->execute (depth_, rgb24_, has_data);
 		  if ( recording_ && has_data ) {
-		    xn_mock_depth_.SetData( xn_depth_, frame_num_ - 1, frame_num_ - 1 );
-		    xn_mock_image_.SetData( xn_image_, frame_num_ - 1, frame_num_ - 1 );
+		    xn_mock_depth_.SetData( xn_depth_, frame_num_, frame_num_ );
+		    xn_mock_image_.SetData( xn_image_, frame_num_, frame_num_ );
             xn_recorder_.Record();
 		  }
 		}
