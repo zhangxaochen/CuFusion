@@ -60,11 +60,14 @@ namespace pcl
   namespace gpu
   {        
     struct FramedTransformation {
+	  enum ProcessType { DirectApply = 0, InitializeOnly };
+
       int id1_;
 	  int id2_;
       int frame_;
+	  ProcessType type_;
       Eigen::Matrix4f transformation_;
-      FramedTransformation( int id1, int id2, int f, Eigen::Matrix4f t ) : id1_( id1 ), id2_( id2 ), frame_( f ), transformation_( t ) {}
+      FramedTransformation( int id1, int id2, int f, Eigen::Matrix4f t ) : id1_( id1 ), id2_( id2 ), frame_( f ), transformation_( t ), type_( DirectApply ) {}
     };
 
     /** \brief KinfuTracker class encapsulates implementation of Microsoft Kinect Fusion algorithm

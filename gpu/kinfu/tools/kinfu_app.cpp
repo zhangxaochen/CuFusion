@@ -1002,8 +1002,8 @@ struct KinFuApp
         try {
 		  this->execute (depth_, rgb24_, has_data);
 		  if ( recording_ && has_data ) {
-		    xn_mock_depth_.SetData( xn_depth_, frame_num_, frame_num_ );
-		    xn_mock_image_.SetData( xn_image_, frame_num_, frame_num_ );
+		    xn_mock_depth_.SetData( xn_depth_, frame_num_, frame_num_ * 30000 + 1 );
+		    xn_mock_image_.SetData( xn_image_, frame_num_, frame_num_ * 30000 );
             xn_recorder_.Record();
 		  }
 		}

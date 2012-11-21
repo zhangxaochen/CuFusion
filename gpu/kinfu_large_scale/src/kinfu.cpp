@@ -522,18 +522,6 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 		//compose
         cam_trans_global_curr = cam_rot_incremental * cam_trans_global_curr + cam_trans_incremental;
         cam_rot_global_curr = cam_rot_incremental * cam_rot_global_curr;
-
-		if ( frame_ptr != NULL ) {
-			//PCL_INFO( "update %d.%d.%d\n", global_time_, level_index, iter );
-			//cout << result.transpose() << endl;
-			//Eigen::Affine3f temp;
-			//temp.linear() = cam_rot_incremental;
-			//temp.translation() = cam_trans_incremental;
-			//cout << temp.matrix() << endl;
-			//temp.linear() = cam_rot_global_curr;
-			//temp.translation() = cam_trans_global_curr;
-			//cout << temp.matrix() << endl;
-		}
 /*
         tcurr = Rinc * tcurr + tinc;
         Rcurr = Rinc * Rcurr;

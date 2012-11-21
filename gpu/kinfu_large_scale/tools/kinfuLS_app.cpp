@@ -303,6 +303,42 @@ boost::shared_ptr<pcl::PolygonMesh> convertToMesh(const DeviceArray<PointXYZ>& t
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+struct FragmentMatches {
+	int base_;
+	vector< int > keys_;
+	vector< Matrix4f > transformations_;
+
+	void loadFromFile( string filename ) {
+		keys_.clear();
+		transformations_.clear();
+		FILE * f = fopen( filename.c_str(), "r" );
+		int key1, key2;
+		if ( f != NULL ) {
+			char buffer[1024];
+			while ( fgets( buffer, 1024, f ) != NULL ) {
+				if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
+					sscanf( buffer, "%d %d", &key1, &key2 );
+					base_ = key1;
+					keys_.push_back( key2 );
+				}
+			}
+			transformations_.resize( keys_.size() );
+			fclose( f );
+		}
+	}
+	void saveToFile( string filename ) {
+		std::ofstream file( filename.c_str() );
+		if ( file.is_open() ) {
+		  for ( unsigned int i = 0; i < keys_.size(); i++ ) {
+			file << base_ << " " << keys_[ i ] << std::endl;
+			file << transformations_[ i ] << std::endl;
+		  }
+		  file.close();
+		}
+	}
+};
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 struct RGBDTrajectory {
 	vector< pcl::gpu::FramedTransformation > data_;
 	int index_;
@@ -1237,13 +1273,13 @@ void startRecording() {
     CHECK_RC(rc, "Add depth node");
 	xn_mock_depth_.SetData( xn_depth_ );
 
-    // Create mock nodes based on the image generator, to save image
+	// Create mock nodes based on the image generator, to save image
 	rc = context.CreateMockNodeBasedOn( device.getImageGenerator(), NULL, xn_mock_image_ );
     CHECK_RC(rc, "Create image node");
     rc = xn_recorder_.AddNodeToRecording( xn_mock_image_, XN_CODEC_JPEG );
     CHECK_RC(rc, "Add image node");
 	xn_mock_image_.SetData( xn_image_ );
-  }
+}
 
   void stopRecording() {
     xn_recorder_.Release();
@@ -1337,8 +1373,8 @@ void startRecording() {
 				try { 
 					this->execute (depth_, rgb24_, has_data); 
 					if ( recording_ && has_data ) {
-					xn_mock_depth_.SetData( xn_depth_, frame_counter_ - 1, frame_counter_ - 1 );
-					xn_mock_image_.SetData( xn_image_, frame_counter_ - 1, frame_counter_ - 1 );
+					xn_mock_depth_.SetData( xn_depth_, frame_counter_, frame_counter_ * 30000 + 1 );
+					xn_mock_image_.SetData( xn_image_, frame_counter_, frame_counter_ * 30000 );
 					xn_recorder_.Record();
 					}
 				}
@@ -1656,6 +1692,7 @@ print_cli_help ()
   cout << "    --fragment <X_frames>               : fragments the stream every <X_frames>" << endl;
   cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
   cout << "    --record_log                        : record transformation log file" << endl;
+  cout << "    --fragment_registration <txt file>  : register the fragments in the file" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
