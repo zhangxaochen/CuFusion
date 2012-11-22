@@ -116,6 +116,10 @@ namespace pcl
       virtual float 
       getFramesPerSecond () const;
 
+      /** \brief Get a boost shared pointer to the \ref OpenNIDevice object. */
+      inline boost::shared_ptr<openni_wrapper::DeviceONI>
+      getDevice () const;
+
 	  bool data_updated_;
 
     protected:
@@ -191,6 +195,12 @@ namespace pcl
     public:
       EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   };
+
+  boost::shared_ptr<openni_wrapper::DeviceONI>
+  ONIGrabber::getDevice () const
+  {
+    return device_;
+  }
 
 } // namespace
 
