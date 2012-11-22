@@ -303,39 +303,46 @@ boost::shared_ptr<pcl::PolygonMesh> convertToMesh(const DeviceArray<PointXYZ>& t
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-struct FragmentMatches {
-	int base_;
-	vector< int > keys_;
-	vector< Matrix4f > transformations_;
+struct RGBDGraph {
+	struct RGBDGraphEdge {
+		int i_;
+		int frame_i_;
+		int j_;
+		int frame_j_;
+		RGBDGraphEdge( int i, int fi, int j, int fj ) : i_(i), j_(j), frame_i_(fi), frame_j_(fj) {}
+		RGBDGraphEdge() {}
+	};
+	vector< RGBDGraphEdge > edges_;
+	int index_;
 
 	void loadFromFile( string filename ) {
-		keys_.clear();
-		transformations_.clear();
+		index_ = 0;
+		edges_.clear();
+		int id1, frame1, id2, frame2;
 		FILE * f = fopen( filename.c_str(), "r" );
-		int key1, key2;
 		if ( f != NULL ) {
 			char buffer[1024];
 			while ( fgets( buffer, 1024, f ) != NULL ) {
 				if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
-					sscanf( buffer, "%d %d", &key1, &key2 );
-					base_ = key1;
-					keys_.push_back( key2 );
+					sscanf( buffer, "%d:%d %d:%d", &id1, &frame1, &id2, &frame2 );
+					edges_.push_back( RGBDGraphEdge( id1, frame1, id2, frame2 ) );
 				}
 			}
-			transformations_.resize( keys_.size() );
-			fclose( f );
+			fclose ( f );
 		}
 	}
+
 	void saveToFile( string filename ) {
 		std::ofstream file( filename.c_str() );
 		if ( file.is_open() ) {
-		  for ( unsigned int i = 0; i < keys_.size(); i++ ) {
-			file << base_ << " " << keys_[ i ] << std::endl;
-			file << transformations_[ i ] << std::endl;
+		  for ( unsigned int i = 0; i < edges_.size(); i++ ) {
+			  RGBDGraphEdge & edge = edges_[ i ];
+			  file << edge.i_ << ":" << edge.frame_i_ << " " << edge.j_ << ":" << edge.frame_j_ << endl;
 		  }
 		  file.close();
 		}
 	}
+
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -736,7 +743,7 @@ struct KinFuLSApp
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
-	use_rgbdslam_ (false), record_log_ (false)
+	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_graph_registration_ (false)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -751,7 +758,7 @@ struct KinFuLSApp
     if(shiftDistance > 2.5 * vsz)
       PCL_WARN ("WARNING Shifting distance (%.2f) is very large compared to the volume size (%.2f).\nYou can modify it using --shifting_distance.\n", shiftDistance, vsz);
 
-    kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance, fragmentRate, fragmentStart);
+    kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance);
 
     Eigen::Matrix3f R = Eigen::Matrix3f::Identity ();   // * AngleAxisf( pcl::deg2rad(-30.f), Vector3f::UnitX());
     Eigen::Vector3f t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2f);
@@ -891,6 +898,24 @@ struct KinFuLSApp
   }
 
   void
+  toggleRGBDGraphRegistration( string graph_file )
+  {
+	  rgbd_graph_.loadFromFile( graph_file );
+
+	  // locate graph index
+	  for ( rgbd_graph_.index_ = 0; rgbd_graph_.index_ < ( int )rgbd_graph_.edges_.size(); rgbd_graph_.index_++ ) {
+		  RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
+		  if ( fragment_start_ + fragment_rate_ == edge.frame_j_ ) {
+			  //cout << rgbd_graph_.index_ << endl;
+			  break;
+		  }
+	  }
+
+  	  use_graph_registration_ = use_rgbdslam_;
+	  cout << "Use rgbd graph registration: " << ( use_graph_registration_ ? "On" : "Off ( requires use rgbdslam mode )" ) << endl;
+  }
+
+  void
   writeScriptFile()
   {
     time_t rawtime;
@@ -983,6 +1008,49 @@ struct KinFuLSApp
 		}
     }
   }
+
+  void processFramedTransformation( FramedTransformation * frame_ptr ) {
+	if ( frame_ptr == NULL )
+		return;
+
+	frame_ptr->frame_ = frame_counter_;
+
+	if ( use_graph_registration_ ) {
+		if ( frame_counter_ == fragment_start_ + 1 ) {
+			frame_ptr->flag_ |= frame_ptr->ResetFlag;
+		} else if ( rgbd_graph_.index_ < ( int )rgbd_graph_.edges_.size() ) {
+			RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
+			if ( frame_counter_ > fragment_start_ + fragment_rate_ ) {				// fun part, when map is built
+				if ( frame_counter_ + fragment_rate_ < edge.frame_i_ ) {
+					// just ignore it
+					frame_ptr->flag_ |= ( frame_ptr->IgnoreRegistrationFlag | frame_ptr->IgnoreIntegrationFlag );
+				} else if ( frame_counter_ <= edge.frame_i_ ) {
+					// registration from rgbd pose
+					//frame_ptr->flag_ |= frame_ptr->IgnoreIntegrationFlag;
+					frame_ptr->type_ = frame_ptr->InitializeOnly;
+
+					if ( frame_counter_ == edge.frame_i_ ) {
+						// shift index
+						for ( rgbd_graph_.index_++; rgbd_graph_.index_ < ( int )rgbd_graph_.edges_.size(); rgbd_graph_.index_++ ) {
+							if ( rgbd_graph_.edges_[ rgbd_graph_.index_ ].frame_j_ == edge.frame_j_ ) {
+								break;
+							}
+						}
+					}
+				}
+			}
+		} else {
+			// just ignore it
+			frame_ptr->flag_ |= ( frame_ptr->IgnoreRegistrationFlag | frame_ptr->IgnoreIntegrationFlag );
+		}
+	} else {
+		if ( fragment_rate_ > 0 ) {
+			if ( frame_counter_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
+				frame_ptr->flag_ |= frame_ptr->ResetFlag;
+			}
+		}
+	}
+  }
   
   void execute(const PtrStepSz<const unsigned short>& depth, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool has_data)
   {        
@@ -1072,7 +1140,8 @@ struct KinFuLSApp
         SampledScopeTime fps(time_ms_);
     
 		// check rgbdslam data
-		FramedTransformation * frame_ptr = NULL;
+		FramedTransformation temp_frame;
+		FramedTransformation * frame_ptr = &temp_frame;
 		if ( use_rgbdslam_ && rgbd_traj_.index_ < rgbd_traj_.data_.size() && rgbd_traj_.data_[ rgbd_traj_.index_ ].frame_ == frame_counter_ ) {
 			// hit
 			//cout << "Frame #" << frame_counter_ << " is key frame with transformation matrix:" << endl;
@@ -1082,6 +1151,8 @@ struct KinFuLSApp
 			frame_ptr = &rgbd_traj_.data_[ rgbd_traj_.index_ ];
 			rgbd_traj_.index_ ++;
 		}
+
+		processFramedTransformation( frame_ptr );
 
         //run kinfu algorithm
         if (integrate_colors_)
@@ -1488,6 +1559,12 @@ void startRecording() {
   RGBDTrajectory rgbd_traj_;
   RGBDTrajectory kinfu_traj_;
 
+  bool use_graph_registration_;
+  RGBDGraph rgbd_graph_;
+
+  int fragment_rate_;
+  int fragment_start_;
+
   bool use_device_;
   bool recording_;
 
@@ -1692,7 +1769,7 @@ print_cli_help ()
   cout << "    --fragment <X_frames>               : fragments the stream every <X_frames>" << endl;
   cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
   cout << "    --record_log                        : record transformation log file" << endl;
-  cout << "    --fragment_registration <txt file>  : register the fragments in the file" << endl;
+  cout << "    --fragment_registration <graph file>: register the fragments in the file" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -1730,7 +1807,7 @@ main (int argc, char* argv[])
 	xnLogSetMaskMinSeverity(XN_LOG_MASK_ALL, XN_LOG_VERBOSE);
   }
 
-  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file;
+  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file, graph_file;
   try
   {    
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
@@ -1830,6 +1907,9 @@ main (int argc, char* argv[])
 
 	if (pc::parse_argument (argc, argv, "--use_rgbdslam", log_file) > 0)
 	  app.toggleRGBDSlam( log_file );
+
+	if (pc::parse_argument (argc, argv, "--fragment_registration", graph_file) > 0)
+	  app.toggleRGBDGraphRegistration( graph_file );
   }
 
   if ( pc::find_switch (argc, argv, "--record_log") )

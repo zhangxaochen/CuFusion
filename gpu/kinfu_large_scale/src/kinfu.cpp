@@ -72,9 +72,8 @@ namespace pcl
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const float shiftingDistance, int fragmentRate, int fragmentStart, int rows, int cols)
+pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const float shiftingDistance, int rows, int cols)
 	: cyclical_( DISTANCE_THRESHOLD, pcl::device::VOLUME_SIZE, VOLUME_X), rows_(rows), cols_(cols), global_time_(0), max_icp_distance_(0), integration_metric_threshold_(0.f), perform_last_scan_ (false), finished_(false), force_shift_(false)
-	, fragment_rate_( fragmentRate ), fragment_start_( fragmentStart )
 {
   //const Vector3f volume_size = Vector3f::Constant (VOLUME_SIZE);
   const Vector3i volume_resolution (VOLUME_X, VOLUME_Y, VOLUME_Z);
@@ -276,18 +275,14 @@ pcl::gpu::KinfuTracker::allocateBufffers (int rows, int cols)
 bool
 pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcolor, FramedTransformation * frame_ptr)
 {  
-  if ( fragment_rate_ > 0 ) {
-	  if ( fragment_start_ == 0 ) {
-		  if ( global_time_ == fragment_rate_ ) {
-			  reset();
-		  }
-	  } else if ( global_time_ == fragment_start_ ) {
-		  fragment_start_ = 0;
-		  reset();
-	  }
-  }
+	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->ResetFlag ) ) {
+	  reset();
+	}
 
   device::Intr intr (fx_, fy_, cx_, cy_);
+  if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreRegistrationFlag ) ) {
+  }
+  else
   {
     //ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
     //depth_raw.copyTo(depths_curr[0]);
@@ -391,6 +386,12 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   Matrix3frm Rcurr = Rprev; // tranform to global coo for ith camera pose
   Vector3f   tcurr = tprev;
   */
+  if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreRegistrationFlag ) )
+  {
+	  rmats_.push_back (cam_rot_global_prev); 
+	  tvecs_.push_back (cam_trans_global_prev);
+  }
+  else
   {
     //ScopeTime time("icp-all");
     for (int level_index = LEVELS-1; level_index>=0; --level_index)
@@ -455,7 +456,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 */
 
 		Eigen::Matrix<double, 6, 1> b_rgbd;
-		if ( frame_ptr != NULL ) {
+		if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->DirectApply || ( frame_ptr->type_ == frame_ptr->InitializeOnly && level_index == LEVELS - 1 && iter == 0 ) ) ) {
 			Eigen::Matrix4f trans_rgbd = getCameraPose( 0 ).matrix() * frame_ptr->transformation_;		// <--- global should be like this
 			Eigen::Affine3f aff_last;
 			aff_last.linear() = cam_rot_global_curr;
@@ -469,27 +470,12 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			b_rgbd( 4, 0 ) = trans_shift( 1, 3 );
 			b_rgbd( 5, 0 ) = trans_shift( 2, 3 );
 
-			//PCL_WARN( "%d.%d.%d\n", global_time_, level_index, iter );
-			//cout << trans_shift << endl;
-			//cout << b_rgbd.transpose() << endl;
-
-			//if ( level_index == LEVELS - 1 && iter == 0 ) {
 			A = 10000.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
 			b = 10000.0 * b_rgbd;
-			//}
 		}
 
         //checking nullspace
         double det = A.determinant ();
-
-		/*
-		if ( global_time_ % 100 == 3 ) {
-			cout << "Determinant : " << det << endl;
-			cout << "Singular matrix :" << endl << A << endl;
-			cout << "Corresponding b :" << endl << b << endl;
-		}
-		*/
-
 
 		if ( fabs (det) < 1e-15 || pcl_isnan (det) )
         {
@@ -507,11 +493,6 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         Eigen::Matrix<float, 6, 1> result = A.llt ().solve (b).cast<float>();
         //Eigen::Matrix<float, 6, 1> result = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(b);
 
-		if ( frame_ptr != NULL ) {
-			//cout << result << endl;
-			//result = b_rgbd.cast<float>();
-		}
-
         float alpha = result (0);
         float beta  = result (1);
         float gamma = result (2);
@@ -522,40 +503,14 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 		//compose
         cam_trans_global_curr = cam_rot_incremental * cam_trans_global_curr + cam_trans_incremental;
         cam_rot_global_curr = cam_rot_incremental * cam_rot_global_curr;
-/*
-        tcurr = Rinc * tcurr + tinc;
-        Rcurr = Rinc * Rcurr;
-        */
       }
     }
+
+	//save tranform
+	rmats_.push_back (cam_rot_global_curr); 
+	tvecs_.push_back (cam_trans_global_curr);
   }
-  //save tranform
 
-  /*
-	if ( frame_ptr != NULL ) {
-		Eigen::Affine3f tmp;
-		tmp.matrix() = getCameraPose( 0 ).matrix() * frame_ptr->transformation_;		// <--- global should be like this
-		cam_rot_global_curr = tmp.linear();
-		cam_trans_global_curr = tmp.translation();
-	}
-  */
-
-  rmats_.push_back (cam_rot_global_curr); 
-  tvecs_.push_back (cam_trans_global_curr);
-
-  /*
-  if ( frame_ptr != NULL ) {
-		//Eigen::Affine3f init_pose = getCameraPose();
-		//cout << init_pose.matrix() << endl;
-		//cout << getCameraPose( 0 ).matrix() * frame_ptr->transformation_ << endl;
-  }
-  */
-
-  /*
-  rmats_.push_back (Rcurr);
-  tvecs_.push_back (tcurr);
-  */
-  
   /*
   //check for shift
   bool has_shifted = cyclical_.checkForShift(tsdf_volume_, getCameraPose (), 0.6 * volume_size_, true, perform_last_scan_, force_shift_);
@@ -610,7 +565,10 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   if (integrate)
   {
     //integrateTsdfVolume(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tranc_dist, volume_);
-    integrateTsdfVolume (depth_raw, intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
+    if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreIntegrationFlag ) ) {
+	} else {
+      integrateTsdfVolume (depth_raw, intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
+	}
   }
 
   ///////////////////////////////////////////////////////////////////////////////////////////

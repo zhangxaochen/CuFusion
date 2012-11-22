@@ -60,14 +60,23 @@ namespace pcl
   namespace gpu
   {        
     struct FramedTransformation {
-	  enum ProcessType { DirectApply = 0, InitializeOnly };
+	  enum RegistrationType { Kinfu = 0, DirectApply = 1, InitializeOnly = 2 };
+	  enum ActionFlag {
+		  ResetFlag = 0x1,					// if reset at the very beginning
+		  IgnoreRegistrationFlag = 0x2,		// if discard the registration
+		  IgnoreIntegrationFlag = 0x4		// if discard integration
+	  };
 
       int id1_;
 	  int id2_;
       int frame_;
-	  ProcessType type_;
+	  RegistrationType type_;
+	  int flag_;
       Eigen::Matrix4f transformation_;
-      FramedTransformation( int id1, int id2, int f, Eigen::Matrix4f t ) : id1_( id1 ), id2_( id2 ), frame_( f ), transformation_( t ), type_( DirectApply ) {}
+	  FramedTransformation() : type_( Kinfu ), flag_( 0 ) {}
+      FramedTransformation( int id1, int id2, int f, Eigen::Matrix4f t ) : id1_( id1 ), id2_( id2 ), frame_( f ), transformation_( t ), type_( DirectApply ), flag_( 0 ) {}
+      FramedTransformation( int id1, int id2, int f, Eigen::Matrix4f t, RegistrationType tp, int flg ) 
+		  : id1_( id1 ), id2_( id2 ), frame_( f ), transformation_( t ), type_( tp ), flag_( flg ) {}
     };
 
     /** \brief KinfuTracker class encapsulates implementation of Microsoft Kinect Fusion algorithm
@@ -99,7 +108,7 @@ namespace pcl
           * \param[in] rows height of depth image
           * \param[in] cols width of depth image
           */
-        KinfuTracker (const Eigen::Vector3f &volumeSize, const float shiftingDistance, int fragmentRate = 0, int fragmentStart = 0, int rows = 480, int cols = 640);
+        KinfuTracker (const Eigen::Vector3f &volumeSize, const float shiftingDistance, int rows = 480, int cols = 640);
 
         /** \brief Sets Depth camera intrinsics
           * \param[in] fx focal length x 
@@ -357,9 +366,6 @@ namespace pcl
 
         /** \brief Size of the TSDF volume in meters. */
         float volume_size_;
-
-        int fragment_rate_;
-		int fragment_start_;
         
       public:
 		EIGEN_MAKE_ALIGNED_OPERATOR_NEW
