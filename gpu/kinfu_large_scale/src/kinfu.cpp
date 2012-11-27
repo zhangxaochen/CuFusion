@@ -391,8 +391,21 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 	  rmats_.push_back (cam_rot_global_prev); 
 	  tvecs_.push_back (cam_trans_global_prev);
   }
+  else if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->DirectApply ) )
+  {
+    Eigen::Affine3f aff_rgbd( getCameraPose( 0 ).matrix() * frame_ptr->transformation_ );
+	cam_rot_global_curr = aff_rgbd.linear();
+    cam_trans_global_curr = aff_rgbd.translation();
+	rmats_.push_back (cam_rot_global_curr); 
+	tvecs_.push_back (cam_trans_global_curr);
+  }
   else
   {
+	if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->InitializeOnly ) ) {
+		Eigen::Affine3f aff_rgbd( getCameraPose( 0 ).matrix() * frame_ptr->transformation_ );
+		cam_rot_global_curr = aff_rgbd.linear();
+		cam_trans_global_curr = aff_rgbd.translation();
+	}
     //ScopeTime time("icp-all");
     for (int level_index = LEVELS-1; level_index>=0; --level_index)
     {
@@ -455,8 +468,9 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
                           vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A.data (), b.data ());
 */
 
-		Eigen::Matrix<double, 6, 1> b_rgbd;
+		/*
 		if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->DirectApply || ( frame_ptr->type_ == frame_ptr->InitializeOnly && level_index == LEVELS - 1 && iter == 0 ) ) ) {
+			Eigen::Matrix<double, 6, 1> b_rgbd;
 			Eigen::Matrix4f trans_rgbd = getCameraPose( 0 ).matrix() * frame_ptr->transformation_;		// <--- global should be like this
 			Eigen::Affine3f aff_last;
 			aff_last.linear() = cam_rot_global_curr;
@@ -473,6 +487,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			A = 10000.0 * Eigen::Matrix<double, 6, 6, Eigen::RowMajor>::Identity();
 			b = 10000.0 * b_rgbd;
 		}
+		*/
 
         //checking nullspace
         double det = A.determinant ();
