@@ -981,23 +981,18 @@ struct KinFuApp
     {
       boost::unique_lock<boost::mutex> lock(data_ready_mutex_);
 
-      if (!triggered_capture) {
-          capture_.start (); // Start stream
-		  if ( recording_ ) {
-			  startRecording();
-		  }
+      capture_.start (); // Start stream
+	  if ( recording_ ) {
+		  startRecording();
 	  }
           
       while (!exit_ && !scene_cloud_view_.cloud_viewer_.wasStopped () && !image_view_.viewerScene_.wasStopped ())
       { 
 		bool has_data;
-        if (triggered_capture) {
-            capture_.start(); // Triggers new frame
-			has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
-			has_data = has_data && ( ( pcl::ONIGrabber * )( &capture_ ) )->data_updated_;
-		} else {
-			has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
+		if (triggered_capture) {
+			( ( ONIGrabber * ) &capture_ )->trigger(); // Triggers new frame
 		}
+		has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
                        
         try {
 		  this->execute (depth_, rgb24_, has_data);

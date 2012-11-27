@@ -1297,6 +1297,9 @@ struct KinFuLSApp
       source_image_data_.resize(rgb24_.cols * rgb24_.rows);
       image_wrapper->fillRGB(rgb24_.cols, rgb24_.rows, (unsigned char*)&source_image_data_[0]);
       rgb24_.data = &source_image_data_[0];    
+
+	  //cout << "[" << boost::this_thread::get_id() << "] : " << "Process Depth " << depth_wrapper->getDepthMetaData().FrameID() << ", " << depth_wrapper->getDepthMetaData().Timestamp() 
+		 // << " Image" << image_wrapper->getMetaData().FrameID() << ", " << image_wrapper->getMetaData().Timestamp() << endl;
       
 	  if ( recording_ ) {
 		xn_depth_.CopyFrom( depth_wrapper->getDepthMetaData() );
@@ -1419,27 +1422,18 @@ void startRecording() {
 		{
 			boost::unique_lock<boost::mutex> lock(data_ready_mutex_);
 
-			if (!triggered_capture) {
-				capture_.start ();
-        		if ( recording_ ) {
-				  startRecording();
-				}
+			capture_.start ();
+        	if ( recording_ ) {
+				startRecording();
 			}
 
 			while (!exit_ && !scene_cloud_view_.cloud_viewer_.wasStopped () && !image_view_.viewerScene_.wasStopped () && !this->kinfu_->isFinished ())
 			{ 
-				//if (triggered_capture)
-				//	capture_.start(); // Triggers new frame
-
-				//bool has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(100));
 				bool has_data;
 				if (triggered_capture) {
-					capture_.start(); // Triggers new frame
-					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
-					has_data = has_data && ( ( pcl::ONIGrabber * )( &capture_ ) )->data_updated_;
-				} else {
-					has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
+					( ( ONIGrabber * ) &capture_ )->trigger(); // Triggers new frame
 				}
+				has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
 
 				try { 
 					this->execute (depth_, rgb24_, has_data); 

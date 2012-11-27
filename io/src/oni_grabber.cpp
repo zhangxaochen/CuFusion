@@ -187,22 +187,46 @@ ONIGrabber::start ()
   }
   else
   {
+	  data_updated_ = false;
+  }
+}
+
+void ONIGrabber::trigger()
+{
 	data_updated_ = false;
     if (device_->hasImageStream ()) {
-      device_->trigger ();
-	  data_updated_ = true;
+      if ( device_->trigger () )
+		data_updated_ = true;
 	}
 
     if (device_->hasDepthStream ()) {
-      device_->trigger ();
-	  data_updated_ = true;
+      if ( device_->trigger () )
+		data_updated_ = true;
 	}
 
     if (device_->hasIRStream ()) {
-      device_->trigger ();
-	  data_updated_ = true;
+      if ( device_->trigger () )
+		data_updated_ = true;
 	}
-  }
+
+	if ( !data_updated_ && !rgb_sync_.empty() ) {
+		boost::thread( &Synchronizer<boost::shared_ptr<openni_wrapper::Image>, boost::shared_ptr<openni_wrapper::DepthImage> >::finalize, &rgb_sync_ );
+	}
+}
+
+void ONIGrabber::seekImageFrame( int frame )
+{
+	device_->seekImageFrame( frame );
+}
+
+void ONIGrabber::seekDepthFrame( int frame )
+{
+	device_->seekDepthFrame( frame );
+}
+
+void ONIGrabber::seekIRFrame( int frame )
+{
+	device_->seekIRFrame( frame );
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -207,6 +207,42 @@ openni_wrapper::DeviceONI::PlayerThreadFunction ()
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool
+openni_wrapper::DeviceONI::seekDepthFrame( int frame )
+{
+	if ( hasDepthStream() ) {
+		player_.SeekToFrame( depth_generator_.GetName(), frame, XN_PLAYER_SEEK_SET );
+		return true;
+	} else {
+		return false;
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool
+openni_wrapper::DeviceONI::seekImageFrame( int frame )
+{
+	if ( hasImageStream() ) {
+		player_.SeekToFrame( image_generator_.GetName(), frame, XN_PLAYER_SEEK_SET );
+		return true;
+	} else {
+		return false;
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool
+openni_wrapper::DeviceONI::seekIRFrame( int frame )
+{
+	if ( hasIRStream() ) {
+		player_.SeekToFrame( ir_generator_.GetName(), frame, XN_PLAYER_SEEK_SET );
+		return true;
+	} else {
+		return false;
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void __stdcall 
 openni_wrapper::DeviceONI::NewONIDepthDataAvailable (xn::ProductionNode&, void* cookie) throw ()
 {

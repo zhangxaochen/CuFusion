@@ -97,6 +97,32 @@ namespace pcl
       publish ();
     }
 
+	bool
+	empty ()
+	{
+		return ( queueT1.empty() || queueT2.empty() );
+	}
+
+	void
+	finalize ()
+	{
+      boost::unique_lock<boost::mutex> lock1 (mutex1_);
+      boost::unique_lock<boost::mutex> lock2 (mutex2_);
+
+	  if ( !queueT1.empty() && !queueT2.empty() ) {
+		  for (typename std::map<int, CallbackFunction>::iterator cb = cb_.begin (); cb != cb_.end (); ++cb)
+		  {
+			if (!cb->second.empty ())
+			{
+			  cb->second.operator()(queueT1.front ().second, queueT2.front ().second, queueT1.front ().first, queueT2.front ().first);
+			}
+		  }
+
+		  queueT1.pop_front ();
+		  queueT2.pop_front ();
+	  }
+	}
+
   private:
 
     void

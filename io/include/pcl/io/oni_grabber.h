@@ -122,6 +122,12 @@ namespace pcl
 
 	  bool data_updated_;
 
+	  void trigger();
+
+	  void seekImageFrame( int frame );
+	  void seekDepthFrame( int frame );
+	  void seekIRFrame( int frame );
+
     protected:
       /** \brief internal OpenNI (openni_wrapper) callback that handles image streams */
       void
