@@ -743,7 +743,7 @@ struct KinFuLSApp
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
-	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_graph_registration_ (false)
+	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_graph_registration_ (false), frame_id_ (0)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -1170,7 +1170,7 @@ struct KinFuLSApp
 
 	  if ( kinfu_->getGlobalTime() > 0 ) {
 		  // global_time_ == 0 only when lost and reset, in this case, we lose one frame
-		  kinfu_traj_.data_.push_back( FramedTransformation( kinfu_->getGlobalTime() - 1, kinfu_->getGlobalTime() - 1, frame_counter_, kinfu_->getCameraPose().matrix() ) );
+		  kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), kinfu_->getGlobalTime() - 1, frame_counter_, kinfu_->getCameraPose().matrix() ) );
 	  }
     }
 
@@ -1298,6 +1298,13 @@ struct KinFuLSApp
       image_wrapper->fillRGB(rgb24_.cols, rgb24_.rows, (unsigned char*)&source_image_data_[0]);
       rgb24_.data = &source_image_data_[0];    
 
+	  int image_frame_id = image_wrapper->getMetaData().FrameID();
+	  int depth_frame_id = depth_wrapper->getDepthMetaData().FrameID();
+	  if ( image_frame_id != depth_frame_id ) {
+		  PCL_WARN( "Triggered frame number asynchronized : depth %d, image %d\n", depth_frame_id, image_frame_id );
+	  } else {
+		  frame_id_ = depth_frame_id;
+	  }
 	  //cout << "[" << boost::this_thread::get_id() << "] : " << "Process Depth " << depth_wrapper->getDepthMetaData().FrameID() << ", " << depth_wrapper->getDepthMetaData().Timestamp() 
 		 // << " Image" << image_wrapper->getMetaData().FrameID() << ", " << image_wrapper->getMetaData().Timestamp() << endl;
       
@@ -1564,6 +1571,7 @@ void startRecording() {
 
   bool independent_camera_;
   int frame_counter_;
+  int frame_id_;
   bool enable_texture_extraction_;
   pcl::gpu::ScreenshotManager screenshot_manager_;
   int snapshot_rate_;
