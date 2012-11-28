@@ -106,6 +106,7 @@ namespace pcl
 	void
 	finalize ()
 	{
+      boost::unique_lock<boost::mutex> publish_lock (publish_mutex_);
       boost::unique_lock<boost::mutex> lock1 (mutex1_);
       boost::unique_lock<boost::mutex> lock2 (mutex2_);
 
@@ -121,6 +122,15 @@ namespace pcl
 		  queueT1.pop_front ();
 		  queueT2.pop_front ();
 	  }
+	}
+
+	void
+	reset()
+	{
+      boost::unique_lock<boost::mutex> lock1 (mutex1_);
+      boost::unique_lock<boost::mutex> lock2 (mutex2_);
+	  queueT1.clear();
+	  queueT2.clear();
 	}
 
   private:

@@ -216,16 +216,19 @@ void ONIGrabber::trigger()
 
 void ONIGrabber::seekImageFrame( int frame )
 {
+	rgb_sync_.reset();
 	device_->seekImageFrame( frame );
 }
 
 void ONIGrabber::seekDepthFrame( int frame )
 {
+	rgb_sync_.reset();
 	device_->seekDepthFrame( frame );
 }
 
 void ONIGrabber::seekIRFrame( int frame )
 {
+	rgb_sync_.reset();
 	device_->seekIRFrame( frame );
 }
 
@@ -286,7 +289,9 @@ ONIGrabber::imageCallback(boost::shared_ptr<openni_wrapper::Image> image, void*)
   if (num_slots<sig_cb_openni_point_cloud_rgb> () > 0 ||
       num_slots<sig_cb_openni_point_cloud_rgba> () > 0 ||
       num_slots<sig_cb_openni_image_depth_image > () > 0)
-    rgb_sync_.add0(image, image->getTimeStamp());
+  {
+    rgb_sync_.add0 (image, image->getTimeStamp ());
+  }
 
   if (image_signal_->num_slots() > 0)
     image_signal_->operator()(image);
@@ -301,7 +306,9 @@ ONIGrabber::depthCallback(boost::shared_ptr<openni_wrapper::DepthImage> depth_im
   if (num_slots<sig_cb_openni_point_cloud_rgb> () > 0 ||
       num_slots<sig_cb_openni_point_cloud_rgba> () > 0 ||
       num_slots<sig_cb_openni_image_depth_image> () > 0)
-    rgb_sync_.add1(depth_image, depth_image->getTimeStamp());
+  {
+    rgb_sync_.add1 (depth_image, depth_image->getTimeStamp ());
+  }
 
   if (num_slots<sig_cb_openni_point_cloud_i > () > 0 ||
       num_slots<sig_cb_openni_ir_depth_image > () > 0)
