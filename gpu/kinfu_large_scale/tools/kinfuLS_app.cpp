@@ -314,6 +314,8 @@ struct RGBDGraph {
 	};
 	vector< RGBDGraphEdge > edges_;
 	int index_;
+	Eigen::Matrix4f head_inv_;
+	Eigen::Matrix4f head_mat_;
 
 	void loadFromFile( string filename ) {
 		index_ = 0;
@@ -341,6 +343,10 @@ struct RGBDGraph {
 		  }
 		  file.close();
 		}
+	}
+
+	bool ended() {
+		return ( index_ >= ( int )edges_.size() );
 	}
 
 };
@@ -871,7 +877,7 @@ struct KinFuLSApp
   void
   toggleRGBDSlam( string log_file )
   {
-	  use_rgbdslam_ = true;
+	  use_rgbdslam_ = !use_device_;
 	  rgbd_traj_.loadFromFile( log_file );
 
 	  // draw on traj buffer
@@ -902,6 +908,7 @@ struct KinFuLSApp
   {
 	  rgbd_graph_.loadFromFile( graph_file );
 
+	  /*
 	  // locate graph index
 	  for ( rgbd_graph_.index_ = 0; rgbd_graph_.index_ < ( int )rgbd_graph_.edges_.size(); rgbd_graph_.index_++ ) {
 		  RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
@@ -910,6 +917,7 @@ struct KinFuLSApp
 			  break;
 		  }
 	  }
+	  */
 
   	  use_graph_registration_ = use_rgbdslam_;
 	  cout << "Use rgbd graph registration: " << ( use_graph_registration_ ? "On" : "Off ( requires use rgbdslam mode )" ) << endl;
@@ -986,7 +994,12 @@ struct KinFuLSApp
 	  Eigen::Affine3f pose = kinfu_->getCameraPose(i);
 	  //		cout << i << " debug" << endl;
 			//cout << pose.matrix() << endl;
+
 	  Eigen::Affine3f pose_1( init_inverse * pose.matrix() );
+
+	  if ( use_graph_registration_ ) {
+		  pose_1.matrix() = rgbd_graph_.head_mat_ * pose_1.matrix();
+	  }
 
 	  last_sensor_origin = sensor_origin;
       //sensor_origin = Eigen::Vector4d(pose.translation()(0), pose.translation()(1), pose.translation()(2), 1.0) - init_origin;
@@ -1009,27 +1022,103 @@ struct KinFuLSApp
     }
   }
 
-  void processFramedTransformation( FramedTransformation * frame_ptr ) {
-	if ( frame_ptr == NULL )
-		return;
+  void processGraphSchedule()
+  {
+	  if ( use_graph_registration_ && !rgbd_graph_.ended() ) {
+		  framed_transformation_.flag_ = 0;
+		  RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
+		  // we need to check frame_id_
+		  // when frame_id_ == 0, we need to initialize, seek to (edge.frame_j_ - rate_ + 1)
+		  // when frame_id_ in [edge.frame_j_ - rate_ + 1, edge.frame_j_ - 1], it is initialization
+		  // when frame_id_ == (edge.frame_j_), initlize finished, seek to (edge.frame_i_ - rate_ + 1)
+		  // when frame_id_ in [edge.frame_i_ - rate_ + 1, edge.frame_i_ - 1], it is processing
+		  // when frame_id_ == (edge.frame_i_), processing finished.
+		  //// move on to the next index_
+		  //// if frame_j_ remains, seek to (newedge.frame_i_ - rate_ + 1) --- note that sometimes seek is not needed
+		  //// otherwise, reset, seek to (newedge.frame_j_ - rate_ + 1)
+		  int js = edge.frame_j_ - fragment_rate_ + 1;
+		  int je = edge.frame_j_;
+		  int is = edge.frame_i_ - fragment_rate_ + 1;
+		  int ie = edge.frame_i_;
+		  if ( frame_id_ == 0 ) {
+			  framed_transformation_.flag_ = framed_transformation_.ResetFlag;
+			  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( js );
+		  } else if ( frame_id_ == je ) {
+			  if ( frame_id_ + 1 < is ) {
+				  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( is );
+			  }
+		  } else if ( frame_id_ == ie ) {
+			  rgbd_graph_.index_++;
+			  if ( !rgbd_graph_.ended() ) {
+				  RGBDGraph::RGBDGraphEdge & newedge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
+				  int njs = newedge.frame_j_ - fragment_rate_ + 1;
+				  int nje = newedge.frame_j_;
+				  int nis = newedge.frame_i_ - fragment_rate_ + 1;
+				  int nie = newedge.frame_i_;
+				  //if ( newedge.frame_j_ == edge.frame_j_ ) {
+					//  if ( frame_id_ + 1 < nis ) {
+					//	  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( nis );
+					//  }
+				  //} else {
+					  // reset
+					  framed_transformation_.flag_ = framed_transformation_.ResetFlag;
+					  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( njs );
+				  //}
+			  }
+		  }
+	  }
+  }
 
-	frame_ptr->frame_ = frame_counter_;
+  void processFramedTransformation()
+  {
+	  if ( use_rgbdslam_ ) {
+		  if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() ) {
+			  if ( framed_transformation_.flag_ & framed_transformation_.ResetFlag ) {
+				  framed_transformation_.transformation_ = rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
+				  rgbd_graph_.head_mat_ = framed_transformation_.transformation_;
+				  rgbd_graph_.head_inv_ = framed_transformation_.transformation_.inverse();
+				  framed_transformation_.type_ = framed_transformation_.Kinfu;
+			  } else {
+				  framed_transformation_.transformation_ = rgbd_graph_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
+				  framed_transformation_.type_ = framed_transformation_.InitializeOnly;
+			  }
+		  }
+	  }
+	 
+	  /*
+	  	// check rgbdslam data
+		FramedTransformation temp_frame;
+		FramedTransformation * frame_ptr = &temp_frame;
+		if ( use_rgbdslam_ ) {
+			if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() && rgbd_traj_.data_[ frame_id_ - 1 ].frame_ == frame_id_ ) {
+				frame_ptr = &rgbd_traj_.data_[ frame_id_ - 1 ];
+			} else if ( rgbd_traj_.index_ < rgbd_traj_.data_.size() && rgbd_traj_.data_[ rgbd_traj_.index_ ].frame_ == frame_counter_ ) {
+				frame_ptr = &rgbd_traj_.data_[ rgbd_traj_.index_ ];
+				rgbd_traj_.index_ ++;
+			}
+		}
+
+	if ( frame_id_ > 0 ) {
+		frame_ptr->frame_ = frame_id_;
+	} else {
+		frame_ptr->frame_ = frame_counter_;
+	}
 
 	if ( use_graph_registration_ ) {
-		if ( frame_counter_ == fragment_start_ + 1 ) {
+		if ( frame_ptr->frame_ == fragment_start_ + 1 ) {
 			frame_ptr->flag_ |= frame_ptr->ResetFlag;
 		} else if ( rgbd_graph_.index_ < ( int )rgbd_graph_.edges_.size() ) {
 			RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
-			if ( frame_counter_ > fragment_start_ + fragment_rate_ ) {				// fun part, when map is built
-				if ( frame_counter_ + fragment_rate_ < edge.frame_i_ ) {
+			if ( frame_ptr->frame_ > fragment_start_ + fragment_rate_ ) {				// fun part, when map is built
+				if ( frame_ptr->frame_ + fragment_rate_ < edge.frame_i_ ) {
 					// just ignore it
 					frame_ptr->flag_ |= ( frame_ptr->IgnoreRegistrationFlag | frame_ptr->IgnoreIntegrationFlag );
-				} else if ( frame_counter_ <= edge.frame_i_ ) {
+				} else if ( frame_ptr->frame_ <= edge.frame_i_ ) {
 					// registration from rgbd pose
 					//frame_ptr->flag_ |= frame_ptr->IgnoreIntegrationFlag;
 					frame_ptr->type_ = frame_ptr->InitializeOnly;
 
-					if ( frame_counter_ == edge.frame_i_ ) {
+					if ( frame_ptr->frame_ == edge.frame_i_ ) {
 						// shift index
 						for ( rgbd_graph_.index_++; rgbd_graph_.index_ < ( int )rgbd_graph_.edges_.size(); rgbd_graph_.index_++ ) {
 							if ( rgbd_graph_.edges_[ rgbd_graph_.index_ ].frame_j_ == edge.frame_j_ ) {
@@ -1045,11 +1134,12 @@ struct KinFuLSApp
 		}
 	} else {
 		if ( fragment_rate_ > 0 ) {
-			if ( frame_counter_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
+			if ( frame_ptr->frame_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
 				frame_ptr->flag_ |= frame_ptr->ResetFlag;
 			}
 		}
 	}
+	*/
   }
   
   void execute(const PtrStepSz<const unsigned short>& depth, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool has_data)
@@ -1139,24 +1229,11 @@ struct KinFuLSApp
       {
         SampledScopeTime fps(time_ms_);
     
-		// check rgbdslam data
-		FramedTransformation temp_frame;
-		FramedTransformation * frame_ptr = &temp_frame;
-		if ( use_rgbdslam_ && rgbd_traj_.index_ < rgbd_traj_.data_.size() && rgbd_traj_.data_[ rgbd_traj_.index_ ].frame_ == frame_counter_ ) {
-			// hit
-			//cout << "Frame #" << frame_counter_ << " is key frame with transformation matrix:" << endl;
-			//cout << rgbd_traj_.data_[ rgbd_traj_.index_ ].transformation_ << endl;
-			//cout << rgbd_traj_.data_[ rgbd_traj_.index_ ].transformation_ * kinfu_->getCameraPose( 0 ).matrix() << endl;
-			//cout << kinfu_->getCameraPose().matrix() << endl;
-			frame_ptr = &rgbd_traj_.data_[ rgbd_traj_.index_ ];
-			rgbd_traj_.index_ ++;
-		}
-
-		processFramedTransformation( frame_ptr );
+		processFramedTransformation();
 
         //run kinfu algorithm
         if (integrate_colors_)
-          has_image = (*kinfu_) (depth_device_, &image_view_.colors_device_, frame_ptr);
+          has_image = (*kinfu_) (depth_device_, &image_view_.colors_device_, &framed_transformation_);
         else
           has_image = (*kinfu_) (depth_device_);
       }
@@ -1304,6 +1381,7 @@ struct KinFuLSApp
 		  PCL_WARN( "Triggered frame number asynchronized : depth %d, image %d\n", depth_frame_id, image_frame_id );
 	  } else {
 		  frame_id_ = depth_frame_id;
+		  PCL_INFO( "Triggered frame : depth %d, image %d\n", depth_frame_id, image_frame_id );
 	  }
 	  //cout << "[" << boost::this_thread::get_id() << "] : " << "Process Depth " << depth_wrapper->getDepthMetaData().FrameID() << ", " << depth_wrapper->getDepthMetaData().Timestamp() 
 		 // << " Image" << image_wrapper->getMetaData().FrameID() << ", " << image_wrapper->getMetaData().Timestamp() << endl;
@@ -1438,6 +1516,7 @@ void startRecording() {
 			{ 
 				bool has_data;
 				if (triggered_capture) {
+					processGraphSchedule();
 					( ( ONIGrabber * ) &capture_ )->trigger(); // Triggers new frame
 				}
 				has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
@@ -1452,6 +1531,20 @@ void startRecording() {
 				}
 				catch (const std::bad_alloc& /*e*/) { cout << "Bad alloc" << endl; break; }
 				catch (const std::exception& /*e*/) { cout << "Exception" << endl; break; }
+
+				/*
+				if ( frame_id_ == 5 ) {
+					cout << "seek depth to " << frame_id_ + 5 << endl;
+					( ( ONIGrabber * ) &capture_ )->seekDepthFrame( frame_id_ + 5 );
+					boost::this_thread::sleep( boost::posix_time::millisec( 10000 ) );
+				} else if ( frame_id_ == 15 ) {
+					cout << "seek depth to " << frame_id_ + 5 << endl;
+					( ( ONIGrabber * ) &capture_ )->seekDepthFrame( frame_id_ + 5 );
+				} else if ( frame_id_ == 25 ) {
+					cout << "seek depth to " << frame_id_ + 5 << endl;
+					( ( ONIGrabber * ) &capture_ )->seekDepthFrame( frame_id_ + 5 );
+				}
+				*/
 
 				scene_cloud_view_.cloud_viewer_.spinOnce (3);
 				//~ cout << "In main loop" << endl;                  
@@ -1562,6 +1655,7 @@ void startRecording() {
 
   bool use_graph_registration_;
   RGBDGraph rgbd_graph_;
+  FramedTransformation framed_transformation_;
 
   int fragment_rate_;
   int fragment_start_;
