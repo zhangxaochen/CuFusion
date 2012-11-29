@@ -907,20 +907,13 @@ struct KinFuLSApp
   toggleRGBDGraphRegistration( string graph_file )
   {
 	  rgbd_graph_.loadFromFile( graph_file );
-
-	  /*
-	  // locate graph index
-	  for ( rgbd_graph_.index_ = 0; rgbd_graph_.index_ < ( int )rgbd_graph_.edges_.size(); rgbd_graph_.index_++ ) {
-		  RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
-		  if ( fragment_start_ + fragment_rate_ == edge.frame_j_ ) {
-			  //cout << rgbd_graph_.index_ << endl;
-			  break;
-		  }
-	  }
-	  */
-
   	  use_graph_registration_ = use_rgbdslam_;
 	  cout << "Use rgbd graph registration: " << ( use_graph_registration_ ? "On" : "Off ( requires use rgbdslam mode )" ) << endl;
+  }
+
+  void
+  toggleDistanceRegistration( double fragment_distance )
+  {
   }
 
   void
@@ -1071,7 +1064,7 @@ struct KinFuLSApp
 
   void processFramedTransformation()
   {
-	  if ( use_rgbdslam_ ) {
+	  if ( use_graph_registration_ ) {
 		  if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() ) {
 			  if ( framed_transformation_.flag_ & framed_transformation_.ResetFlag ) {
 				  framed_transformation_.transformation_ = rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
@@ -1083,6 +1076,14 @@ struct KinFuLSApp
 				  framed_transformation_.type_ = framed_transformation_.InitializeOnly;
 			  }
 		  }
+	  } else {
+		if ( fragment_rate_ > 0 ) {
+			if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
+				framed_transformation_.flag_ |= framed_transformation_.ResetFlag;
+			} else {
+				framed_transformation_.flag_ = 0;
+			}
+		}
 	  }
 	 
 	  /*
@@ -1245,7 +1246,7 @@ struct KinFuLSApp
 	  image_view_.showTraj (traj_);
       //image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
 
-	  if ( kinfu_->getGlobalTime() > 0 ) {
+	  if ( record_log_ && kinfu_->getGlobalTime() > 0 ) {
 		  // global_time_ == 0 only when lost and reset, in this case, we lose one frame
 		  kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), kinfu_->getGlobalTime() - 1, frame_counter_, kinfu_->getCameraPose().matrix() ) );
 	  }
@@ -1866,6 +1867,7 @@ print_cli_help ()
   cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
   cout << "    --record_log                        : record transformation log file" << endl;
   cout << "    --fragment_registration <graph file>: register the fragments in the file" << endl;
+  cout << "    --fragment_distance <distance>      : register the fragments based on <distance>" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2004,8 +2006,11 @@ main (int argc, char* argv[])
 	if (pc::parse_argument (argc, argv, "--use_rgbdslam", log_file) > 0)
 	  app.toggleRGBDSlam( log_file );
 
+	double fragment_distance = 0.0;
 	if (pc::parse_argument (argc, argv, "--fragment_registration", graph_file) > 0)
 	  app.toggleRGBDGraphRegistration( graph_file );
+	else if (pc::parse_argument  (argc, argv, "--fragment_distance", fragment_distance) > 0)
+	  app.toggleDistanceRegistration( fragment_distance );
   }
 
   if ( pc::find_switch (argc, argv, "--record_log") )
