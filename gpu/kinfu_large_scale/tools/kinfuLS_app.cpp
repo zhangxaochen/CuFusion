@@ -316,6 +316,10 @@ struct RGBDGraph {
 	int index_;
 	Eigen::Matrix4f head_inv_;
 	Eigen::Matrix4f head_mat_;
+	int head_frame_;
+	Eigen::Matrix4f tail_inv_;
+	Eigen::Matrix4f tail_mat_;
+	int tail_frame_;
 
 	void loadFromFile( string filename ) {
 		index_ = 0;
@@ -907,13 +911,8 @@ struct KinFuLSApp
   toggleRGBDGraphRegistration( string graph_file )
   {
 	  rgbd_graph_.loadFromFile( graph_file );
-  	  use_graph_registration_ = use_rgbdslam_;
+  	  use_graph_registration_ = ( use_rgbdslam_ && fragment_rate_ > 0 );
 	  cout << "Use rgbd graph registration: " << ( use_graph_registration_ ? "On" : "Off ( requires use rgbdslam mode )" ) << endl;
-  }
-
-  void
-  toggleDistanceRegistration( double fragment_distance )
-  {
   }
 
   void
@@ -1015,10 +1014,27 @@ struct KinFuLSApp
     }
   }
 
+  void processGraphSchedule_SetHead( int head_frame_ )
+  {
+	  framed_transformation_.flag_ = framed_transformation_.ResetFlag;
+	  rgbd_graph_.head_frame_ = head_frame_;
+	  rgbd_graph_.head_mat_ = rgbd_traj_.data_[ head_frame_ - 1 ].transformation_;
+	  rgbd_graph_.head_inv_ = rgbd_graph_.head_mat_.inverse();
+  }
+
+  void processGraphSchedule_SetTail( int tail_frame )
+  {
+	  // note that tail matrix is the relevant matrix to current world
+	  framed_transformation_.flag_ = framed_transformation_.IgnoreIntegrationFlag;
+	  rgbd_graph_.tail_frame_ = tail_frame;
+	  rgbd_graph_.tail_mat_ = kinfu_->getCameraPose().matrix();
+	  rgbd_graph_.tail_inv_ = rgbd_graph_.tail_mat_.inverse();
+  }
+
   void processGraphSchedule()
   {
 	  if ( use_graph_registration_ && !rgbd_graph_.ended() ) {
-		  framed_transformation_.flag_ = 0;
+		  framed_transformation_.flag_ &= ~framed_transformation_.ResetFlag;
 		  RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
 		  // we need to check frame_id_
 		  // when frame_id_ == 0, we need to initialize, seek to (edge.frame_j_ - rate_ + 1)
@@ -1034,12 +1050,16 @@ struct KinFuLSApp
 		  int is = edge.frame_i_ - fragment_rate_ + 1;
 		  int ie = edge.frame_i_;
 		  if ( frame_id_ == 0 ) {
-			  framed_transformation_.flag_ = framed_transformation_.ResetFlag;
+			  processGraphSchedule_SetHead( js );
 			  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( js );
 		  } else if ( frame_id_ == je ) {
-			  if ( frame_id_ + 1 < is ) {
-				  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( is );
+			  processGraphSchedule_SetTail( je );
+			  if ( frame_id_ + 1 != ie ) {
+				  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( ie );
 			  }
+			  //if ( frame_id_ + 1 != is ) {
+				  //( ( ONIGrabber * ) &capture_ )->seekDepthFrame( is );
+			  //}
 		  } else if ( frame_id_ == ie ) {
 			  rgbd_graph_.index_++;
 			  if ( !rgbd_graph_.ended() ) {
@@ -1048,15 +1068,20 @@ struct KinFuLSApp
 				  int nje = newedge.frame_j_;
 				  int nis = newedge.frame_i_ - fragment_rate_ + 1;
 				  int nie = newedge.frame_i_;
-				  //if ( newedge.frame_j_ == edge.frame_j_ ) {
-					//  if ( frame_id_ + 1 < nis ) {
-					//	  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( nis );
-					//  }
-				  //} else {
+				  if ( newedge.frame_j_ == edge.frame_j_ ) {
+					  if ( frame_id_ + 1 != nie ) {
+							( ( ONIGrabber * ) &capture_ )->seekDepthFrame( nie );
+					  }
+					  //if ( frame_id_ + 1 != nis ) {
+						  //( ( ONIGrabber * ) &capture_ )->seekDepthFrame( nis );
+					  //}
+				  } else {
 					  // reset
-					  framed_transformation_.flag_ = framed_transformation_.ResetFlag;
+					  processGraphSchedule_SetHead( njs );
 					  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( njs );
-				  //}
+				  }
+			  } else {
+				  exit_ = true;
 			  }
 		  }
 	  }
@@ -1068,8 +1093,6 @@ struct KinFuLSApp
 		  if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() ) {
 			  if ( framed_transformation_.flag_ & framed_transformation_.ResetFlag ) {
 				  framed_transformation_.transformation_ = rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
-				  rgbd_graph_.head_mat_ = framed_transformation_.transformation_;
-				  rgbd_graph_.head_inv_ = framed_transformation_.transformation_.inverse();
 				  framed_transformation_.type_ = framed_transformation_.Kinfu;
 			  } else {
 				  framed_transformation_.transformation_ = rgbd_graph_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
@@ -1246,9 +1269,20 @@ struct KinFuLSApp
 	  image_view_.showTraj (traj_);
       //image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
 
-	  if ( record_log_ && kinfu_->getGlobalTime() > 0 ) {
-		  // global_time_ == 0 only when lost and reset, in this case, we lose one frame
-		  kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), kinfu_->getGlobalTime() - 1, frame_counter_, kinfu_->getCameraPose().matrix() ) );
+	  if ( record_log_ ) {
+		  if ( use_graph_registration_ ) {
+			  if ( framed_transformation_.flag_ & framed_transformation_.IgnoreIntegrationFlag ) {
+					kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), rgbd_graph_.tail_frame_, frame_id_, rgbd_graph_.tail_inv_ * kinfu_->getCameraPose().matrix() ) );
+					//cout << rgbd_graph_.tail_inv_ << endl;
+					//cout << kinfu_->getCameraPose().matrix() << endl;
+					//cout << rgbd_graph_.tail_inv_ * kinfu_->getCameraPose().matrix() << endl;
+			  }
+		  } else {
+			  if ( kinfu_->getGlobalTime() > 0 ) {
+				// global_time_ == 0 only when lost and reset, in this case, we lose one frame
+				kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), kinfu_->getGlobalTime() - 1, frame_counter_, kinfu_->getCameraPose().matrix() ) );
+			  }
+		  }
 	  }
     }
 
@@ -1867,7 +1901,6 @@ print_cli_help ()
   cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
   cout << "    --record_log                        : record transformation log file" << endl;
   cout << "    --fragment_registration <graph file>: register the fragments in the file" << endl;
-  cout << "    --fragment_distance <distance>      : register the fragments based on <distance>" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2006,11 +2039,8 @@ main (int argc, char* argv[])
 	if (pc::parse_argument (argc, argv, "--use_rgbdslam", log_file) > 0)
 	  app.toggleRGBDSlam( log_file );
 
-	double fragment_distance = 0.0;
 	if (pc::parse_argument (argc, argv, "--fragment_registration", graph_file) > 0)
 	  app.toggleRGBDGraphRegistration( graph_file );
-	else if (pc::parse_argument  (argc, argv, "--fragment_distance", fragment_distance) > 0)
-	  app.toggleDistanceRegistration( fragment_distance );
   }
 
   if ( pc::find_switch (argc, argv, "--record_log") )
