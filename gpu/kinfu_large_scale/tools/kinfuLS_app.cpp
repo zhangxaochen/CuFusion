@@ -1099,6 +1099,11 @@ struct KinFuLSApp
 				  framed_transformation_.type_ = framed_transformation_.InitializeOnly;
 			  }
 		  }
+	  } else if ( use_rgbdslam_ ) {
+		  if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() ) {
+			  framed_transformation_.transformation_ = rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
+			  framed_transformation_.type_ = framed_transformation_.DirectApply;
+		  }
 	  } else {
 		if ( fragment_rate_ > 0 ) {
 			if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
@@ -1900,7 +1905,7 @@ print_cli_help ()
   cout << "    --fragment <X_frames>               : fragments the stream every <X_frames>" << endl;
   cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
   cout << "    --record_log                        : record transformation log file" << endl;
-  cout << "    --fragment_registration <graph file>: register the fragments in the file" << endl;
+  cout << "    --graph_registration <graph file>   : register the fragments in the file" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2039,7 +2044,7 @@ main (int argc, char* argv[])
 	if (pc::parse_argument (argc, argv, "--use_rgbdslam", log_file) > 0)
 	  app.toggleRGBDSlam( log_file );
 
-	if (pc::parse_argument (argc, argv, "--fragment_registration", graph_file) > 0)
+	if (pc::parse_argument (argc, argv, "--graph_registration", graph_file) > 0)
 	  app.toggleRGBDGraphRegistration( graph_file );
   }
 
