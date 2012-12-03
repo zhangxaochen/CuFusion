@@ -359,6 +359,7 @@ struct RGBDGraph {
 struct RGBDTrajectory {
 	vector< pcl::gpu::FramedTransformation > data_;
 	int index_;
+	Eigen::Matrix4f head_inv_;
 	void loadFromFile( string filename ) {
 		data_.clear();
 		index_ = 0;
@@ -382,6 +383,7 @@ struct RGBDTrajectory {
 			}
 		  }
 		  fclose ( f );
+		  head_inv_ = data_[ 0 ].transformation_.inverse();
 		}
 	}
 	void saveToFile( string filename ) {
@@ -1101,7 +1103,7 @@ struct KinFuLSApp
 		  }
 	  } else if ( use_rgbdslam_ ) {
 		  if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() ) {
-			  framed_transformation_.transformation_ = rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
+			  framed_transformation_.transformation_ = rgbd_traj_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
 			  framed_transformation_.type_ = framed_transformation_.DirectApply;
 		  }
 	  } else {
