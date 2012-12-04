@@ -1097,13 +1097,13 @@ struct KinFuLSApp
 				  framed_transformation_.transformation_ = rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
 				  framed_transformation_.type_ = framed_transformation_.Kinfu;
 			  } else {
-				  framed_transformation_.transformation_ = rgbd_graph_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
+				  framed_transformation_.transformation_ = kinfu_->getCameraPose( 0 ) * rgbd_graph_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
 				  framed_transformation_.type_ = framed_transformation_.InitializeOnly;
 			  }
 		  }
 	  } else if ( use_rgbdslam_ ) {
 		  if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() ) {
-			  framed_transformation_.transformation_ = rgbd_traj_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
+			  framed_transformation_.transformation_ = kinfu_->getCameraPose( 0 ) * rgbd_traj_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
 			  framed_transformation_.type_ = framed_transformation_.DirectApply;
 		  }
 	  } else {
