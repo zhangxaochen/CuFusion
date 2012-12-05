@@ -77,7 +77,7 @@ pcl::gpu::RayCaster::run(const TsdfVolume& volume, const Affine3f& camera_pose, 
   camera_pose_.linear() = camera_pose.linear();
   camera_pose_.translation() = camera_pose.translation();
   volume_size_ = volume.getSize();
-  device::Intr intr (fx_, fy_, cx_, cy_);
+  device::Intr intr (fx_, fy_, cx_, cy_, 0);
 
   vertex_map_.create(rows * 3, cols);
   normal_map_.create(rows * 3, cols);
@@ -123,7 +123,7 @@ pcl::gpu::RayCaster::generateSceneView(View& view, const Vector3f& light_source_
 void
 pcl::gpu::RayCaster::generateDepthImage(Depth& depth) const
 {
-  device::Intr intr (fx_, fy_, cx_, cy_);
+  device::Intr intr (fx_, fy_, cx_, cy_, 0);
   
   depth.create(rows, cols);    
   

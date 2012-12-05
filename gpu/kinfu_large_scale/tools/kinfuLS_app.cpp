@@ -781,7 +781,8 @@ struct KinFuLSApp
     kinfu_->setInitialCameraPose (pose);
     kinfu_->volume().setTsdfTruncDist (0.030f/*meters*/);
     kinfu_->setIcpCorespFilteringParams (0.1f/*meters*/, sin ( pcl::deg2rad(20.f) ));
-    kinfu_->setDepthTruncationForICP(3.f/*meters*/);
+    kinfu_->setDepthTruncationForICP(2.5f/*meters*/);
+    kinfu_->setDepthTruncationForIntegrate(2.5f/*meters*/);
     kinfu_->setCameraMovementThreshold(0.001f);
     
     //Init KinFuLSApp            

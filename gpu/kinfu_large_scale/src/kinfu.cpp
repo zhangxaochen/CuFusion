@@ -73,7 +73,7 @@ namespace pcl
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const float shiftingDistance, int rows, int cols)
-	: cyclical_( DISTANCE_THRESHOLD, pcl::device::VOLUME_SIZE, VOLUME_X), rows_(rows), cols_(cols), global_time_(0), max_icp_distance_(0), integration_metric_threshold_(0.f), perform_last_scan_ (false), finished_(false), force_shift_(false)
+	: cyclical_( DISTANCE_THRESHOLD, pcl::device::VOLUME_SIZE, VOLUME_X), rows_(rows), cols_(cols), global_time_(0), max_icp_distance_(0), integration_metric_threshold_(0.f), perform_last_scan_ (false), finished_(false), force_shift_(false), max_integrate_distance_(0)
 {
   //const Vector3f volume_size = Vector3f::Constant (VOLUME_SIZE);
   const Vector3i volume_resolution (VOLUME_X, VOLUME_Y, VOLUME_Z);
@@ -142,6 +142,13 @@ void
 pcl::gpu::KinfuTracker::setDepthTruncationForICP (float max_icp_distance)
 {
   max_icp_distance_ = max_icp_distance;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void
+pcl::gpu::KinfuTracker::setDepthTruncationForIntegrate (float max_integrate_distance)
+{
+  max_integrate_distance_ = max_integrate_distance;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -279,7 +286,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 	  reset();
 	}
 
-  device::Intr intr (fx_, fy_, cx_, cy_);
+  device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
   if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreRegistrationFlag ) ) {
   }
   else
@@ -318,6 +325,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
     float3 device_volume_size = device_cast<const float3>(tsdf_volume_->getSize());
 
     device::integrateTsdfVolume(depth_raw, intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
+    //device::integrateTsdfVolume(depths_curr_[ 0 ], intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
     
     /*
     Matrix3frm init_Rcam = rmats_[0]; //  [Ri|ti] - pos of camera, i.e.
@@ -584,6 +592,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
     if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreIntegrationFlag ) ) {
 	} else {
       integrateTsdfVolume (depth_raw, intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
+      //integrateTsdfVolume (depths_curr_[0], intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
 	}
   }
 

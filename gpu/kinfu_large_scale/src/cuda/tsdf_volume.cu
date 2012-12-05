@@ -397,7 +397,11 @@ namespace pcl
       float yl = (y - intr.cy) / intr.fy;
       float lambda = sqrtf (xl * xl + yl * yl + 1);
 
-      scaled.ptr (y)[x] = Dp * lambda/1000.f; //meters
+	  float res = Dp * lambda/1000.f; //meters
+	  if ( intr.trunc_dist > 0 && res > intr.trunc_dist )
+		  scaled.ptr (y)[x] = 0;
+	  else
+		scaled.ptr (y)[x] = res;
     }
 
     __global__ void

@@ -132,6 +132,9 @@ namespace pcl
         void
         setDepthTruncationForICP (float max_icp_distance = 0.f);
 
+		void
+		setDepthTruncationForIntegrate (float max_integrate_distance = 0.f);
+
         /** \brief Sets ICP filtering parameters.
           * \param[in] distThreshold distance.
           * \param[in] sineOfAngle sine of angle between normals.
@@ -282,6 +285,8 @@ namespace pcl
 
         /** \brief Truncation threshold for depth image for ICP step */
         float max_icp_distance_;
+
+		float max_integrate_distance_;
 
         /** \brief Intrinsic parameters of depth camera. */
         float fx_, fy_, cx_, cy_;
