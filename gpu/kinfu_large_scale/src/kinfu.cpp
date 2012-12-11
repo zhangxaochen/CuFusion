@@ -364,6 +364,13 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   // Previous global translation
   Vector3f   cam_trans_global_prev = tvecs_[global_time_ - 1];          // transform from camera to global coo space for (i-1)th camera pose
 
+	if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->InitializeOnly ) ) {
+		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
+		cam_rot_global_prev = aff_rgbd.linear();
+		cam_trans_global_prev = aff_rgbd.translation();
+	}
+
+
   // Previous global inverse rotation
   Matrix3frm cam_rot_global_prev_inv = cam_rot_global_prev.inverse ();  // Rprev.t();
   
@@ -374,13 +381,40 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   // CONVERT TO DEVICE TYPES 
   //LOCAL PREVIOUS TRANSFORM
   Mat33&  device_cam_rot_local_prev_inv = device_cast<Mat33> (cam_rot_global_prev_inv);
+  Mat33&  device_cam_rot_local_prev = device_cast<Mat33> (cam_rot_global_prev); 
 
   float3& device_cam_trans_local_prev_tmp = device_cast<float3> (cam_trans_global_prev);
   float3 device_cam_trans_local_prev;
   device_cam_trans_local_prev.x = device_cam_trans_local_prev_tmp.x - (getCyclicalBufferStructure ())->origin_metric.x;
   device_cam_trans_local_prev.y = device_cam_trans_local_prev_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
   device_cam_trans_local_prev.z = device_cam_trans_local_prev_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;
+  float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
  
+  ///////////////////////////////////////////////////////////////////////////////////////////
+  // Ray casting
+  /*Mat33& device_Rcurr = device_cast<Mat33> (Rcurr);*/
+  {          
+    raycast (intr, device_cam_rot_local_prev, device_cam_trans_local_prev, tsdf_volume_->getTsdfTruncDist (), device_volume_size, tsdf_volume_->data (), getCyclicalBufferStructure (), vmaps_g_prev_[0], nmaps_g_prev_[0]);    
+  }
+  {
+    // POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
+    Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
+    float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
+    
+    //~ PCL_INFO ("Raycasting with cube origin at %f, %f, %f\n", cube_origin.x, cube_origin.y, cube_origin.z);
+
+    MapArr& vmap_temp = vmaps_g_prev_[0];
+    MapArr& nmap_temp = nmaps_g_prev_[0];
+    
+    device::tranformMaps (vmap_temp, nmap_temp, rotation_id, cube_origin, vmaps_g_prev_[0], nmaps_g_prev_[0]);
+    
+    for (int i = 1; i < LEVELS; ++i)
+    {
+      resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
+      resizeNMap (nmaps_g_prev_[i-1], nmaps_g_prev_[i]);
+    }
+    pcl::device::sync ();
+  }
   /*
   
   Matrix3frm Rprev = rmats_[global_time_ - 1]; //  [Ri|ti] - pos of camera, i.e.
@@ -410,11 +444,6 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   }
   else
   {
-	if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->InitializeOnly ) ) {
-		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
-		cam_rot_global_curr = aff_rgbd.linear();
-		cam_trans_global_curr = aff_rgbd.translation();
-	}
     //ScopeTime time("icp-all");
     for (int level_index = LEVELS-1; level_index>=0; --level_index)
     {
@@ -509,8 +538,16 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 			cout << "Determinant : " << det << endl;
 			cout << "Singular matrix :" << endl << A << endl;
 			cout << "Corresponding b :" << endl << b << endl;
-          reset ();
-          return (false);
+
+			if ( frame_ptr != NULL && frame_ptr->type_ == frame_ptr->InitializeOnly ) {
+				Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
+				cam_rot_global_curr = aff_rgbd.linear();
+				cam_trans_global_curr = aff_rgbd.translation();
+				break;
+			} else {
+			  reset ();
+			  return (false);
+			}
         }
         //float maxc = A.maxCoeff();
 
@@ -581,7 +618,6 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 
   ///////////////////////////////////////////////////////////////////////////////////////////
   // Volume integration
-  float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
 /*
   Matrix3frm Rcurr_inv = Rcurr.inverse ();
   Mat33&  device_Rcurr_inv = device_cast<Mat33> (Rcurr_inv);
@@ -596,12 +632,6 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 	}
   }
 
-  ///////////////////////////////////////////////////////////////////////////////////////////
-  // Ray casting
-  /*Mat33& device_Rcurr = device_cast<Mat33> (Rcurr);*/
-  {          
-    raycast (intr, device_cam_rot_local_curr, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), device_volume_size, tsdf_volume_->data (), getCyclicalBufferStructure (), vmaps_g_prev_[0], nmaps_g_prev_[0]);    
-  }
   {
   if ( pcolor && color_volume_ )
     {
@@ -610,25 +640,6 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 	  device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_cam_rot_local_curr_inv, device_cam_trans_local_curr, vmaps_g_prev_[0], 
 		*pcolor, device_volume_size, color_volume_->data(), getCyclicalBufferStructure(), color_volume_->getMaxWeight());
     }
-  }
-  {
-    // POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
-    Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
-    float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
-    
-    //~ PCL_INFO ("Raycasting with cube origin at %f, %f, %f\n", cube_origin.x, cube_origin.y, cube_origin.z);
-
-    MapArr& vmap_temp = vmaps_g_prev_[0];
-    MapArr& nmap_temp = nmaps_g_prev_[0];
-    
-    device::tranformMaps (vmap_temp, nmap_temp, rotation_id, cube_origin, vmaps_g_prev_[0], nmaps_g_prev_[0]);
-    
-    for (int i = 1; i < LEVELS; ++i)
-    {
-      resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
-      resizeNMap (nmaps_g_prev_[i-1], nmaps_g_prev_[i]);
-    }
-    pcl::device::sync ();
   }
 
   //if(has_shifted && perform_last_scan_)

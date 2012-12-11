@@ -48,6 +48,7 @@
 #define _CRT_SECURE_NO_DEPRECATE
 
 #include <iostream>
+#include <hash_map>
 
 #include <XnLog.h>
 #include <pcl/console/parse.h>
@@ -113,6 +114,7 @@
 }
 
 using namespace std;
+using namespace stdext;
 using namespace pcl;
 using namespace pcl::gpu;
 using namespace Eigen;
@@ -386,6 +388,7 @@ struct RGBDTrajectory {
 		  head_inv_ = data_[ 0 ].transformation_.inverse();
 		}
 	}
+
 	void saveToFile( string filename ) {
 		std::ofstream file( filename.c_str() );
 		if ( file.is_open() ) {
@@ -395,6 +398,10 @@ struct RGBDTrajectory {
 		  }
 		  file.close();
 		}
+	}
+
+	bool ended() {
+		return ( index_ >= ( int )data_.size() );
 	}
 };
 
@@ -919,6 +926,23 @@ struct KinFuLSApp
   }
 
   void
+  toggleSchedule( string schedule_file )
+  {
+	  schedule_traj_.loadFromFile( schedule_file );
+	  use_schedule_ = use_graph_registration_;
+
+	  if ( use_schedule_ ) {
+			next_pointers_.resize( rgbd_traj_.data_.size() );
+			for ( int i = 0; i < ( int )rgbd_graph_.edges_.size(); i++ ) {
+				RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ i ];
+				next_pointers_[ edge.frame_i_ - 1 ].push_back( edge.frame_j_ - 1 );
+			}
+	  }
+
+	  cout << "Use schedule: " << ( use_schedule_ ? "On" : "Off ( requires use graph registration mode )" ) << endl;
+  }
+
+  void
   writeScriptFile()
   {
     time_t rawtime;
@@ -1036,7 +1060,23 @@ struct KinFuLSApp
 
   void processGraphSchedule()
   {
-	  if ( use_graph_registration_ && !rgbd_graph_.ended() ) {
+	  if ( use_schedule_ ) {
+		  if ( schedule_traj_.ended() ) {
+			  exit_ = true;
+			  return;
+		  }
+		  FramedTransformation & ft = schedule_traj_.data_[ schedule_traj_.index_ ];
+		  framed_transformation_.type_ = ( FramedTransformation::RegistrationType )ft.id1_;
+		  framed_transformation_.flag_ = ft.id2_;
+		  framed_transformation_.transformation_ = ft.transformation_;
+		  if ( frame_id_ == 0 || frame_id_ + 1 != ft.frame_ ) {
+			  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( ft.frame_ );
+		  }
+		  schedule_traj_.index_++;
+	  } else if ( use_graph_registration_ ) {
+		  if ( rgbd_graph_.ended() ) {
+			  return;
+		  }
 		  framed_transformation_.flag_ &= ~framed_transformation_.ResetFlag;
 		  RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ rgbd_graph_.index_ ];
 		  // we need to check frame_id_
@@ -1092,7 +1132,9 @@ struct KinFuLSApp
 
   void processFramedTransformation()
   {
-	  if ( use_graph_registration_ ) {
+	  if ( use_schedule_ ) {
+		  // follow the rules set in schedule file
+	  } else if ( use_graph_registration_ ) {
 		  if ( frame_id_ > 0 && frame_id_ <= ( int )rgbd_traj_.data_.size() ) {
 			  if ( framed_transformation_.flag_ & framed_transformation_.ResetFlag ) {
 				  framed_transformation_.transformation_ = rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
@@ -1278,7 +1320,33 @@ struct KinFuLSApp
       //image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
 
 	  if ( record_log_ ) {
-		  if ( use_graph_registration_ ) {
+		  if ( use_schedule_ ) {
+			  if ( framed_transformation_.flag_ & framed_transformation_.ResetFlag ) {
+				  schedule_matrices_.clear();
+			  }
+			  if ( framed_transformation_.flag_ & framed_transformation_.PushMatrixHashFlag ) {
+				  pair< int, FramedTransformation > map_data;
+				  schedule_matrices_.insert( pair< int, Matrix4f >( frame_id_ - 1, kinfu_->getCameraPose().matrix().inverse() ) );
+				  //PCL_INFO( "Frame #%d : insert matrix into hash map\n", frame_id_ );
+			  } else if ( framed_transformation_.flag_ & framed_transformation_.IgnoreIntegrationFlag ) {
+				  int i = frame_id_ - 1;
+				  vector< int > & prev = next_pointers_[ i ];
+				  hash_map< int, Matrix4f >::const_iterator it;
+				  for ( int k = 0; k < prev.size(); k++ ) {
+					  it = schedule_matrices_.find( prev[ k ] );
+					  if ( it != schedule_matrices_.end() ) {
+						  // found!
+						  kinfu_traj_.data_.push_back( FramedTransformation( 
+							  kinfu_traj_.data_.size(),
+							  prev[ k ] + 1,
+							  frame_id_,
+							  it->second * kinfu_->getCameraPose().matrix()
+							  ) );
+						  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
+					  }
+				  }
+			  }
+		  } else if ( use_graph_registration_ ) {
 			  if ( framed_transformation_.flag_ & framed_transformation_.IgnoreIntegrationFlag ) {
 					kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), rgbd_graph_.tail_frame_, frame_id_, rgbd_graph_.tail_inv_ * kinfu_->getCameraPose().matrix() ) );
 					//cout << rgbd_graph_.tail_inv_ << endl;
@@ -1560,6 +1628,9 @@ void startRecording() {
 				bool has_data;
 				if (triggered_capture) {
 					processGraphSchedule();
+					if ( exit_ ) {
+						break;
+					}
 					( ( ONIGrabber * ) &capture_ )->trigger(); // Triggers new frame
 				}
 				has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
@@ -1699,6 +1770,11 @@ void startRecording() {
   bool use_graph_registration_;
   RGBDGraph rgbd_graph_;
   FramedTransformation framed_transformation_;
+
+  bool use_schedule_;
+  RGBDTrajectory schedule_traj_;
+  vector< vector< int > > next_pointers_;
+  hash_map< int, Matrix4f > schedule_matrices_;
 
   int fragment_rate_;
   int fragment_start_;
@@ -1909,6 +1985,7 @@ print_cli_help ()
   cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
   cout << "    --record_log                        : record transformation log file" << endl;
   cout << "    --graph_registration <graph file>   : register the fragments in the file" << endl;
+  cout << "    --schedule <schedule file>          : schedule Kinfu processing from the file" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -1946,7 +2023,7 @@ main (int argc, char* argv[])
 	xnLogSetMaskMinSeverity(XN_LOG_MASK_ALL, XN_LOG_VERBOSE);
   }
 
-  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file, graph_file;
+  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file, graph_file, schedule_file;
   try
   {    
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
@@ -2049,6 +2126,9 @@ main (int argc, char* argv[])
 
 	if (pc::parse_argument (argc, argv, "--graph_registration", graph_file) > 0)
 	  app.toggleRGBDGraphRegistration( graph_file );
+
+	if (pc::parse_argument (argc, argv, "--schedule", schedule_file) > 0)
+      app.toggleSchedule( schedule_file );
   }
 
   if ( pc::find_switch (argc, argv, "--record_log") )

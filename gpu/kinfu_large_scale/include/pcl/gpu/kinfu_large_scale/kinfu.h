@@ -64,7 +64,8 @@ namespace pcl
 	  enum ActionFlag {
 		  ResetFlag = 0x1,					// if reset at the very beginning
 		  IgnoreRegistrationFlag = 0x2,		// if discard the registration
-		  IgnoreIntegrationFlag = 0x4		// if discard integration
+		  IgnoreIntegrationFlag = 0x4,		// if discard integration
+		  PushMatrixHashFlag = 0x8
 	  };
 
       int id1_;
