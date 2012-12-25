@@ -42,7 +42,7 @@
 
 
 bool 
-pcl::gpu::CyclicalBuffer::checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift, const bool last_shift, const bool force_shift)
+pcl::gpu::CyclicalBuffer::checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift, const bool last_shift, const bool force_shift, const bool extract_world)
 {
   bool result = false;
 
@@ -67,69 +67,70 @@ pcl::gpu::CyclicalBuffer::checkForShift (const pcl::gpu::TsdfVolume::Ptr volume,
 
   // perform shifting operations
   if (result)
-    performShift (volume, color, targetPoint, last_shift);
+    performShift (volume, color, targetPoint, last_shift, extract_world);
 
   return (result);
 }
 
 
 void
-pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const pcl::PointXYZ &target_point, const bool last_shift)
+pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const pcl::PointXYZ &target_point, const bool last_shift, const bool extract_world)
 {
   // compute new origin and offsets
   int offset_x, offset_y, offset_z;
   computeAndSetNewCubeMetricOrigin (target_point, offset_x, offset_y, offset_z);
     
-  /*
-  // extract current slice from the TSDF volume (coordinates are in indices! (see fetchSliceAsCloud() )
-  DeviceArray<PointXYZ> points;
-  DeviceArray<float> intensities;
-  int size;   
-  if(!last_shift)
-  {
-    size = volume->fetchSliceAsCloud (cloud_buffer_device_xyz_, cloud_buffer_device_intensities_, &buffer_, offset_x, offset_y, offset_z); 
-  }
-  else
-  {
-    size = volume->fetchSliceAsCloud (cloud_buffer_device_xyz_, cloud_buffer_device_intensities_, &buffer_, buffer_.voxels_size.x - 1, buffer_.voxels_size.y - 1, buffer_.voxels_size.z - 1);
-  }
-  points = DeviceArray<PointXYZ> (cloud_buffer_device_xyz_.ptr (), size);
-  intensities = DeviceArray<float> (cloud_buffer_device_intensities_.ptr(), size);
-
   PointCloud<PointXYZI>::Ptr current_slice (new PointCloud<PointXYZI>);
-  PointCloud<PointXYZ>::Ptr current_slice_xyz (new PointCloud<PointXYZ>);
-  PointCloud<PointIntensity>::Ptr current_slice_intensities (new PointCloud<PointIntensity>);
 
-  // Retrieving XYZ 
-  points.download (current_slice_xyz->points);
-  current_slice_xyz->width = (int) current_slice_xyz->points.size ();
-  current_slice_xyz->height = 1;
+  if ( extract_world ) {
+	  // extract current slice from the TSDF volume (coordinates are in indices! (see fetchSliceAsCloud() )
+	  DeviceArray<PointXYZ> points;
+	  DeviceArray<float> intensities;
+	  int size;   
+	  if(!last_shift)
+	  {
+		size = volume->fetchSliceAsCloud (cloud_buffer_device_xyz_, cloud_buffer_device_intensities_, &buffer_, offset_x, offset_y, offset_z); 
+	  }
+	  else
+	  {
+		size = volume->fetchSliceAsCloud (cloud_buffer_device_xyz_, cloud_buffer_device_intensities_, &buffer_, buffer_.voxels_size.x - 1, buffer_.voxels_size.y - 1, buffer_.voxels_size.z - 1);
+	  }
+	  points = DeviceArray<PointXYZ> (cloud_buffer_device_xyz_.ptr (), size);
+	  intensities = DeviceArray<float> (cloud_buffer_device_intensities_.ptr(), size);
 
-  // Retrieving intensities
-  // TODO change this mechanism by using PointIntensity directly (in spite of float)
-  // when tried, this lead to wrong intenisty values being extracted by fetchSliceAsCloud () (padding pbls?)
-  std::vector<float , Eigen::aligned_allocator<float> > intensities_vector;
-  intensities.download (intensities_vector);
-  current_slice_intensities->points.resize (current_slice_xyz->points.size ());
-  for(int i = 0 ; i < current_slice_intensities->points.size () ; ++i)
-    current_slice_intensities->points[i].intensity = intensities_vector[i];
+	  PointCloud<PointXYZ>::Ptr current_slice_xyz (new PointCloud<PointXYZ>);
+	  PointCloud<PointIntensity>::Ptr current_slice_intensities (new PointCloud<PointIntensity>);
 
-  current_slice_intensities->width = (int) current_slice_intensities->points.size ();
-  current_slice_intensities->height = 1;
+	  // Retrieving XYZ 
+	  points.download (current_slice_xyz->points);
+	  current_slice_xyz->width = (int) current_slice_xyz->points.size ();
+	  current_slice_xyz->height = 1;
 
-  // Concatenating XYZ and Intensities
-  pcl::concatenateFields (*current_slice_xyz, *current_slice_intensities, *current_slice);
-  current_slice->width = (int) current_slice->points.size ();
-  current_slice->height = 1;
-  
-  // transform the slice from local to global coordinates
-  Eigen::Affine3f global_cloud_transformation; 
-  global_cloud_transformation.translation ()[0] = buffer_.origin_GRID_global.x;
-  global_cloud_transformation.translation ()[1] = buffer_.origin_GRID_global.y;
-  global_cloud_transformation.translation ()[2] = buffer_.origin_GRID_global.z;
-  global_cloud_transformation.linear () = Eigen::Matrix3f::Identity ();
-  transformPointCloud (*current_slice, *current_slice, global_cloud_transformation);
-  */
+	  // Retrieving intensities
+	  // TODO change this mechanism by using PointIntensity directly (in spite of float)
+	  // when tried, this lead to wrong intenisty values being extracted by fetchSliceAsCloud () (padding pbls?)
+	  std::vector<float , Eigen::aligned_allocator<float> > intensities_vector;
+	  intensities.download (intensities_vector);
+	  current_slice_intensities->points.resize (current_slice_xyz->points.size ());
+	  for(int i = 0 ; i < current_slice_intensities->points.size () ; ++i)
+		current_slice_intensities->points[i].intensity = intensities_vector[i];
+
+	  current_slice_intensities->width = (int) current_slice_intensities->points.size ();
+	  current_slice_intensities->height = 1;
+
+	  // Concatenating XYZ and Intensities
+	  pcl::concatenateFields (*current_slice_xyz, *current_slice_intensities, *current_slice);
+	  current_slice->width = (int) current_slice->points.size ();
+	  current_slice->height = 1;
+
+	  // transform the slice from local to global coordinates
+	  Eigen::Affine3f global_cloud_transformation; 
+	  global_cloud_transformation.translation ()[0] = buffer_.origin_GRID_global.x;
+	  global_cloud_transformation.translation ()[1] = buffer_.origin_GRID_global.y;
+	  global_cloud_transformation.translation ()[2] = buffer_.origin_GRID_global.z;
+	  global_cloud_transformation.linear () = Eigen::Matrix3f::Identity ();
+	  transformPointCloud (*current_slice, *current_slice, global_cloud_transformation);
+  }
 
   // retrieve existing data from the world model
   PointCloud<PointXYZI>::Ptr previously_existing_slice (new  PointCloud<PointXYZI>);
@@ -138,41 +139,91 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
   double new_origin_y = buffer_.origin_GRID_global.y + offset_y;
   double new_origin_z = buffer_.origin_GRID_global.z + offset_z;
 
-  /*
-  world_model_.getExistingData (buffer_.origin_GRID_global.x, buffer_.origin_GRID_global.y, buffer_.origin_GRID_global.z,
-                                offset_x, offset_y, offset_z,
-                                buffer_.voxels_size.x - 1, buffer_.voxels_size.y - 1, buffer_.voxels_size.z - 1,
-                                *previously_existing_slice);
+  if ( extract_world ) {
+	  world_model_.getExistingData (buffer_.origin_GRID_global.x, buffer_.origin_GRID_global.y, buffer_.origin_GRID_global.z,
+									offset_x, offset_y, offset_z,
+									buffer_.voxels_size.x - 1, buffer_.voxels_size.y - 1, buffer_.voxels_size.z - 1,
+									*previously_existing_slice);
   
-  //replace world model data with values extracted from the TSDF buffer slice
-  world_model_.setSliceAsNans (buffer_.origin_GRID_global.x, buffer_.origin_GRID_global.y, buffer_.origin_GRID_global.z,
-                               offset_x, offset_y, offset_z,
-                               buffer_.voxels_size.x, buffer_.voxels_size.y, buffer_.voxels_size.z);
+	  //replace world model data with values extracted from the TSDF buffer slice
+	  world_model_.setSliceAsNans (buffer_.origin_GRID_global.x, buffer_.origin_GRID_global.y, buffer_.origin_GRID_global.z,
+								   offset_x, offset_y, offset_z,
+								   buffer_.voxels_size.x, buffer_.voxels_size.y, buffer_.voxels_size.z);
 
+  	  cout << current_slice->points.size() << endl;
 
-  PCL_INFO ("world contains %d points after update\n", world_model_.getWorldSize ());
-  world_model_.cleanWorldFromNans ();                               
-  PCL_INFO ("world contains %d points after cleaning\n", world_model_.getWorldSize ());
-  */
+	  PCL_INFO ("world contains %d points after update\n", world_model_.getWorldSize ());
+	  world_model_.cleanWorldFromNans ();                               
+	  PCL_INFO ("world contains %d points after cleaning\n", world_model_.getWorldSize ());
+  }
 
   // clear buffer slice and update the world model
+  PCL_DEBUG( "in clearSlice : [%d, %d, %d] + [%d, %d, %d]\n", buffer_.origin_GRID.x, buffer_.origin_GRID.y, buffer_.origin_GRID.z, offset_x, offset_y, offset_z );
+
+  {
+	  int3 minBounds, maxBounds;
+	  int shiftX = offset_x;
+	  int shiftY = offset_y;
+	  int shiftZ = offset_z;
+	  int newX = buffer_.origin_GRID.x + shiftX;
+      int newY = buffer_.origin_GRID.y + shiftY;
+
+	if ( shiftX >= 0 ) {
+		minBounds.x = buffer_.origin_GRID.x;
+		maxBounds.x = newX - 1;
+	} else {
+		minBounds.x = newX;
+		maxBounds.x = buffer_.origin_GRID.x - 1;
+	}
+	if ( minBounds.x < 0 ) {
+		minBounds.x += buffer_.voxels_size.x;
+		maxBounds.x += buffer_.voxels_size.x;
+	}
+
+	if ( shiftY >= 0 ) {
+		minBounds.y = buffer_.origin_GRID.y;
+		maxBounds.y = newY - 1;
+	} else {
+		minBounds.y = newY;
+		maxBounds.y = buffer_.origin_GRID.y - 1;
+	}
+	if ( minBounds.y < 0 ) {
+		minBounds.y += buffer_.voxels_size.y;
+		maxBounds.y += buffer_.voxels_size.y;
+	}
+    //Z
+     minBounds.z = buffer_.origin_GRID.z;
+     maxBounds.z = shiftZ;
+	  PCL_DEBUG( "In clearTSDFSlice:\n" );
+	  PCL_DEBUG("Origin : %d, %d %d\n", buffer_.origin_GRID.x, buffer_.origin_GRID.y, buffer_.origin_GRID.z );
+	  PCL_DEBUG("Origin global : %f, %f %f\n", buffer_.origin_GRID_global.x, buffer_.origin_GRID_global.y, buffer_.origin_GRID_global.z );
+	  PCL_DEBUG( "Offset : %d, %d, %d\n", shiftX, shiftY, shiftZ );
+      PCL_DEBUG ("X bound: [%d - %d]\n", minBounds.x, maxBounds.x);
+      PCL_DEBUG ("Y bound: [%d - %d]\n", minBounds.y, maxBounds.y);
+      PCL_DEBUG ("Z bound: [%d - %d]\n", minBounds.z, maxBounds.z);
+	  int size = buffer_.tsdf_memory_end - buffer_.tsdf_memory_start + 1;
+	  PCL_DEBUG ( "Size is : %x\n", size );
+  }
   pcl::device::clearTSDFSlice (volume->data (), &buffer_, offset_x, offset_y, offset_z);
   pcl::device::clearColorSlice (color->data (), &buffer_, offset_x, offset_y, offset_z);
 
-  /*
-  // insert current slice in the world if it contains any points
-  if (current_slice->points.size () != 0) {
-    world_model_.addSlice(current_slice);
+  if ( extract_world ) {
+	  // insert current slice in the world if it contains any points
+	  if (current_slice->points.size () != 0) {
+		world_model_.addSlice(current_slice);
+        PCL_INFO ("world contains %d points after add slice\n", world_model_.getWorldSize ());
+	  }
   }
-  */
 
   // shift buffer addresses
   shiftOrigin (volume, color, offset_x, offset_y, offset_z);
   
-  // push existing data in the TSDF buffer
-  //if (previously_existing_slice->points.size () != 0 ) {
-  //  volume->pushSlice(previously_existing_slice, getBuffer () );
-  //}
+  if ( extract_world ) {
+	  // push existing data in the TSDF buffer
+	  if (previously_existing_slice->points.size () != 0 ) {
+		volume->pushSlice(previously_existing_slice, getBuffer () );
+	  }
+  }
 }
 
 void 

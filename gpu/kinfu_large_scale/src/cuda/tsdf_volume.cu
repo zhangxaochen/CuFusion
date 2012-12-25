@@ -699,6 +699,7 @@ pcl::device::clearTSDFSlice (PtrStep<short2> volume, pcl::gpu::tsdf_buffer* buff
 
     int3 minBounds, maxBounds;
     
+	/*
     //X
     if(newX >= 0)
     {
@@ -729,7 +730,30 @@ pcl::device::clearTSDFSlice (PtrStep<short2> volume, pcl::gpu::tsdf_buffer* buff
     
     if(minBounds.y > maxBounds.y)
      std::swap(minBounds.y, maxBounds.y);
-    
+	 */
+	if ( shiftX >= 0 ) {
+		minBounds.x = buffer->origin_GRID.x;
+		maxBounds.x = newX - 1;
+	} else {
+		minBounds.x = newX;
+		maxBounds.x = buffer->origin_GRID.x - 1;
+	}
+	if ( minBounds.x < 0 ) {
+		minBounds.x += buffer->voxels_size.x;
+		maxBounds.x += buffer->voxels_size.x;
+	}
+
+	if ( shiftY >= 0 ) {
+		minBounds.y = buffer->origin_GRID.y;
+		maxBounds.y = newY - 1;
+	} else {
+		minBounds.y = newY;
+		maxBounds.y = buffer->origin_GRID.y - 1;
+	}
+	if ( minBounds.y < 0 ) {
+		minBounds.y += buffer->voxels_size.y;
+		maxBounds.y += buffer->voxels_size.y;
+	}
     //Z
      minBounds.z = buffer->origin_GRID.z;
      maxBounds.z = shiftZ;

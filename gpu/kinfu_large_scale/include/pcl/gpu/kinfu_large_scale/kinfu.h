@@ -256,7 +256,13 @@ namespace pcl
 			return global_time_;
 		}
 
+		void toggleExtractWorld() {
+			extract_world_ = true;
+		}
+
       private:
+
+		bool extract_world_;
 
 		/** \brief Immediate shifting */
 		bool force_shift_;

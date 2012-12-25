@@ -762,7 +762,7 @@ struct KinFuLSApp
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
-	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_graph_registration_ (false), frame_id_ (0)
+	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -1847,8 +1847,8 @@ void startRecording() {
       case (int)'c': case (int)'C': app->scene_cloud_view_.clearClouds (true); break;
       case (int)'i': case (int)'I': app->toggleIndependentCamera (); break;
       case (int)'b': case (int)'B': app->scene_cloud_view_.toggleCube(app->kinfu_->volume().getSize()); break;
-      //case (int)'l': case (int)'L': app->kinfu_->performLastScan (); break;
-	  //case (int)'s': case (int)'S': app->kinfu_->extractAndMeshWorld (); break;
+      case (int)'l': case (int)'L': app->kinfu_->performLastScan (); break;
+	  case (int)'s': case (int)'S': app->kinfu_->extractAndMeshWorld (); break;
       case (int)'7': case (int)'8': app->writeMesh (key - (int)'0'); break;  
       case (int)'1': case (int)'2': case (int)'3': app->writeCloud (key - (int)'0'); break;      
       case '*': app->image_view_.toggleImagePaint (); break;
@@ -1986,6 +1986,7 @@ print_cli_help ()
   cout << "    --record_log                        : record transformation log file" << endl;
   cout << "    --graph_registration <graph file>   : register the fragments in the file" << endl;
   cout << "    --schedule <schedule file>          : schedule Kinfu processing from the file" << endl;
+  cout << "    --world                             : turn on world.pcd extraction" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2133,6 +2134,9 @@ main (int argc, char* argv[])
 
   if ( pc::find_switch (argc, argv, "--record_log") )
 	  app.toggleLogRecord();
+
+  if ( pc::find_switch ( argc, argv, "--world" ) )
+	  app.kinfu_->toggleExtractWorld();
 
   // executing
   if (triggered_capture) std::cout << "Capture mode: triggered\n";

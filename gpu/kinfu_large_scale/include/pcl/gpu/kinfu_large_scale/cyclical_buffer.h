@@ -112,7 +112,7 @@ namespace pcl
           * \param[in] last_shift if set to true, the whole cube will be shifted. This is used to push the whole cube to the world model.
           * \return true is the cube needs to be or has been shifted.
           */
-        bool checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift = true, const bool last_shift = false, const bool force_shift = false);
+        bool checkForShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const Eigen::Affine3f &cam_pose, const double distance_camera_target, const bool perform_shift = true, const bool last_shift = false, const bool force_shift = false, const bool extract_world = false);
         
         /** \brief Perform shifting operations:
             Compute offsets.
@@ -126,7 +126,7 @@ namespace pcl
           * \param[in] target_point target point around which the new cube will be centered
           * \param[in] last_shift if set to true, the whole cube will be shifted. This is used to push the whole cube to the world model.
           */
-        void performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const pcl::PointXYZ &target_point, const bool last_shift = false);
+        void performShift (const pcl::gpu::TsdfVolume::Ptr volume, const pcl::gpu::ColorVolume::Ptr color, const pcl::PointXYZ &target_point, const bool last_shift = false, const bool extract_world = false);
 
         /** \brief Sets the distance threshold between cube's center and target point that triggers a shift.
           * \param[in] threshold the distance in meters at which to trigger shift.

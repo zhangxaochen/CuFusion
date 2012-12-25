@@ -341,10 +341,98 @@ pcl::gpu::TsdfVolume::fetchSliceAsCloud (DeviceArray<PointType>& cloud_buffer_xy
   }
 
   float3 device_volume_size = device_cast<const float3> (size_);
+
+  {
+	  int newX = buffer->origin_GRID.x + shiftX;
+	  int newY = buffer->origin_GRID.y + shiftY;
+	  int newZ = buffer->origin_GRID.z + shiftZ;
+
+	  int minBounds[ 3 ], maxBounds[ 3 ];
+
+	  //X
+	  if (newX >= 0)
+	  {
+		minBounds[ 0 ] = buffer->origin_GRID.x;
+		maxBounds[ 0 ] = newX;    
+	  }
+	  else
+	  {
+		minBounds[ 0 ] = newX + buffer->voxels_size.x - 1;
+		maxBounds[ 0 ] = buffer->origin_GRID.x + buffer->voxels_size.x - 1;
+	  }
+  
+	  if (minBounds[ 0 ] > maxBounds[ 0 ])
+		std::swap (minBounds[ 0 ], maxBounds[ 0 ]);
+
+	  //Y
+	  if (newY >= 0)
+	  {
+		 minBounds[ 1 ] = buffer->origin_GRID.y;
+		 maxBounds[ 1 ] = newY;
+	  }
+	  else
+	  {
+		minBounds[ 1 ] = newY + buffer->voxels_size.y - 1;
+		maxBounds[ 1 ] = buffer->origin_GRID.y + buffer->voxels_size.y - 1;
+	  }
+  
+	  if(minBounds[ 1 ] > maxBounds[ 1 ])
+		std::swap (minBounds[ 1 ], maxBounds[ 1 ]);
+
+	  //Z
+	  if (newZ >= 0)
+	  {
+	   minBounds[ 2 ] = buffer->origin_GRID.z;
+	   maxBounds[ 2 ] = newZ;
+	  }
+	  else
+	  {
+		minBounds[ 2 ] = newZ + buffer->voxels_size.z - 1;
+		maxBounds[ 2 ] = buffer->origin_GRID.z + buffer->voxels_size.z - 1;
+	  }
+
+	  if (minBounds[ 2 ] > maxBounds[ 2 ])
+		std::swap(minBounds[ 2 ], maxBounds[ 2 ]);
+
+	  minBounds[ 0 ] -= buffer->origin_GRID.x;
+	  maxBounds[ 0 ] -= buffer->origin_GRID.x;
+
+	  minBounds[ 1 ] -= buffer->origin_GRID.y;
+	  maxBounds[ 1 ] -= buffer->origin_GRID.y;
+
+	  minBounds[ 2 ] -= buffer->origin_GRID.z;
+	  maxBounds[ 2 ] -= buffer->origin_GRID.z;
+
+	  if (minBounds[ 0 ] < 0) // We are shifting Left
+	  {
+		minBounds[ 0 ] += ( buffer->voxels_size.x - 1 );
+		maxBounds[ 0 ] += ( buffer->voxels_size.x - 1 );
+	  }
+
+	  if (minBounds[ 1 ] < 0) // We are shifting up
+	  {
+		minBounds[ 1 ] += ( buffer->voxels_size.y - 1 );
+		maxBounds[ 1 ] += ( buffer->voxels_size.y - 1 );
+	  }
+
+	  if (minBounds[ 2 ] < 0) // We are shifting back
+	  {
+		minBounds[ 2 ] += ( buffer->voxels_size.z - 1 );
+		maxBounds[ 2 ] += ( buffer->voxels_size.z - 1 );
+	  }
+	  PCL_DEBUG( "In fetchSliceAsCloud:\n" );
+	  PCL_DEBUG("Origin : %d, %d %d\n", buffer->origin_GRID.x, buffer->origin_GRID.y, buffer->origin_GRID.z );
+	  PCL_DEBUG("Origin global : %f, %f %f\n", buffer->origin_GRID_global.x, buffer->origin_GRID_global.y, buffer->origin_GRID_global.z );
+	  PCL_DEBUG( "Offset : %d, %d, %d\n", shiftX, shiftY, shiftZ );
+      PCL_DEBUG ("X bound: [%d - %d]\n", minBounds[ 0 ], maxBounds[ 0 ]);
+      PCL_DEBUG ("Y bound: [%d - %d]\n", minBounds[ 1 ], maxBounds[ 1 ]);
+      PCL_DEBUG ("Z bound: [%d - %d]\n", minBounds[ 2 ], maxBounds[ 2 ]);
+
+  }
   
   size_t size = pcl::device::extractSliceAsCloud (volume_, device_volume_size, buffer, shiftX, shiftY, shiftZ, cloud_buffer_xyz, cloud_buffer_intensity);
   
-  std::cout << " SIZE IS " << size << " (maximum: " << DEFAULT_CLOUD_BUFFER_SIZE <<")" << std::endl;
+  std::cout << "SIZE IS " << size << " (maximum: " << DEFAULT_CLOUD_BUFFER_SIZE <<")" << std::endl;
   
   return (size);
 }
