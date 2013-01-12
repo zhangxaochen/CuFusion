@@ -42,7 +42,6 @@
 #include <pcl/gpu/kinfu_large_scale/world_model.h>
 
 
-
 template <typename PointT>
 void 
 pcl::WorldModel<PointT>::addSlice ( PointCloudPtr new_cloud)
@@ -234,6 +233,167 @@ pcl::WorldModel<PointT>::getWorldAsCubes (const double size, std::vector<typenam
       origin.y += cubeSide * step_increment;
     }
     origin.x += cubeSide * step_increment;
+  }
+
+
+ /* for(int c = 0 ; c < cubes.size() ; ++c)
+  {
+    std::stringstream name;
+    name << "cloud" << c+1 << ".pcd";
+    pcl::io::savePCDFileASCII(name.str(), *(cubes[c]));
+    
+  }*/
+
+  std::cout << "returning " << cubes.size() << " cubes" << std::endl;
+
+}
+
+template <typename PointT>
+void
+pcl::WorldModel<PointT>::getWorldAsCubes (const double size, std::vector<typename pcl::WorldModel<PointT>::PointCloudPtr> &cubes, std::vector<Eigen::Vector3f> &transforms, double overlap, pcl::gpu::StandaloneMarchingCubes<pcl::PointXYZI> & mcubes)
+{
+  
+  if(world_->points.size () == 0)
+  {
+    PCL_INFO("The world is empty, returning nothing\n");
+    return;
+  }
+
+  PCL_INFO ("Getting world as cubes. World contains %d points.\n", world_->points.size ());
+
+  // remove nans from world cloud
+  world_->is_dense = false;
+  std::vector<int> indices;
+  pcl::removeNaNFromPointCloud	(	*world_, *world_, indices);
+	
+  PCL_INFO ("World contains %d points after nan removal.\n", world_->points.size ());
+  
+
+  // check cube size value
+  double cubeSide = size;
+  if (cubeSide <= 0.0f)
+  {
+    PCL_ERROR ("Size of the cube must be positive and non null (%f given). Setting it to 3.0 meters.\n", cubeSide);
+    cubeSide = 512.0f;
+  }
+
+  std::cout << "cube size is set to " << cubeSide << std::endl;
+
+  // check overlap value
+  double step_increment = 1.0f - overlap;
+  if (overlap < 0.0)
+  {
+    PCL_ERROR ("Overlap ratio must be positive or null (%f given). Setting it to 0.0 procent.\n", overlap);
+    step_increment = 1.0f;
+  }
+  if (overlap > 1.0)
+  {
+    PCL_ERROR ("Overlap ratio must be less or equal to 1.0 (%f given). Setting it to 10 procent.\n", overlap);
+    step_increment = 0.1f;
+  }
+
+  
+  // get world's bounding values on XYZ
+  PointT min, max;
+  pcl::getMinMax3D(*world_, min, max);
+
+  PCL_INFO ("Bounding box for the world: \n\t [%f - %f] \n\t [%f - %f] \n\t [%f - %f] \n", min.x, max.x, min.y, max.y, min.z, max.z);
+
+  PointT origin = min;
+  
+  // clear returned vectors
+  cubes.clear();
+  transforms.clear();
+
+  int k = 1;
+
+  // iterate with box filter
+  while (origin.x < max.x)
+  {
+    origin.y = min.y;
+    while (origin.y < max.y)
+    {
+      origin.z = min.z;
+      while (origin.z < max.z)
+      {
+        // extract cube here
+        PCL_INFO ("Extracting cube at: [%f, %f, %f].\n",  origin.x,  origin.y,  origin.z);
+
+        // pointcloud for current cube.
+        PointCloudPtr box (new pcl::PointCloud<PointT>);
+
+
+        // set conditional filter
+        ConditionAndPtr range_cond (new pcl::ConditionAnd<PointT> ());
+        range_cond->addComparison (FieldComparisonConstPtr (new pcl::FieldComparison<PointT> ("x", pcl::ComparisonOps::GE, origin.x - 0.5)));
+        range_cond->addComparison (FieldComparisonConstPtr (new pcl::FieldComparison<PointT> ("x", pcl::ComparisonOps::LT, origin.x + cubeSide - 0.5)));
+        range_cond->addComparison (FieldComparisonConstPtr (new pcl::FieldComparison<PointT> ("y", pcl::ComparisonOps::GE, origin.y - 0.5)));
+        range_cond->addComparison (FieldComparisonConstPtr (new pcl::FieldComparison<PointT> ("y", pcl::ComparisonOps::LT, origin.y + cubeSide - 0.5)));
+        range_cond->addComparison (FieldComparisonConstPtr (new pcl::FieldComparison<PointT> ("z", pcl::ComparisonOps::GE, origin.z - 0.5)));
+        range_cond->addComparison (FieldComparisonConstPtr (new pcl::FieldComparison<PointT> ("z", pcl::ComparisonOps::LT, origin.z + cubeSide - 0.5)));
+
+        // build the filter
+        pcl::ConditionalRemoval<PointT> condrem (range_cond);
+        condrem.setInputCloud (world_);
+        condrem.setKeepOrganized(false);
+        // apply filter
+        condrem.filter (*box);
+
+        // also push transform along with points.
+        if(box->points.size() > 0)
+        {
+          //Eigen::Vector3f transform;
+          //transform[0] = origin.x, transform[1] = origin.y, transform[2] = origin.z;
+          //transforms.push_back(transform);
+          //cubes.push_back(box);
+		    Eigen::Affine3f cloud_transform; 
+    
+			cloud_transform.linear ().setIdentity ();
+			cloud_transform.translation ()[0] = -origin.x;
+			cloud_transform.translation ()[1] = -origin.y;
+			cloud_transform.translation ()[2] = -origin.z;
+    
+			transformPointCloud (*box, *box, cloud_transform);
+
+			//Get mesh
+			pcl::PointCloud< PointT > * ppbox = &( *box );
+			pcl::PointCloud< pcl::PointXYZI > * pbox = reinterpret_cast < pcl::PointCloud< pcl::PointXYZI > * > ( ppbox );
+			pcl::gpu::StandaloneMarchingCubes<PointT>::MeshPtr tmp = mcubes.getMeshFromTSDFCloud ( * pbox );
+			float cell_size = mcubes.getCellSize();
+        
+			if(tmp != 0)
+			{
+				cloud_transform.translation ()[0] = origin.x * cell_size;
+				cloud_transform.translation ()[1] = origin.y * cell_size;
+				cloud_transform.translation ()[2] = origin.z * cell_size;
+    
+				pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_tmp_ptr (new pcl::PointCloud<pcl::PointXYZ>);
+				fromROSMsg ( ( tmp )->cloud, *cloud_tmp_ptr);
+    
+				transformPointCloud (*cloud_tmp_ptr, *cloud_tmp_ptr, cloud_transform);
+    
+				toROSMsg (*cloud_tmp_ptr, ( tmp )->cloud);
+    
+				std::stringstream name;
+				name << "mesh_" << k << ".ply";
+				PCL_INFO ("Saving mesh...%d \n", k);
+				k++;
+				pcl::io::savePLYFile (name.str (), *tmp);
+			}
+			else
+			{
+			  PCL_INFO ("This cloud returned no faces, we skip it!\n");
+			}
+        }
+        else
+        {
+          PCL_INFO ("Extracted cube was empty, skiping this one.\n");
+        }
+        origin.z += ( int )( cubeSide * step_increment );
+      }
+      origin.y += ( int )( cubeSide * step_increment );
+    }
+    origin.x += ( int )( cubeSide * step_increment );
   }
 
 

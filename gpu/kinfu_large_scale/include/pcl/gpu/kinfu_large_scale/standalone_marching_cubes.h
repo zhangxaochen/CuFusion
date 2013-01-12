@@ -112,7 +112,9 @@ namespace pcl
      std::vector<int>&
      tsdfVolumeCPU ();
 
-     protected:
+	 float getCellSize() { return (volume_size_ / voxels_x_); }
+
+	protected:
 
      /** \brief Loads a TSDF Cloud to the TSDF Volume in GPU
       * \param[in] cloud TSDF cloud that will be loaded. X,Y,Z of the cloud will only be loaded if their range is between [0 ... VOXELS_X][0 ... VOXELS_Y][0 ... VOXELS_Z]
