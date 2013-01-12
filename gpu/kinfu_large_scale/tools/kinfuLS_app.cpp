@@ -358,6 +358,39 @@ struct RGBDGraph {
 };
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+struct BBoxFrame {
+	int id_;
+	int bounds_[ 6 ];
+};
+
+struct BBox {
+	vector< BBoxFrame > frames_;
+	void loadFromFile( string filename ) {
+		frames_.clear();
+		FILE * f = fopen( filename.c_str(), "r" );
+		if ( f != NULL ) {
+		  char buffer[1024];
+		  int id;
+		  BBoxFrame frame;
+		  while ( fgets( buffer, 1024, f ) != NULL ) {
+			if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
+				sscanf( buffer, "%d %d %d %d %d %d %d", 
+					&frame.id_, 
+					&frame.bounds_[ 0 ], 
+					&frame.bounds_[ 1 ], 
+					&frame.bounds_[ 2 ], 
+					&frame.bounds_[ 3 ], 
+					&frame.bounds_[ 4 ], 
+					&frame.bounds_[ 5 ] 
+					);
+			  frames_.push_back( frame );
+			}
+		  }
+		  fclose ( f );
+		}
+	}
+};
+
 struct RGBDTrajectory {
 	vector< pcl::gpu::FramedTransformation > data_;
 	int index_;
@@ -762,7 +795,7 @@ struct KinFuLSApp
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
-	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0)
+	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 )
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -918,6 +951,15 @@ struct KinFuLSApp
   }
 
   void
+  toggleBBox( string bbox_file )
+  {
+	  use_bbox_ = use_rgbdslam_;
+	  bbox_.loadFromFile( bbox_file );
+	  cout << "BBox contains " << bbox_.frames_.size() << " key frames." << endl;
+	  cout << "Use rgbd bbox schedule: " << ( use_bbox_ ? "On" : "Off ( requires use rgbdslam mode )" ) << endl;
+  }
+
+  void
   toggleRGBDGraphRegistration( string graph_file )
   {
 	  rgbd_graph_.loadFromFile( graph_file );
@@ -1065,14 +1107,14 @@ struct KinFuLSApp
 			  exit_ = true;
 			  return;
 		  }
-		  FramedTransformation & ft = schedule_traj_.data_[ schedule_traj_.index_ ];
-		  framed_transformation_.type_ = ( FramedTransformation::RegistrationType )ft.id1_;
-		  framed_transformation_.flag_ = ft.id2_;
-		  framed_transformation_.transformation_ = ft.transformation_;
-		  if ( frame_id_ == 0 || frame_id_ + 1 != ft.frame_ ) {
-			  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( ft.frame_ );
-		  }
-		  schedule_traj_.index_++;
+			FramedTransformation & ft = schedule_traj_.data_[ schedule_traj_.index_ ];
+			framed_transformation_.type_ = ( FramedTransformation::RegistrationType )ft.id1_;
+			framed_transformation_.flag_ = ft.id2_;
+			framed_transformation_.transformation_ = ft.transformation_;
+			if ( frame_id_ == 0 || frame_id_ + 1 != ft.frame_ ) {
+				( ( ONIGrabber * ) &capture_ )->seekDepthFrame( ft.frame_ );
+			}
+			schedule_traj_.index_++;
 	  } else if ( use_graph_registration_ ) {
 		  if ( rgbd_graph_.ended() ) {
 			  return;
@@ -1125,6 +1167,22 @@ struct KinFuLSApp
 				  }
 			  } else {
 				  exit_ = true;
+			  }
+		  }
+	  } else if ( use_bbox_ ) {
+		  if ( frame_id_ > 0 && frame_id_ < ( int )bbox_.frames_.size() ) {	// when there is a next
+			  int i = frame_id_;
+			  for ( i = frame_id_; i < ( int )bbox_.frames_.size(); i++ ) {
+				  if ( kinfu_->intersect( bbox_.frames_[ i ].bounds_ ) ) {
+					  break;
+				  }
+			  }
+			  if ( i == ( int )bbox_.frames_.size() ) {
+				  exit_ = true;
+			  } else {
+				  if ( frame_id_ != i ) {
+					  ( ( ONIGrabber * ) &capture_ )->seekDepthFrame( i + 1 );
+				  }
 			  }
 		  }
 	  }
@@ -1623,6 +1681,10 @@ void startRecording() {
 				startRecording();
 			}
 
+			if ( seek_start_ != -1 ) {
+				( ( ONIGrabber * ) &capture_ )->seekDepthFrame( seek_start_ );
+			}
+
 			while (!exit_ && !scene_cloud_view_.cloud_viewer_.wasStopped () && !image_view_.viewerScene_.wasStopped () && !this->kinfu_->isFinished ())
 			{ 
 				bool has_data;
@@ -1631,6 +1693,7 @@ void startRecording() {
 					if ( exit_ ) {
 						break;
 					}
+					//cout << " Triggering, now frame_id_ = " << frame_id_ << endl;
 					( ( ONIGrabber * ) &capture_ )->trigger(); // Triggers new frame
 				}
 				has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
@@ -1767,6 +1830,9 @@ void startRecording() {
   RGBDTrajectory rgbd_traj_;
   RGBDTrajectory kinfu_traj_;
 
+  bool use_bbox_;
+  BBox bbox_;
+
   bool use_graph_registration_;
   RGBDGraph rgbd_graph_;
   FramedTransformation framed_transformation_;
@@ -1778,6 +1844,7 @@ void startRecording() {
 
   int fragment_rate_;
   int fragment_start_;
+  int seek_start_;
 
   bool use_device_;
   bool recording_;
@@ -1986,7 +2053,9 @@ print_cli_help ()
   cout << "    --record_log                        : record transformation log file" << endl;
   cout << "    --graph_registration <graph file>   : register the fragments in the file" << endl;
   cout << "    --schedule <schedule file>          : schedule Kinfu processing from the file" << endl;
+  cout << "    --seek_start <X_frames>              : start from X_frames" << endl;
   cout << "    --world                             : turn on world.pcd extraction" << endl;
+  cout << "    --bbox <bbox file>                  : turn on bbox, used with --rgbdslam" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2024,7 +2093,7 @@ main (int argc, char* argv[])
 	xnLogSetMaskMinSeverity(XN_LOG_MASK_ALL, XN_LOG_VERBOSE);
   }
 
-  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file, graph_file, schedule_file;
+  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file, graph_file, schedule_file, bbox_file;
   try
   {    
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
@@ -2088,6 +2157,11 @@ main (int argc, char* argv[])
   pc::parse_argument (argc, argv, "--fragment_start", fragment_start);
 
   KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start);
+
+  int seek_start = 0;
+  if ( pc::parse_argument (argc, argv, "--seek_start", seek_start) ) {
+	  app.seek_start_ = seek_start;
+  }
   
   if (pc::parse_argument (argc, argv, "-eval", eval_folder) > 0)
     app.toggleEvaluationMode(eval_folder, match_file);
@@ -2130,6 +2204,9 @@ main (int argc, char* argv[])
 
 	if (pc::parse_argument (argc, argv, "--schedule", schedule_file) > 0)
       app.toggleSchedule( schedule_file );
+
+	if (pc::parse_argument (argc, argv, "--bbox", bbox_file) > 0)
+      app.toggleBBox( bbox_file );
   }
 
   if ( pc::find_switch (argc, argv, "--record_log") )

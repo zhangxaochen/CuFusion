@@ -369,6 +369,10 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
 		cam_rot_global_prev = aff_rgbd.linear();
 		cam_trans_global_prev = aff_rgbd.translation();
+	} else if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->IncrementalOnly ) ) {
+		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ * getCameraPose().matrix() );
+		cam_rot_global_prev = aff_rgbd.linear();
+		cam_trans_global_prev = aff_rgbd.translation();
 	}
 
 
@@ -648,6 +652,14 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 
   ++global_time_;
   return (true);
+}
+
+bool
+pcl::gpu::KinfuTracker::intersect( int bounds[ 6 ] )
+{
+	pcl::gpu::tsdf_buffer* buffer = getCyclicalBufferStructure();
+	// need more work here.
+	return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

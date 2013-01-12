@@ -60,7 +60,7 @@ namespace pcl
   namespace gpu
   {        
     struct FramedTransformation {
-	  enum RegistrationType { Kinfu = 0, DirectApply = 1, InitializeOnly = 2 };
+	  enum RegistrationType { Kinfu = 0, DirectApply = 1, InitializeOnly = 2, IncrementalOnly = 3 };
 	  enum ActionFlag {
 		  ResetFlag = 0x1,					// if reset at the very beginning
 		  IgnoreRegistrationFlag = 0x2,		// if discard the registration
@@ -99,6 +99,9 @@ namespace pcl
         void 
         performLastScan (){perform_last_scan_ = true; PCL_WARN ("Kinfu will exit after next shift\n");}
         
+		bool
+		intersect( int bbox[ 6 ] );
+
         bool
         isFinished (){return (finished_);}
 
