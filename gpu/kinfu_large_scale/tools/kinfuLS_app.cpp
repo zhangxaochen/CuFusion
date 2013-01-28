@@ -73,6 +73,8 @@
 #include <pcl/io/pcd_grabber.h>
 
 #include <opencv2/core/core.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/opencv.hpp>
 
 #include "openni_capture.h"
 #include "color_handler.h"
@@ -498,7 +500,7 @@ struct ImageView
   }
 
   void
-  showScene (KinfuTracker& kinfu, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool registration, Eigen::Affine3f* pose_ptr = 0)
+  showScene (KinfuTracker& kinfu, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool registration, int frame_id, Eigen::Affine3f* pose_ptr = 0)
   {
     if (pose_ptr)
     {
@@ -520,6 +522,14 @@ struct ImageView
     view_device_.download (view_host_, cols);
     viewerScene_.showRGBImage (reinterpret_cast<unsigned char*> (&view_host_[0]), view_device_.cols (), view_device_.rows ());    
     
+	if ( frame_id != -1 ) {
+		char filename[ 1024 ];
+		sprintf( filename, "image/kinfu/%6d.png", frame_id );
+
+		cv::Mat m( 480, 640, CV_8UC3, (void*)&view_host_[0] );
+		cv::imwrite( filename, m );
+	}
+
     //viewerColor_.showRGBImage ((unsigned char*)&rgb24.data, rgb24.cols, rgb24.rows);
 #ifdef HAVE_OPENCV
     if (accumulate_views_)
@@ -538,8 +548,13 @@ struct ImageView
   }
 
   void
-  showTraj( const cv::Mat & traj ) {
+  showTraj( const cv::Mat & traj, int frame_id ) {
     viewerTraj_.showRGBImage ( (unsigned char *) traj.data, traj.cols, traj.rows, "short_image" );
+	if ( frame_id != -1 ) {
+		char filename[ 1024 ];
+		sprintf( filename, "image/traj/%6d.png", frame_id );
+		cv::imwrite( filename, traj );
+	}
   }
   
   void
@@ -794,8 +809,8 @@ struct KinFuLSApp
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
   KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
-    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_(cv::Mat::zeros( 480, 640, CV_8UC3 )),
-	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 )
+    registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_( 480, 640, CV_8UC3, cv::Scalar( 255, 255, 255 )),
+	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -869,6 +884,13 @@ struct KinFuLSApp
     cout << "Registration mode: " << (registration_ ? "On" : "Off (not supported by source)") << endl;
   }
 
+  void
+  toggleKinfuImage()
+  {
+	  kinfu_image_ = true;
+	  cout << "Output images to image folder." << endl;
+  }
+
   void 
   toggleColorIntegration()
   {
@@ -927,6 +949,7 @@ struct KinFuLSApp
 	  use_rgbdslam_ = !use_device_;
 	  rgbd_traj_.loadFromFile( log_file );
 
+	  /*
 	  // draw on traj buffer
       Eigen::Vector4f sensor_origin( 0, 0, 0, 1 );
       Eigen::Vector4f last_sensor_origin;
@@ -945,6 +968,7 @@ struct KinFuLSApp
 		q.y = 240.0 - last_sensor_origin(2) * 100.0;
         cv::line(traj_buffer_, p, q, cv::Scalar( 255, 0, 0 ), 1, 16);
     }
+	*/
 
 	  cout << "RGBD slam contains " << rgbd_traj_.data_.size() << " key frames." << endl;
 	  cout << "Use rgbd slam: " << ( use_rgbdslam_ ? "On" : "Off ( requires triggerd mode )" ) << endl;
@@ -1045,6 +1069,8 @@ struct KinFuLSApp
 
   void drawTrajectory()
   {
+	  double resolution = 100;
+
 	traj_ = traj_buffer_.clone();
 	Eigen::Vector4d sensor_origin( 0, 0, 0, 1 );
 	Eigen::Vector4d last_sensor_origin;
@@ -1058,27 +1084,61 @@ struct KinFuLSApp
 
 	  Eigen::Affine3f pose_1( init_inverse * pose.matrix() );
 
-	  if ( use_graph_registration_ ) {
-		  pose_1.matrix() = rgbd_graph_.head_mat_ * pose_1.matrix();
-	  }
+	  //if ( use_graph_registration_ ) {
+	//	  pose_1.matrix() = rgbd_graph_.head_mat_ * pose_1.matrix();
+	  //}
 
 	  last_sensor_origin = sensor_origin;
       //sensor_origin = Eigen::Vector4d(pose.translation()(0), pose.translation()(1), pose.translation()(2), 1.0) - init_origin;
 	  sensor_origin = Eigen::Vector4d(pose_1.translation()(0), pose_1.translation()(1), pose_1.translation()(2), 1.0);
 
+      if ( i <= traj_token_ )
+		  continue;
+
         cv::Point2f p,q; //TODO: Use sub-pixel-accuracy
-		p.x = 320.0 + sensor_origin(0) * 100.0;
-		p.y = 240.0 - sensor_origin(2) * 100.0;
-		q.x = 320.0 + last_sensor_origin(0) * 100.0;
-		q.y = 240.0 - last_sensor_origin(2) * 100.0;
-        cv::line(traj_, p, q, cv::Scalar( 0, 255, 0 ), 1, 16);
+		p.x = 320.0 + sensor_origin(0) * resolution;
+		p.y = 440.0 - sensor_origin(2) * resolution;
+		q.x = 320.0 + last_sensor_origin(0) * resolution;
+		q.y = 440.0 - last_sensor_origin(2) * resolution;
+        cv::line(traj_, p, q, cv::Scalar( 0, 0, 0 ), 1, 16);
 
 		if ( i == kinfu_->getNumberOfPoses() - 1 ) {
 			//Eigen::Vector4d ref = pose.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 1.5, 1.0 ) - init_origin;
-			Eigen::Vector4d ref = pose_1.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 1.5, 1.0 );
-			q.x = 320.0 + ref(0) * 100.0;
-			q.y = 240.0 - ref(2) * 100.0;
+			Eigen::Vector4d ref = pose_1.matrix().cast<double>() * Eigen::Vector4d( 0.0, 0.0, 0.5, 1.0 );
+			q.x = 320.0 + ref(0) * resolution;
+			q.y = 440.0 - ref(2) * resolution;
 			cv::line(traj_, p, q, cv::Scalar( 0, 0, 255 ), 1, 16);
+
+			Eigen::Vector4d cams[ 4 ] = { 
+				pose_1.matrix().cast<double>() * Eigen::Vector4d( -0.05, 0.05, 0, 1.0 ),
+				pose_1.matrix().cast<double>() * Eigen::Vector4d( 0.05, 0.05, 0, 1.0 ),
+				pose_1.matrix().cast<double>() * Eigen::Vector4d( 0.05, -0.05, 0, 1.0 ),
+				pose_1.matrix().cast<double>() * Eigen::Vector4d( -0.05, -0.05, 0, 1.0 )
+			};
+
+			for ( int k = 0; k < 4; k++ ) {
+				p.x = 320.0 + cams[ k ](0) * resolution;
+				p.y = 440.0 - cams[ k ](2) * resolution;
+				q.x = 320.0 + cams[ (k + 1)%4 ](0) * resolution;
+				q.y = 440.0 - cams[ (k + 1)%4 ](2) * resolution;
+				cv::line(traj_, p, q, cv::Scalar( 0, 0, 255 ), 1, 16);
+			}
+
+			float3 org = kinfu_->getCyclicalBufferStructure ()->origin_metric;
+			Eigen::Vector4d camsa[ 4 ] = { 
+				Eigen::Vector4d( 1.5, 1.5 + org.y, 0.3 + org.z, 1.0 ),
+				Eigen::Vector4d( 1.5, 1.5 + org.y, 3.3 + org.z, 1.0 ),
+				Eigen::Vector4d( -1.5, -1.5 + org.y, 3.3 + org.z, 1.0 ),
+				Eigen::Vector4d( -1.5, -1.5 + org.y, 0.3 + org.z, 1.0 ),
+			};
+
+			for ( int k = 0; k < 4; k++ ) {
+				p.x = 320.0 + camsa[ k ](0) * resolution;
+				p.y = 440.0 - camsa[ k ](2) * resolution;
+				q.x = 320.0 + camsa[ (k + 1)%4 ](0) * resolution;
+				q.y = 440.0 - camsa[ (k + 1)%4 ](2) * resolution;
+				cv::line(traj_, p, q, cv::Scalar( 0, 255, 0 ), 1, 16);
+			}
 		}
     }
   }
@@ -1111,6 +1171,12 @@ struct KinFuLSApp
 			framed_transformation_.type_ = ( FramedTransformation::RegistrationType )ft.id1_;
 			framed_transformation_.flag_ = ft.id2_;
 			framed_transformation_.transformation_ = ft.transformation_;
+
+			if ( ft.id1_ == 2 ) {
+				traj_token_ = kinfu_->getNumberOfPoses();
+				cout << traj_token_ << endl;
+			}
+
 			if ( frame_id_ == 0 || frame_id_ + 1 != ft.frame_ ) {
 				( ( ONIGrabber * ) &capture_ )->seekDepthFrame( ft.frame_ );
 			}
@@ -1374,7 +1440,7 @@ struct KinFuLSApp
 
 	  // update traj_
       drawTrajectory();
-	  image_view_.showTraj (traj_);
+	  image_view_.showTraj (traj_, kinfu_image_ ? frame_id_ : -1);
       //image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
 
 	  if ( record_log_ ) {
@@ -1449,7 +1515,7 @@ struct KinFuLSApp
     if (has_image)
     {
       Eigen::Affine3f viewer_pose = getViewerPose(scene_cloud_view_.cloud_viewer_);
-      image_view_.showScene (*kinfu_, rgb24, registration_, independent_camera_ ? &viewer_pose : 0);
+      image_view_.showScene (*kinfu_, rgb24, registration_, kinfu_image_ ? frame_id_ : -1, independent_camera_ ? &viewer_pose : 0);
     }    
 
     if (current_frame_cloud_view_)
@@ -1856,6 +1922,8 @@ void startRecording() {
   pcl::gpu::ScreenshotManager screenshot_manager_;
   int snapshot_rate_;
 
+  bool kinfu_image_;
+
   xn::MockDepthGenerator xn_mock_depth_;
   xn::MockImageGenerator xn_mock_image_;
   xn::DepthMetaData xn_depth_;
@@ -1890,6 +1958,7 @@ void startRecording() {
   PtrStepSz<const pcl::gpu::PixelRGB> rgb24_;  
   cv::Mat traj_;
   cv::Mat traj_buffer_;
+  int traj_token_;
 
   int time_ms_;
 
@@ -2054,6 +2123,7 @@ print_cli_help ()
   cout << "    --graph_registration <graph file>   : register the fragments in the file" << endl;
   cout << "    --schedule <schedule file>          : schedule Kinfu processing from the file" << endl;
   cout << "    --seek_start <X_frames>              : start from X_frames" << endl;
+  cout << "    --kinfu_image                       : record kinfu images to image folder" << endl;
   cout << "    --world                             : turn on world.pcd extraction" << endl;
   cout << "    --bbox <bbox file>                  : turn on bbox, used with --rgbdslam" << endl;
   cout << endl << "";
@@ -2214,6 +2284,9 @@ main (int argc, char* argv[])
 
   if ( pc::find_switch ( argc, argv, "--world" ) )
 	  app.kinfu_->toggleExtractWorld();
+
+  if ( pc::find_switch ( argc, argv, "--kinfu_image" ) )
+	  app.toggleKinfuImage();
 
   // executing
   if (triggered_capture) std::cout << "Capture mode: triggered\n";

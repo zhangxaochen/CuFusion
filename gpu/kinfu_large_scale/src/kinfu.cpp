@@ -285,6 +285,12 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 {  
 	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->ResetFlag ) ) {
 	  reset();
+	  if ( frame_ptr->type_ == frame_ptr->DirectApply )
+	  {
+		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
+		rmats_[0] = aff_rgbd.linear();
+		tvecs_[0] = aff_rgbd.translation();
+	  }
 	}
 
   device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
@@ -550,6 +556,9 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 				cam_trans_global_curr = aff_rgbd.translation();
 				break;
 			} else {
+				//cam_rot_global_curr = cam_rot_global_prev;
+				//cam_trans_global_curr = cam_trans_global_prev;
+				//break;
 			  reset ();
 			  return (false);
 			}
