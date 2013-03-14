@@ -230,6 +230,8 @@ writeCloudFile ( int file_index, int format, const CloudT& cloud );
 
 void writeTransformation( int file_index, const Eigen::Matrix4f& trans );
 
+void writeRawTSDF( int file_index, std::vector< int > & tsdf );
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void 
 writePoligonMeshFile (int format, const pcl::PolygonMesh& mesh);
@@ -395,6 +397,7 @@ struct BBox {
 
 struct RGBDTrajectory {
 	vector< pcl::gpu::FramedTransformation > data_;
+	vector< Eigen::Matrix<double, 6, 6, Eigen::RowMajor> > cov_;
 	int index_;
 	Eigen::Matrix4f head_inv_;
 	void loadFromFile( string filename ) {
@@ -435,8 +438,24 @@ struct RGBDTrajectory {
 		}
 	}
 
+	void saveCovToFile( string filename ) {
+		std::ofstream file( filename.c_str() );
+		if ( file.is_open() ) {
+		  for ( unsigned int i = 0; i < data_.size(); i++ ) {
+			file << data_[ i ].id1_ << "\t" << data_[ i ].id2_ << "\t" << data_[ i ].frame_ << std::endl;
+			file << cov_[ i ] << std::endl;
+		  }
+		  file.close();
+		}
+	}
+
 	bool ended() {
 		return ( index_ >= ( int )data_.size() );
+	}
+
+	void clear() {
+		data_.clear();
+		cov_.clear();
 	}
 };
 
@@ -1046,6 +1065,15 @@ struct KinFuLSApp
     printf("Creating log file %s\n", strFileName);
 
 	kinfu_traj_.saveToFile( string( strFileName ) );
+
+	if ( kinfu_traj_.data_.size() == kinfu_traj_.cov_.size() ) {
+		sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.cov",
+			timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+
+		printf("Creating cov file %s\n", strFileName);
+
+		kinfu_traj_.saveCovToFile( string( strFileName ) );
+	}
   }
 
   void
@@ -1466,6 +1494,18 @@ struct KinFuLSApp
 							  frame_id_,
 							  it->second * kinfu_->getCameraPose().matrix()
 							  ) );
+						  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+						  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
+					  } else {
+						  // not found! write down the absolute transformation
+						  kinfu_traj_.data_.push_back( FramedTransformation( 
+							  kinfu_traj_.data_.size(),
+							  file_index_,
+							  frame_id_,
+							  kinfu_->getCameraPose().matrix()
+							  ) );
+						  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+						  break;
 						  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
 					  }
 				  }
@@ -1485,6 +1525,40 @@ struct KinFuLSApp
 		  }
 	  }
     }
+
+	if ( use_schedule_ && record_log_ && ( framed_transformation_.flag_ & framed_transformation_.SavePointCloudFlag ) ) {
+		scene_cloud_view_.show( *kinfu_, integrate_colors_ );
+		if(scene_cloud_view_.point_colors_ptr_->points.empty()) // no colors
+		{
+		  if (scene_cloud_view_.compute_normals_)
+		    writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointNormal>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.normals_ptr_));
+		  else
+			writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, scene_cloud_view_.cloud_ptr_);
+		}
+		else
+		{        
+		  if (scene_cloud_view_.compute_normals_) {
+			  writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointXYZRGBNormal>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.normals_ptr_, *scene_cloud_view_.point_colors_ptr_));
+		  }
+		  else
+			writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointXYZRGB>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.point_colors_ptr_));
+		}
+
+		  char filename[ 1024 ];
+		  memset( filename, 0, 1024 );
+
+		  sprintf( filename, "cloud_bin_fragment_%d.log", file_index_ );
+
+		kinfu_traj_.saveToFile( filename );
+		kinfu_traj_.clear();
+
+		std::vector< int > raw_data;
+		int col;
+		kinfu_->volume().data().download( raw_data, col );
+		writeRawTSDF( file_index_, raw_data );
+
+		file_index_++;
+	}
 
     if (scan_)
     {
@@ -2076,6 +2150,20 @@ void writeTransformation( int file_index, const Eigen::Matrix4f & trans )
 	  file << trans << endl;
 	  file.close();
   }
+}
+
+void writeRawTSDF( int file_index, std::vector< int > & tsdf )
+{
+	char filename[ 1024 ];
+	memset( filename, 0, 1024 );
+
+	sprintf( filename, "cloud_bin_tsdf_%d.tsdf", file_index );
+
+	ofstream file( filename, ios::out | ios::binary );
+	if ( file.is_open() ) {
+		file.write( ( char * )( &tsdf[ 0 ] ), sizeof( int ) * tsdf.size() );
+		file.close();
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -507,11 +507,8 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         device_cam_trans_local_curr.y = device_cam_trans_local_curr_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
         device_cam_trans_local_curr.z = device_cam_trans_local_curr_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;
         
-        Eigen::Matrix<double, 6, 6, Eigen::RowMajor> A;
-        Eigen::Matrix<double, 6, 1> b;
-
         estimateCombined (device_cam_rot_local_curr, device_cam_trans_local_curr, vmap_curr, nmap_curr, device_cam_rot_local_prev_inv, device_cam_trans_local_prev, intr (level_index), 
-                          vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A.data (), b.data ());
+                          vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A_.data (), b_.data ());
 /*
         estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr (level_index),
                           vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A.data (), b.data ());
@@ -539,7 +536,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 		*/
 
         //checking nullspace
-        double det = A.determinant ();
+        double det = A_.determinant ();
 
 		if ( fabs (det) < 1e-15 || pcl_isnan (det) )
         {
@@ -547,8 +544,8 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
           
           PCL_ERROR ("LOST ... @%d frame.%d level.%d iteration, matrices are\n", global_time_, level_index, iter);
 			cout << "Determinant : " << det << endl;
-			cout << "Singular matrix :" << endl << A << endl;
-			cout << "Corresponding b :" << endl << b << endl;
+			cout << "Singular matrix :" << endl << A_ << endl;
+			cout << "Corresponding b :" << endl << b_ << endl;
 
 			if ( frame_ptr != NULL && frame_ptr->type_ == frame_ptr->InitializeOnly ) {
 				Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
@@ -565,7 +562,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         }
         //float maxc = A.maxCoeff();
 
-        Eigen::Matrix<float, 6, 1> result = A.llt ().solve (b).cast<float>();
+        Eigen::Matrix<float, 6, 1> result = A_.llt ().solve (b_).cast<float>();
         //Eigen::Matrix<float, 6, 1> result = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(b);
 
         float alpha = result (0);
@@ -581,7 +578,10 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
       }
     }
 
-	//save tranform
+	//cout << "Singular matrix :" << endl << A_ << endl;
+	//cout << "Corresponding b :" << endl << b_ << endl;
+
+			//save tranform
 	rmats_.push_back (cam_rot_global_curr); 
 	tvecs_.push_back (cam_trans_global_curr);
   }

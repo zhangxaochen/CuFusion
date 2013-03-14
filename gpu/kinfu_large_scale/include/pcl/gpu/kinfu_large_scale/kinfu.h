@@ -65,7 +65,8 @@ namespace pcl
 		  ResetFlag = 0x1,					// if reset at the very beginning
 		  IgnoreRegistrationFlag = 0x2,		// if discard the registration
 		  IgnoreIntegrationFlag = 0x4,		// if discard integration
-		  PushMatrixHashFlag = 0x8
+		  PushMatrixHashFlag = 0x8,			// if push the transformation matrix into the hash table
+		  SavePointCloudFlag = 0x10			// if save point cloud after execution
 	  };
 
       int id1_;
@@ -263,7 +264,15 @@ namespace pcl
 			extract_world_ = true;
 		}
 
+		Eigen::Matrix<double, 6, 6, Eigen::RowMajor> getCoVarianceMatrix() {
+			return A_;
+		}
+
       private:
+
+		Eigen::Matrix<double, 6, 6, Eigen::RowMajor> A_;
+        Eigen::Matrix<double, 6, 1> b_;
+
 
 		bool extract_world_;
 
