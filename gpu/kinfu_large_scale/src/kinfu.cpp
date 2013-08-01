@@ -572,9 +572,32 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         Eigen::Matrix3f cam_rot_incremental = (Eigen::Matrix3f)AngleAxisf (gamma, Vector3f::UnitZ ()) * AngleAxisf (beta, Vector3f::UnitY ()) * AngleAxisf (alpha, Vector3f::UnitX ());
         Vector3f cam_trans_incremental = result.tail<3> ();
 
+		/*
+		if ( global_time_ == 960 ) {
+          PCL_ERROR ("@%d frame.%d level.%d iteration, old matrices are\n", global_time_, level_index, iter);
+			Eigen::Affine3f xx;
+			xx.linear() = cam_rot_global_curr;
+			xx.translation() = cam_trans_global_curr - Eigen::Vector3f( (getCyclicalBufferStructure ())->origin_metric.x, (getCyclicalBufferStructure ())->origin_metric.y, (getCyclicalBufferStructure ())->origin_metric.z );
+			cout << "Matrix is : " << endl << xx.matrix() << endl;
+		}
+		*/
+
 		//compose
         cam_trans_global_curr = cam_rot_incremental * cam_trans_global_curr + cam_trans_incremental;
         cam_rot_global_curr = cam_rot_incremental * cam_rot_global_curr;
+
+		/*
+		if ( global_time_ == 960 ) {
+          PCL_ERROR ("@%d frame.%d level.%d iteration, matrices are\n", global_time_, level_index, iter);
+			cout << "Determinant : " << det << endl;
+			cout << "Singular matrix :" << endl << A_ << endl;
+			cout << "Corresponding b :" << endl << b_ << endl;
+			Eigen::Affine3f xx;
+			xx.linear() = cam_rot_global_curr;
+			xx.translation() = cam_trans_global_curr - Eigen::Vector3f( (getCyclicalBufferStructure ())->origin_metric.x, (getCyclicalBufferStructure ())->origin_metric.y, (getCyclicalBufferStructure ())->origin_metric.z );
+			cout << "Matrix is : " << endl << xx.matrix() << endl;
+		}
+		*/
       }
     }
 
@@ -625,6 +648,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   float tnorm = (cam_trans_global_curr - cam_trans_global_prev).norm();    
   const float alpha = 1.f;
   bool integrate = (rnorm + alpha * tnorm)/2 >= integration_metric_threshold_;
+  integrate = true;
   //~ if(integrate)
     //~ std::cout << "\tCamera movement since previous frame was " << (rnorm + alpha * tnorm)/2 << " integrate is set to " << integrate << std::endl;
   //~ else

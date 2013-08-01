@@ -66,7 +66,8 @@ namespace pcl
 		  IgnoreRegistrationFlag = 0x2,		// if discard the registration
 		  IgnoreIntegrationFlag = 0x4,		// if discard integration
 		  PushMatrixHashFlag = 0x8,			// if push the transformation matrix into the hash table
-		  SavePointCloudFlag = 0x10			// if save point cloud after execution
+		  SavePointCloudFlag = 0x10,		// if save point cloud after execution
+		  SaveAbsoluteMatrix = 0x20			// if save absolute matrix, work with IgnoreIntegrationFlag
 	  };
 
       int id1_;

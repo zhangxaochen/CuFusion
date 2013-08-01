@@ -230,7 +230,7 @@ writeCloudFile ( int file_index, int format, const CloudT& cloud );
 
 void writeTransformation( int file_index, const Eigen::Matrix4f& trans );
 
-void writeRawTSDF( int file_index, std::vector< int > & tsdf );
+void writeRawTSDF( int file_index, pcl::TSDFVolume<float, short> & tsdf );
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void 
@@ -459,6 +459,38 @@ struct RGBDTrajectory {
 	}
 };
 
+struct CameraParam {
+public:
+	double fx_, fy_, cx_, cy_, ICP_trunc_, integration_trunc_;
+
+	CameraParam() : fx_( 525.0 ), fy_( 525.0 ), cx_( 319.5 ), cy_( 239.5 ), ICP_trunc_( 2.5 ), integration_trunc_( 2.5 )  {
+	}
+
+	void loadFromFile( std::string filename ) {
+		FILE * f = fopen( filename.c_str(), "r" );
+		if ( f != NULL ) {
+			char buffer[1024];
+			while ( fgets( buffer, 1024, f ) != NULL ) {
+				if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
+					sscanf( buffer, "%lf", &fx_);
+					fgets( buffer, 1024, f );
+					sscanf( buffer, "%lf", &fy_);
+					fgets( buffer, 1024, f );
+					sscanf( buffer, "%lf", &cx_);
+					fgets( buffer, 1024, f );
+					sscanf( buffer, "%lf", &cy_);
+					fgets( buffer, 1024, f );
+					sscanf( buffer, "%lf", &ICP_trunc_);
+					fgets( buffer, 1024, f );
+					sscanf( buffer, "%lf", &integration_trunc_);
+				}
+			}
+			fclose ( f );
+			PCL_WARN( "Camera model set to (fx, fy, cx, cy, icp_trunc, int_trunc):\n\t%.2f, %.2f, %.2f, %.2f, %.2f, %.2f\n", fx_, fy_, cx_, cy_, ICP_trunc_, integration_trunc_ );
+		}
+	}
+};
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct CurrentFrameCloudView
@@ -543,7 +575,7 @@ struct ImageView
     
 	if ( frame_id != -1 ) {
 		char filename[ 1024 ];
-		sprintf( filename, "image/kinfu/%6d.png", frame_id );
+		sprintf( filename, "image/kinfu/%06d.png", frame_id );
 
 		cv::Mat m( 480, 640, CV_8UC3, (void*)&view_host_[0] );
 		cv::imwrite( filename, m );
@@ -571,7 +603,7 @@ struct ImageView
     viewerTraj_.showRGBImage ( (unsigned char *) traj.data, traj.cols, traj.rows, "short_image" );
 	if ( frame_id != -1 ) {
 		char filename[ 1024 ];
-		sprintf( filename, "image/traj/%6d.png", frame_id );
+		sprintf( filename, "image/traj/%06d.png", frame_id );
 		cv::imwrite( filename, traj );
 	}
   }
@@ -827,9 +859,9 @@ struct KinFuLSApp
 {
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
-  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
+  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart, float trunc_dist) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_( 480, 640, CV_8UC3, cv::Scalar( 255, 255, 255 )),
-	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0)
+	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false)
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -856,7 +888,8 @@ struct KinFuLSApp
     kinfu_->volume().setTsdfTruncDist (0.030f/*meters*/);
     kinfu_->setIcpCorespFilteringParams (0.1f/*meters*/, sin ( pcl::deg2rad(20.f) ));
     kinfu_->setDepthTruncationForICP(2.5f/*meters*/);
-    kinfu_->setDepthTruncationForIntegrate(2.5f/*meters*/);
+    //kinfu_->setDepthTruncationForIntegrate(2.5f/*meters*/);
+	kinfu_->setDepthTruncationForIntegrate( trunc_dist );
     kinfu_->setCameraMovementThreshold(0.001f);
     
     //Init KinFuLSApp            
@@ -945,6 +978,18 @@ struct KinFuLSApp
   }
 
   void
+  toggleCameraParam( std::string camera_file )
+  {
+	  CameraParam param;
+	  param.loadFromFile( camera_file );
+
+	  //kinfu_->setDepthIntrinsics( 582.62448167737955f, 582.69103270988637f, 313.04475870804731f, 238.44389626620386f );
+	  kinfu_->setDepthIntrinsics( param.fx_, param.fy_, param.cx_, param.cy_ );
+	  kinfu_->setDepthTruncationForICP( param.ICP_trunc_ );
+	  kinfu_->setDepthTruncationForIntegrate( param.integration_trunc_ );
+  }
+
+  void
   toggleScriptPlay( string script_file )
   {
     FILE * f = fopen( script_file.c_str(), "r" );
@@ -1000,6 +1045,14 @@ struct KinFuLSApp
 	  bbox_.loadFromFile( bbox_file );
 	  cout << "BBox contains " << bbox_.frames_.size() << " key frames." << endl;
 	  cout << "Use rgbd bbox schedule: " << ( use_bbox_ ? "On" : "Off ( requires use rgbdslam mode )" ) << endl;
+  }
+
+  void
+  toggleMask( string mask )
+  {
+	  use_mask_ = true;
+	  sscanf( mask.c_str(), "%d,%d,%d,%d", &mask_[ 0 ], &mask_[ 1 ], &mask_[ 2 ], &mask_[ 3 ] );
+	  PCL_INFO( "Use mask: [%d,%d] - [%d,%d]\n", mask_[ 0 ], mask_[ 2 ], mask_[ 1 ], mask_[ 3 ] );
   }
 
   void
@@ -1301,7 +1354,6 @@ struct KinFuLSApp
 			  framed_transformation_.transformation_ = kinfu_->getCameraPose( 0 ) * rgbd_traj_.head_inv_ * rgbd_traj_.data_[ frame_id_ - 1 ].transformation_;
 			  framed_transformation_.type_ = framed_transformation_.DirectApply;
 		  }
-	  } else {
 		if ( fragment_rate_ > 0 ) {
 			if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
 				framed_transformation_.flag_ |= framed_transformation_.ResetFlag;
@@ -1309,7 +1361,13 @@ struct KinFuLSApp
 				framed_transformation_.flag_ = 0;
 			}
 		}
-	  }
+	  } else if ( fragment_rate_ > 0 ) {
+			if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
+				framed_transformation_.flag_ |= framed_transformation_.ResetFlag;
+			} else {
+				framed_transformation_.flag_ = 0;
+			}
+		}
 	 
 	  /*
 	  	// check rgbdslam data
@@ -1481,32 +1539,42 @@ struct KinFuLSApp
 				  schedule_matrices_.insert( pair< int, Matrix4f >( frame_id_ - 1, kinfu_->getCameraPose().matrix().inverse() ) );
 				  //PCL_INFO( "Frame #%d : insert matrix into hash map\n", frame_id_ );
 			  } else if ( framed_transformation_.flag_ & framed_transformation_.IgnoreIntegrationFlag ) {
-				  int i = frame_id_ - 1;
-				  vector< int > & prev = next_pointers_[ i ];
-				  hash_map< int, Matrix4f >::const_iterator it;
-				  for ( int k = 0; k < prev.size(); k++ ) {
-					  it = schedule_matrices_.find( prev[ k ] );
-					  if ( it != schedule_matrices_.end() ) {
-						  // found!
-						  kinfu_traj_.data_.push_back( FramedTransformation( 
-							  kinfu_traj_.data_.size(),
-							  prev[ k ] + 1,
-							  frame_id_,
-							  it->second * kinfu_->getCameraPose().matrix()
-							  ) );
-						  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
-						  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
-					  } else {
-						  // not found! write down the absolute transformation
-						  kinfu_traj_.data_.push_back( FramedTransformation( 
-							  kinfu_traj_.data_.size(),
-							  file_index_,
-							  frame_id_,
-							  kinfu_->getCameraPose().matrix()
-							  ) );
-						  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
-						  break;
-						  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
+				  if ( framed_transformation_.flag_ & framed_transformation_.SaveAbsoluteMatrix ) {
+					kinfu_traj_.data_.push_back( FramedTransformation( 
+						kinfu_traj_.data_.size(),
+						frame_id_ - 1,
+						frame_id_,
+						kinfu_->getCameraPose().matrix()
+						) );
+					kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+				  } else {
+					  int i = frame_id_ - 1;
+					  vector< int > & prev = next_pointers_[ i ];
+					  hash_map< int, Matrix4f >::const_iterator it;
+					  for ( int k = 0; k < prev.size(); k++ ) {
+						  it = schedule_matrices_.find( prev[ k ] );
+						  if ( it != schedule_matrices_.end() ) {
+							  // found!
+							  kinfu_traj_.data_.push_back( FramedTransformation( 
+								  kinfu_traj_.data_.size(),
+								  prev[ k ] + 1,
+								  frame_id_,
+								  it->second * kinfu_->getCameraPose().matrix()
+								  ) );
+							  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+							  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
+						  } else {
+							  // not found! write down the absolute transformation
+							  kinfu_traj_.data_.push_back( FramedTransformation( 
+								  kinfu_traj_.data_.size(),
+								  file_index_,
+								  frame_id_,
+								  kinfu_->getCameraPose().matrix()
+								  ) );
+							  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+							  break;
+							  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
+						  }
 					  }
 				  }
 			  }
@@ -1526,6 +1594,34 @@ struct KinFuLSApp
 	  }
     }
 
+	/*
+	if ( frame_id_ == 960 ) {
+		scene_cloud_view_.show( *kinfu_, integrate_colors_ );
+		if(scene_cloud_view_.point_colors_ptr_->points.empty()) // no colors
+		{
+		  if (scene_cloud_view_.compute_normals_)
+		    writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointNormal>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.normals_ptr_));
+		  else
+			writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, scene_cloud_view_.cloud_ptr_);
+		}
+		else
+		{        
+		  if (scene_cloud_view_.compute_normals_) {
+			  writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointXYZRGBNormal>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.normals_ptr_, *scene_cloud_view_.point_colors_ptr_));
+		  }
+		  else
+			writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointXYZRGB>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.point_colors_ptr_));
+		}
+
+		Eigen::Matrix4f xx = kinfu_->getCameraPose().matrix();
+		xx( 0, 3 ) -= kinfu_->getCyclicalBufferStructure()->origin_metric.x;
+		xx( 1, 3 ) -= kinfu_->getCyclicalBufferStructure()->origin_metric.y;
+		xx( 2, 3 ) -= kinfu_->getCyclicalBufferStructure()->origin_metric.z;
+		cout << xx << endl;
+		
+	}
+	*/
+
 	if ( use_schedule_ && record_log_ && ( framed_transformation_.flag_ & framed_transformation_.SavePointCloudFlag ) ) {
 		scene_cloud_view_.show( *kinfu_, integrate_colors_ );
 		if(scene_cloud_view_.point_colors_ptr_->points.empty()) // no colors
@@ -1544,18 +1640,34 @@ struct KinFuLSApp
 			writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointXYZRGB>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.point_colors_ptr_));
 		}
 
+		if ( framed_transformation_.flag_ & framed_transformation_.SaveAbsoluteMatrix ) {
+		} else {
 		  char filename[ 1024 ];
 		  memset( filename, 0, 1024 );
 
 		  sprintf( filename, "cloud_bin_fragment_%d.log", file_index_ );
 
-		kinfu_traj_.saveToFile( filename );
-		kinfu_traj_.clear();
+		  kinfu_traj_.saveToFile( filename );
+		  kinfu_traj_.clear();
+		}
 
-		std::vector< int > raw_data;
-		int col;
-		kinfu_->volume().data().download( raw_data, col );
-		writeRawTSDF( file_index_, raw_data );
+		/*
+		//std::vector< int > raw_data;
+		//int col;
+		//kinfu_->volume().data().download( raw_data, col );
+        cout << "Downloading TSDF volume from device ... " << flush;
+        kinfu_->volume().downloadTsdfAndWeighs (tsdf_volume_.volumeWriteable (), tsdf_volume_.weightsWriteable ());
+        tsdf_volume_.setHeader (Eigen::Vector3i (pcl::device::VOLUME_X, pcl::device::VOLUME_Y, pcl::device::VOLUME_Z), kinfu_->volume().getSize ());
+
+		int cnt = 0;
+		for ( int i = 0; i < ( int )tsdf_volume_.size(); i++ ) {
+			if ( tsdf_volume_.volume().at( i ) != 0.0f )
+				cnt++;
+		}
+		cout << "valid voxel number is " << cnt << endl;
+
+		writeRawTSDF( file_index_, tsdf_volume_ );
+		*/
 
 		file_index_++;
 	}
@@ -1590,7 +1702,7 @@ struct KinFuLSApp
     {
       Eigen::Affine3f viewer_pose = getViewerPose(scene_cloud_view_.cloud_viewer_);
       image_view_.showScene (*kinfu_, rgb24, registration_, kinfu_image_ ? frame_id_ : -1, independent_camera_ ? &viewer_pose : 0);
-    }    
+    }
 
     if (current_frame_cloud_view_)
       current_frame_cloud_view_->show (*kinfu_);
@@ -1674,6 +1786,20 @@ struct KinFuLSApp
 
       source_depth_data_.resize(depth_.cols * depth_.rows);
       depth_wrapper->fillDepthImageRaw(depth_.cols, depth_.rows, &source_depth_data_[0]);
+
+	  if ( use_mask_ ) {
+		unsigned short * depth_buffer = &source_depth_data_[0];
+		for (unsigned yIdx = 0; yIdx < depth_.rows; ++yIdx)
+		{
+		  for (unsigned xIdx = 0; xIdx < depth_.cols; ++xIdx, ++depth_buffer)
+		  {
+			if ( xIdx < mask_[ 0 ] || xIdx > mask_[ 1 ] || yIdx < mask_[ 2 ] || yIdx > mask_[ 3 ] ) {
+				*depth_buffer = 0;
+			}
+		  }
+		}
+	  }
+
       depth_.data = &source_depth_data_[0];      
       
       rgb24_.cols = image_wrapper->getWidth();
@@ -2036,6 +2162,9 @@ void startRecording() {
 
   int time_ms_;
 
+  bool use_mask_;
+  int mask_[ 4 ];
+
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   static void
   keyboard_callback (const visualization::KeyboardEvent &e, void *cookie)
@@ -2152,18 +2281,14 @@ void writeTransformation( int file_index, const Eigen::Matrix4f & trans )
   }
 }
 
-void writeRawTSDF( int file_index, std::vector< int > & tsdf )
+void writeRawTSDF( int file_index, pcl::TSDFVolume<float, short> & tsdf )
 {
 	char filename[ 1024 ];
 	memset( filename, 0, 1024 );
 
 	sprintf( filename, "cloud_bin_tsdf_%d.tsdf", file_index );
 
-	ofstream file( filename, ios::out | ios::binary );
-	if ( file.is_open() ) {
-		file.write( ( char * )( &tsdf[ 0 ] ), sizeof( int ) * tsdf.size() );
-		file.close();
-	}
+	tsdf.save( filename );
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2201,6 +2326,7 @@ print_cli_help ()
   cout << "    --volume_size <in_meters>, -vs      : define integration volume size" << endl;
   cout << "    --shifting_distance <in_meters>, -sd : define shifting threshold (distance target-point / cube center)" << endl;
   cout << "    --snapshot_rate <X_frames>, -sr     : Extract RGB textures every <X_frames>. Default: 45  " << endl;
+  cout << "    --integration_trunc <in_meters>     : truncation distance for integration" << endl;
   cout << "    --record                            : record the stream to .oni file" << endl;
   cout << "    --record_script                     : record playback script file" << endl;
   cout << "    --play_script <script file>         : playback script file" << endl;
@@ -2214,6 +2340,8 @@ print_cli_help ()
   cout << "    --kinfu_image                       : record kinfu images to image folder" << endl;
   cout << "    --world                             : turn on world.pcd extraction" << endl;
   cout << "    --bbox <bbox file>                  : turn on bbox, used with --rgbdslam" << endl;
+  cout << "    --mask <x1,x2,y1,y2>                : trunc the depth image with a window" << endl;
+  cout << "    --camera <param_file>               : launch parameters from the file" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2251,7 +2379,7 @@ main (int argc, char* argv[])
 	xnLogSetMaskMinSeverity(XN_LOG_MASK_ALL, XN_LOG_VERBOSE);
   }
 
-  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file, graph_file, schedule_file, bbox_file;
+  std::string eval_folder, match_file, openni_device, oni_file, pcd_dir, script_file, log_file, graph_file, schedule_file, bbox_file, camera_file;
   try
   {    
     if (pc::parse_argument (argc, argv, "-dev", openni_device) > 0)
@@ -2314,7 +2442,14 @@ main (int argc, char* argv[])
   int fragment_start = 0;
   pc::parse_argument (argc, argv, "--fragment_start", fragment_start);
 
-  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start);
+  float trunc_dist = 2.5f;
+  pc::parse_argument ( argc, argv, "--integration_trunc", trunc_dist );
+
+  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start, trunc_dist);
+
+  if ( pc::parse_argument( argc, argv, "--camera", camera_file ) > 0 ) {
+	  app.toggleCameraParam( camera_file );
+  }
 
   int seek_start = 0;
   if ( pc::parse_argument (argc, argv, "--seek_start", seek_start) ) {
@@ -2375,6 +2510,11 @@ main (int argc, char* argv[])
 
   if ( pc::find_switch ( argc, argv, "--kinfu_image" ) )
 	  app.toggleKinfuImage();
+
+  std::string mask;
+  if ( pc::parse_argument( argc, argv, "--mask", mask ) > 0 ) {
+	  app.toggleMask( mask );
+  }
 
   // executing
   if (triggered_capture) std::cout << "Capture mode: triggered\n";
