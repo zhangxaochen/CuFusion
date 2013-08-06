@@ -565,6 +565,14 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
         Eigen::Matrix<float, 6, 1> result = A_.llt ().solve (b_).cast<float>();
         //Eigen::Matrix<float, 6, 1> result = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(b);
 
+		/*
+          PCL_ERROR ("LOST ... @%d frame.%d level.%d iteration, matrices are\n", global_time_, level_index, iter);
+			cout << "Determinant : " << det << endl;
+			cout << "Singular matrix :" << endl << A_ << endl;
+			cout << "Corresponding b :" << endl << b_ << endl;
+			cout << "result " << endl << result << endl;
+		*/
+
         float alpha = result (0);
         float beta  = result (1);
         float gamma = result (2);
