@@ -1048,6 +1048,13 @@ struct KinFuLSApp
   }
 
   void
+  toggleSLAC( int num )
+  {
+	  kinfu_->initSLAC( num );
+	  cout << "SLAC is on (0x40 flag is enabled in schedule)." << endl;
+  }
+
+  void
   toggleMask( string mask )
   {
 	  use_mask_ = true;
@@ -2342,6 +2349,7 @@ print_cli_help ()
   cout << "    --bbox <bbox file>                  : turn on bbox, used with --rgbdslam" << endl;
   cout << "    --mask <x1,x2,y1,y2>                : trunc the depth image with a window" << endl;
   cout << "    --camera <param_file>               : launch parameters from the file" << endl;
+  cout << "    --slac                              : enable slac (0x40 flag in schedule)" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2500,6 +2508,10 @@ main (int argc, char* argv[])
 
 	if (pc::parse_argument (argc, argv, "--bbox", bbox_file) > 0)
       app.toggleBBox( bbox_file );
+
+	int slac_num = 0;
+	if ( pc::parse_argument ( argc, argv, "--slac", slac_num ) > 0 )
+		app.toggleSLAC( slac_num );
   }
 
   if ( pc::find_switch (argc, argv, "--record_log") )

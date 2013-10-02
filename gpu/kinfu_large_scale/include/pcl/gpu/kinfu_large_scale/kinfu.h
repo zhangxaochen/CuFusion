@@ -67,7 +67,8 @@ namespace pcl
 		  IgnoreIntegrationFlag = 0x4,		// if discard integration
 		  PushMatrixHashFlag = 0x8,			// if push the transformation matrix into the hash table
 		  SavePointCloudFlag = 0x10,		// if save point cloud after execution
-		  SaveAbsoluteMatrix = 0x20			// if save absolute matrix, work with IgnoreIntegrationFlag
+		  SaveAbsoluteMatrix = 0x20,		// if save absolute matrix, work with IgnoreIntegrationFlag
+		  ExtractSLACMatrix = 0x40,			// if extract SLAC matrix
 	  };
 
       int id1_;
@@ -160,6 +161,9 @@ namespace pcl
           */
         void
         initColorIntegration(int max_weight = -1);        
+
+		void
+		initSLAC( int slac_num );
 
         /** \brief Returns cols passed to ctor */
         int
@@ -266,13 +270,15 @@ namespace pcl
 		}
 
 		Eigen::Matrix<double, 6, 6, Eigen::RowMajor> getCoVarianceMatrix() {
-			return A_;
+			return A_.cast< double >();
 		}
 
       private:
 
-		Eigen::Matrix<double, 6, 6, Eigen::RowMajor> A_;
-        Eigen::Matrix<double, 6, 1> b_;
+		//Eigen::Matrix<double, 6, 6, Eigen::RowMajor> A_;
+        //Eigen::Matrix<double, 6, 1> b_;
+		Eigen::Matrix<float, 6, 6, Eigen::RowMajor> A_;
+        Eigen::Matrix<float, 6, 1> b_;
 
 
 		bool extract_world_;
@@ -355,9 +361,21 @@ namespace pcl
         DeviceArray2D<float> depthRawScaled_;
         
         /** \brief Temporary buffer for ICP */
-        DeviceArray2D<double> gbuf_;
+        DeviceArray2D<float> gbuf_;
         /** \brief Buffer to store MLS matrix. */
-        DeviceArray<double> sumbuf_;
+        DeviceArray<float> sumbuf_;
+
+		/** \brief Temporary buffer for SLAC */
+        DeviceArray2D<double> gbuf_slac_;
+        /** \brief Buffer to store SLAC matrix. */
+        DeviceArray<double> sumbuf_slac_;
+
+		bool use_slac_;
+		int slac_resolution_;
+		int slac_num_;
+		int slac_matrix_size_;
+		int slac_lean_matrix_size_;
+		int slac_lean_matrix_size_gpu_2d_;
 
         /** \brief Array of camera rotation matrices for each moment of time. */
         std::vector<Matrix3frm> rmats_;

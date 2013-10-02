@@ -74,7 +74,7 @@ namespace pcl
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const float shiftingDistance, int rows, int cols)
 	: cyclical_( DISTANCE_THRESHOLD, pcl::device::VOLUME_SIZE, VOLUME_X), rows_(rows), cols_(cols), global_time_(0), max_icp_distance_(0), integration_metric_threshold_(0.f), perform_last_scan_ (false), finished_(false), force_shift_(false), max_integrate_distance_(0)
-	, extract_world_( false )
+	, extract_world_( false ), use_slac_( false )
 {
   //const Vector3f volume_size = Vector3f::Constant (VOLUME_SIZE);
   const Vector3i volume_resolution (VOLUME_X, VOLUME_Y, VOLUME_Z);
@@ -275,14 +275,16 @@ pcl::gpu::KinfuTracker::allocateBufffers (int rows, int cols)
   }  
   depthRawScaled_.create (rows, cols);
   // see estimate tranform for the magic numbers
-  gbuf_.create (27, 20*60);
+  //gbuf_.create (27, 20*60);
+  gbuf_.create( 27, 640*480 );
   sumbuf_.create (27);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool
 pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcolor, FramedTransformation * frame_ptr)
-{  
+{
+  ScopeTime time( "Kinfu Tracker All" );
 	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->ResetFlag ) ) {
 	  reset();
 	  if ( frame_ptr->type_ == frame_ptr->DirectApply )
@@ -298,7 +300,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   }
   else
   {
-    //ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
+    ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
     //depth_raw.copyTo(depths_curr[0]);
     device::bilateralFilter (depth_raw, depths_curr_[0]);
 
@@ -405,10 +407,12 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   // Ray casting
   /*Mat33& device_Rcurr = device_cast<Mat33> (Rcurr);*/
   {          
+    ScopeTime time( ">>> raycast" );
     raycast (intr, device_cam_rot_local_prev, device_cam_trans_local_prev, tsdf_volume_->getTsdfTruncDist (), device_volume_size, tsdf_volume_->data (), getCyclicalBufferStructure (), vmaps_g_prev_[0], nmaps_g_prev_[0]);    
   }
   {
     // POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
+    ScopeTime time( ">>> transformation based on raycast" );
     Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
     float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
     
@@ -455,7 +459,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   }
   else
   {
-    //ScopeTime time("icp-all");
+    ScopeTime time(">>> icp-all");
     for (int level_index = LEVELS-1; level_index>=0; --level_index)
     {
       int iter_num = icp_iterations_[level_index];
@@ -673,6 +677,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
     //integrateTsdfVolume(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tranc_dist, volume_);
     if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreIntegrationFlag ) ) {
 	} else {
+      ScopeTime time( ">>> integrate" );
       integrateTsdfVolume (depth_raw, intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
       //integrateTsdfVolume (depths_curr_[0], intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
 	}
@@ -681,6 +686,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   {
   if ( pcolor && color_volume_ )
     {
+      ScopeTime time( ">>> update color" );
       const float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
 
 	  device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_cam_rot_local_curr_inv, device_cam_trans_local_curr, vmaps_g_prev_[0], 
@@ -802,6 +808,23 @@ pcl::gpu::KinfuTracker::initColorIntegration(int max_weight)
 {     
   color_volume_ = pcl::gpu::ColorVolume::Ptr( new ColorVolume(*tsdf_volume_, max_weight) );  
   cyclical_.initBuffer(tsdf_volume_, color_volume_);
+}
+
+void
+pcl::gpu::KinfuTracker::initSLAC( int slac_num )
+{
+  use_slac_ = true;
+  slac_num_ = slac_num;
+  slac_resolution_ = 8;
+  slac_lean_matrix_size_ = 6 + ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * 3;
+  slac_lean_matrix_size_gpu_2d_ = ( slac_lean_matrix_size_ * slac_lean_matrix_size_ - slac_lean_matrix_size_ ) / 2 + slac_lean_matrix_size_ * 2;
+
+  // TODO: clear the memory difficulty.
+  // TODO: investigate the possible speed up of Kinfu
+  // TODO: 10x30 (blocks) x 1024 (threads) possible?
+
+  //gbuf_slac_.create( slac_lean_matrix_size_gpu_2d_, 20 * 60 );
+  sumbuf_slac_.create( slac_lean_matrix_size_gpu_2d_ );
 }
 
 /*
