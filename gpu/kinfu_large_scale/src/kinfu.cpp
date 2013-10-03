@@ -284,7 +284,7 @@ pcl::gpu::KinfuTracker::allocateBufffers (int rows, int cols)
 bool
 pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcolor, FramedTransformation * frame_ptr)
 {
-  ScopeTime time( "Kinfu Tracker All" );
+  //ScopeTime time( "Kinfu Tracker All" );
 	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->ResetFlag ) ) {
 	  reset();
 	  if ( frame_ptr->type_ == frame_ptr->DirectApply )
@@ -300,7 +300,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   }
   else
   {
-    ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
+    //ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
     //depth_raw.copyTo(depths_curr[0]);
     device::bilateralFilter (depth_raw, depths_curr_[0]);
 
@@ -407,12 +407,12 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   // Ray casting
   /*Mat33& device_Rcurr = device_cast<Mat33> (Rcurr);*/
   {          
-    ScopeTime time( ">>> raycast" );
+    //ScopeTime time( ">>> raycast" );
     raycast (intr, device_cam_rot_local_prev, device_cam_trans_local_prev, tsdf_volume_->getTsdfTruncDist (), device_volume_size, tsdf_volume_->data (), getCyclicalBufferStructure (), vmaps_g_prev_[0], nmaps_g_prev_[0]);    
   }
   {
     // POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
-    ScopeTime time( ">>> transformation based on raycast" );
+    //ScopeTime time( ">>> transformation based on raycast" );
     Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
     float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
     
@@ -459,7 +459,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   }
   else
   {
-    ScopeTime time(">>> icp-all");
+    //ScopeTime time(">>> icp-all");
     for (int level_index = LEVELS-1; level_index>=0; --level_index)
     {
       int iter_num = icp_iterations_[level_index];
@@ -677,7 +677,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
     //integrateTsdfVolume(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tranc_dist, volume_);
     if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreIntegrationFlag ) ) {
 	} else {
-      ScopeTime time( ">>> integrate" );
+      //ScopeTime time( ">>> integrate" );
       integrateTsdfVolume (depth_raw, intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
       //integrateTsdfVolume (depths_curr_[0], intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
 	}
@@ -686,7 +686,7 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
   {
   if ( pcolor && color_volume_ )
     {
-      ScopeTime time( ">>> update color" );
+      //ScopeTime time( ">>> update color" );
       const float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
 
 	  device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_cam_rot_local_curr_inv, device_cam_trans_local_curr, vmaps_g_prev_[0], 

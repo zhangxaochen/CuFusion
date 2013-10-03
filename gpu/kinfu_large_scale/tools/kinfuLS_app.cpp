@@ -1823,7 +1823,7 @@ struct KinFuLSApp
 		  PCL_WARN( "Triggered frame number asynchronized : depth %d, image %d\n", depth_frame_id, image_frame_id );
 	  } else {
 		  frame_id_ = depth_frame_id;
-		  PCL_INFO( "Triggered frame : depth %d, image %d\n", depth_frame_id, image_frame_id );
+		  //PCL_INFO( "Triggered frame : depth %d, image %d\n", depth_frame_id, image_frame_id );
 	  }
 	  //cout << "[" << boost::this_thread::get_id() << "] : " << "Process Depth " << depth_wrapper->getDepthMetaData().FrameID() << ", " << depth_wrapper->getDepthMetaData().Timestamp() 
 		 // << " Image" << image_wrapper->getMetaData().FrameID() << ", " << image_wrapper->getMetaData().Timestamp() << endl;

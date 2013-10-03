@@ -56,7 +56,8 @@ namespace pcl
     typedef float4 PointType;
 
     //Tsdf fixed point divisor (if old format is enabled)
-    const int DIVISOR = 2047;     // SHRT_MAX;
+    //const int DIVISOR = 2047;     // SHRT_MAX;
+    const int DIVISOR = 32767;     // SHRT_MAX;
     
     //RGB images resolution
     const float  HEIGHT = 480.0f;
