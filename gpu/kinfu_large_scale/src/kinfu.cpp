@@ -420,9 +420,9 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 
     MapArr& vmap_temp = vmaps_g_prev_[0];
     MapArr& nmap_temp = nmaps_g_prev_[0];
-    
-    device::tranformMaps (vmap_temp, nmap_temp, rotation_id, cube_origin, vmaps_g_prev_[0], nmaps_g_prev_[0]);
-    
+
+	device::tranformMaps (vmap_temp, nmap_temp, rotation_id, cube_origin, vmaps_g_prev_[0], nmaps_g_prev_[0]);
+
     for (int i = 1; i < LEVELS; ++i)
     {
       resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
