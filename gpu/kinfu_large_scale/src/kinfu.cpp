@@ -621,6 +621,27 @@ pcl::gpu::KinfuTracker::operator() (const DepthMap& depth_raw, const View * pcol
 	tvecs_.push_back (cam_trans_global_curr);
   }
 
+  if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->ExtractSLACMatrix ) ) {
+	  ScopeTime time(">>> test");
+	    Mat33&  device_cam_rot_local_curr = device_cast<Mat33> (cam_rot_global_curr);/// We have not dealt with changes in rotations                  
+        float3& device_cam_trans_local_curr_tmp = device_cast<float3> (cam_trans_global_curr);
+        float3 device_cam_trans_local_curr; 
+        device_cam_trans_local_curr.x = device_cam_trans_local_curr_tmp.x - (getCyclicalBufferStructure ())->origin_metric.x;
+        device_cam_trans_local_curr.y = device_cam_trans_local_curr_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
+        device_cam_trans_local_curr.z = device_cam_trans_local_curr_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;
+        
+        //estimateCombined (device_cam_rot_local_curr, device_cam_trans_local_curr, vmaps_curr_[ 0 ], nmaps_curr_[ 0 ], device_cam_rot_local_prev_inv, device_cam_trans_local_prev, intr(0), 
+        //                  vmaps_g_prev_[ 0 ], nmaps_g_prev_[ 0 ], distThres_, angleThres_, gbuf_, sumbuf_, A_.data (), b_.data ());
+		estimateCombinedEx (device_cam_rot_local_curr, device_cam_trans_local_curr, vmaps_curr_[ 0 ], nmaps_curr_[ 0 ], device_cam_rot_local_prev_inv, device_cam_trans_local_prev, intr(0), 
+                          vmaps_g_prev_[ 0 ], nmaps_g_prev_[ 0 ], distThres_, angleThres_, gbuf_, sumbuf_, A_.data (), b_.data (), 
+						  gbuf_slac_triangle_, gbuf_slac_block_, gbuf_slac_b_, slac_A_.data(), slac_block_.data(), slac_b_.data());
+		/*
+		cout << A_ << endl;
+		cout << b_ << endl;
+        cout << A_.llt ().solve (b_).cast<float>() << endl;
+		*/
+  }
+
   /*
   //check for shift
   bool has_shifted = cyclical_.checkForShift(tsdf_volume_, getCameraPose (), 0.6 * volume_size_, true, perform_last_scan_, force_shift_);
@@ -816,15 +837,11 @@ pcl::gpu::KinfuTracker::initSLAC( int slac_num )
   use_slac_ = true;
   slac_num_ = slac_num;
   slac_resolution_ = 8;
-  slac_lean_matrix_size_ = 6 + ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * 3;
-  slac_lean_matrix_size_gpu_2d_ = ( slac_lean_matrix_size_ * slac_lean_matrix_size_ - slac_lean_matrix_size_ ) / 2 + slac_lean_matrix_size_ * 2;
-
-  // TODO: clear the memory difficulty.
-  // TODO: investigate the possible speed up of Kinfu
-  // TODO: 10x30 (blocks) x 1024 (threads) possible?
-
-  //gbuf_slac_.create( slac_lean_matrix_size_gpu_2d_, 20 * 60 );
-  sumbuf_slac_.create( slac_lean_matrix_size_gpu_2d_ );
+  slac_lean_matrix_size_ = ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * 3;
+  slac_lean_matrix_size_gpu_2d_ = ( slac_lean_matrix_size_ * slac_lean_matrix_size_ - slac_lean_matrix_size_ ) / 2 + slac_lean_matrix_size_;
+  gbuf_slac_triangle_.create( slac_lean_matrix_size_gpu_2d_ );
+  gbuf_slac_block_.create( 6 * slac_lean_matrix_size_ );
+  gbuf_slac_b_.create( slac_lean_matrix_size_ );
 }
 
 /*

@@ -366,9 +366,15 @@ namespace pcl
         DeviceArray<float> sumbuf_;
 
 		/** \brief Temporary buffer for SLAC */
-        DeviceArray2D<double> gbuf_slac_;
+        DeviceArray<float> gbuf_slac_triangle_;
+		/** \brief Temporary buffer for SLAC */
+        DeviceArray<float> gbuf_slac_block_;
         /** \brief Buffer to store SLAC matrix. */
-        DeviceArray<double> sumbuf_slac_;
+        DeviceArray<float> gbuf_slac_b_;
+
+		Eigen::Matrix<float, 2187, 2187, Eigen::RowMajor> slac_A_;
+		Eigen::Matrix<float, 6, 2187, Eigen::RowMajor> slac_block_;
+        Eigen::Matrix<float, 2187, 1> slac_b_;
 
 		bool use_slac_;
 		int slac_resolution_;
