@@ -622,27 +622,110 @@ bool
 	}
 
 	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->ExtractSLACMatrix ) ) {
-		//ScopeTime time(">>> test");
-		Mat33&  device_cam_rot_local_curr = device_cast<Mat33> (cam_rot_global_curr);/// We have not dealt with changes in rotations                  
+		ScopeTime time(">>> SLAC");
+
+		//cout << A_ << endl;
+		//cout << b_ << endl;
+
+		if ( frame_ptr->frame_ > ( int )slac_trans_mats_.size() ) {
+			slac_trans_mats_.push_back( getCameraPose().matrix() );
+		}
+
+		Mat33&  device_cam_rot_local_curr = device_cast<Mat33> (cam_rot_global_curr);/// We have not dealt with changes in rotations  
 		float3& device_cam_trans_local_curr_tmp = device_cast<float3> (cam_trans_global_curr);
 		float3 device_cam_trans_local_curr; 
 		device_cam_trans_local_curr.x = device_cam_trans_local_curr_tmp.x - (getCyclicalBufferStructure ())->origin_metric.x;
 		device_cam_trans_local_curr.y = device_cam_trans_local_curr_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
 		device_cam_trans_local_curr.z = device_cam_trans_local_curr_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;
 
+		Matrix3frm cam_rot_global_curr_t = cam_rot_global_curr.transpose();
+		Mat33&  device_cam_rot_local_curr_t = device_cast<Mat33> (cam_rot_global_curr_t);
+
 		//cout << A_ << endl;
 		//estimateCombined (device_cam_rot_local_curr, device_cam_trans_local_curr, vmaps_curr_[ 0 ], nmaps_curr_[ 0 ], device_cam_rot_local_prev_inv, device_cam_trans_local_prev, intr(0), 
 		//                  vmaps_g_prev_[ 0 ], nmaps_g_prev_[ 0 ], distThres_, angleThres_, gbuf_, sumbuf_, A_.data (), b_.data ());
-		cout << A_ << endl;
-		estimateCombinedEx (device_cam_rot_local_curr, device_cam_trans_local_curr, vmaps_curr_[ 0 ], nmaps_curr_[ 0 ], device_cam_rot_local_prev_inv, device_cam_trans_local_prev, intr(0), 
+		//cout << A_ << endl;
+
+		//cout << slac_A_.block< 10, 10 >( 0, 0 ) << endl;
+		device::createVMap (intr(0), depth_raw, vmaps_curr_[ 0 ]);
+
+		estimateCombinedEx (device_cam_rot_local_curr, device_cam_rot_local_curr_t, device_cam_trans_local_curr, vmaps_curr_[ 0 ], nmaps_curr_[ 0 ], device_cam_rot_local_prev_inv, device_cam_trans_local_prev, intr(0), 
 			vmaps_g_prev_[ 0 ], nmaps_g_prev_[ 0 ], distThres_, angleThres_, gbuf_, sumbuf_, A_.data (), b_.data (), 
-			gbuf_slac_triangle_, gbuf_slac_block_, gbuf_slac_b_, slac_A_.data(), slac_block_.data(), slac_b_.data());
+			gbuf_slac_triangle_, gbuf_slac_block_, slac_A_.data(), slac_block_.data());
+
+		if ( frame_ptr->frame_ == 1 ) {
+			slac_full_mat_ = slac_base_mat_ * slac_num_;
+		}
+		int idx = frame_ptr->frame_ - 1;
+		slac_full_mat_.block< 2187, 2187 >( 0, 0 ) += slac_A_;
+		slac_full_mat_.block< 2187, 6 >( 0, 2187 + idx * 6 ) = slac_block_.block< 2187, 6 >( 0, 0 );
+		slac_full_mat_.block< 6, 6 >( 2187 + idx * 6, 2187 + idx * 6 ) = A_;
+		
+		slac_full_b_.block< 2187, 1 >( 0, 0 ) += slac_block_.block< 2187, 1 >( 0, 6 );
+		slac_full_b_.block< 6, 1 >( 2187 + idx * 6, 0 ) = b_;
+
+		if ( frame_ptr->frame_ == slac_num_ ) {
+			addRegularizationTerm();
+
+			Eigen::LLT< Eigen::MatrixXf, Eigen::Upper > solver( slac_full_mat_ );
+			Eigen::VectorXf result = - solver.solve( slac_full_b_ );
+
+			std::ofstream file("slac_full.txt");
+			if ( file.is_open() ) {
+				file << slac_full_mat_ << endl;
+				file.close();
+			}
+			std::ofstream file1("slac_full_b.txt");
+			if ( file1.is_open() ) {
+				file1 << slac_full_b_ << endl;
+				file1.close();
+			}
+			std::ofstream file2("slac_full_result.txt");
+			if ( file2.is_open() ) {
+				file2 << result << endl;
+				file2.close();
+			}
+		}
+
+		/*
+		if ( frame_ptr->frame_ == 1 ) {
+			std::ofstream file("slac_base.txt");
+			if ( file.is_open() ) {
+				file << slac_base_mat_ << endl;
+				file.close();
+			}
+			std::ofstream file1("slac_ctr.txt");
+			if ( file1.is_open() ) {
+				file1 << slac_init_ctr_ << endl;
+				file1.close();
+			}
+		}
+		*/
+		/*
+		cout << frame_ptr->id1_ << " " << frame_ptr->id2_ << " " << frame_ptr->frame_ << endl;
+		cout << frame_ptr->transformation_ << endl;
+		if ( frame_ptr->frame_ == 1 ) {
+			std::ofstream file("slac_A.txt");
+			if ( file.is_open() ) {
+				file << slac_A_ << endl;
+				file.close();
+			}
+			std::ofstream fileb("slab_block.txt");
+			if ( fileb.is_open() ) {
+				fileb << slac_block_ << endl;
+				fileb.close();
+			}
+ 		}
+		*/
+		//cout << A_ << endl;
+		//cout << slac_A_.block< 10, 10 >( 0, 0 ) << endl;
+
 		/*
 		cout << A_ << endl;
 		cout << b_ << endl;
 		cout << A_.llt ().solve (b_).cast<float>() << endl;
 		*/
-		cout << A_ << endl << endl;
+		//cout << A_ << endl << endl;
 	}
 
 	/*
@@ -841,10 +924,209 @@ void
 	slac_num_ = slac_num;
 	slac_resolution_ = 8;
 	slac_lean_matrix_size_ = ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * 3;
-	slac_lean_matrix_size_gpu_2d_ = ( slac_lean_matrix_size_ * slac_lean_matrix_size_ - slac_lean_matrix_size_ ) / 2 + slac_lean_matrix_size_;
+	//slac_lean_matrix_size_gpu_2d_ = ( slac_lean_matrix_size_ * slac_lean_matrix_size_ - slac_lean_matrix_size_ ) / 2 + slac_lean_matrix_size_;
+	slac_lean_matrix_size_gpu_2d_ = slac_lean_matrix_size_ * slac_lean_matrix_size_;
 	gbuf_slac_triangle_.create( slac_lean_matrix_size_gpu_2d_ );
-	gbuf_slac_block_.create( 6 * slac_lean_matrix_size_ );
-	gbuf_slac_b_.create( slac_lean_matrix_size_ );
+	gbuf_slac_block_.create( 7 * slac_lean_matrix_size_ );
+	ctr_buf_.create( slac_lean_matrix_size_ );
+
+	slac_full_matrix_size_ = slac_num_ * 6 + 2187;
+
+	initSLACMatrices();
+
+	ctr_buf_.upload( slac_this_ctr_.data(), 2187 );
+}
+
+void pcl::gpu::KinfuTracker::initSLACMatrices()
+{
+	slac_trans_mats_.clear();
+	slac_base_mat_ = Eigen::MatrixXf( slac_full_matrix_size_, slac_full_matrix_size_ );
+	slac_full_mat_ = Eigen::MatrixXf( slac_full_matrix_size_, slac_full_matrix_size_ );
+	slac_this_ctr_ = Eigen::VectorXf( 2187 );
+	slac_full_b_ = Eigen::VectorXf( slac_full_matrix_size_ );
+	slac_full_b_.setZero();
+
+	for ( int i = 0; i <= slac_resolution_; i++ ) {
+		for ( int j = 0; j <= slac_resolution_; j++ ) {
+			for ( int k = 0; k <= slac_resolution_; k++ ) {
+				Eigen::Vector4d pos( i * 0.375, j * 0.375, k * 0.375, 1 );
+				slac_this_ctr_( ( i * 81 + j * 9 + k ) * 3 + 0 ) = pos( 0 );
+				slac_this_ctr_( ( i * 81 + j * 9 + k ) * 3 + 1 ) = pos( 1 );
+				slac_this_ctr_( ( i * 81 + j * 9 + k ) * 3 + 2 ) = pos( 2 );
+			}
+		}
+	}
+	slac_init_ctr_ = slac_this_ctr_;
+
+	for ( int i = 0; i <= slac_resolution_; i++ ) {
+		for ( int j = 0; j <= slac_resolution_; j++ ) {
+			for ( int k = 0; k <= slac_resolution_; k++ ) {
+				int idx[ 2 ] = { ( i * 81 + j * 9 + k ) * 3, 0 };
+				double val[ 2 ] = { 1, -1 };
+				if ( i > 0 ) {
+					idx[ 1 ] = ( ( i - 1 ) * 81 + j * 9 + k ) * 3;
+					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
+					slac_base_mat_( idx[ 0 ] + 1, idx[ 0 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 1 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 0 ] + 1 ) += -1;
+					slac_base_mat_( idx[ 0 ] + 2, idx[ 0 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 1 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
+				}
+				if ( i < slac_resolution_ ) {
+					idx[ 1 ] = ( ( i + 1 ) * 81 + j * 9 + k ) * 3;
+					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
+					slac_base_mat_( idx[ 0 ], idx[ 1 ] ) += -1;
+					slac_base_mat_( idx[ 0 ] + 1, idx[ 0 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 1 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 0 ] + 1, idx[ 1 ] + 1 ) += -1;
+					slac_base_mat_( idx[ 0 ] + 2, idx[ 0 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 1 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 0 ] + 2, idx[ 1 ] + 2 ) += -1;
+				}
+				if ( j > 0 ) {
+					idx[ 1 ] = ( i * 81 + ( j - 1 ) * 9 + k ) * 3;
+					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
+					slac_base_mat_( idx[ 0 ] + 1, idx[ 0 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 1 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 0 ] + 1 ) += -1;
+					slac_base_mat_( idx[ 0 ] + 2, idx[ 0 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 1 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
+				}
+				if ( j < slac_resolution_ ) {
+					idx[ 1 ] = ( i * 81 + ( j + 1 ) * 9 + k ) * 3;
+					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
+					slac_base_mat_( idx[ 0 ] + 1, idx[ 0 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 1 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 0 ] + 1 ) += -1;
+					slac_base_mat_( idx[ 0 ] + 2, idx[ 0 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 1 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
+				}
+				if ( k > 0 ) {
+					idx[ 1 ] = ( i * 81 + j * 9 + ( k - 1 ) ) * 3;
+					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
+					slac_base_mat_( idx[ 0 ] + 1, idx[ 0 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 1 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 0 ] + 1 ) += -1;
+					slac_base_mat_( idx[ 0 ] + 2, idx[ 0 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 1 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
+				}
+				if ( k < slac_resolution_ ) {
+					idx[ 1 ] = ( i * 81 + j * 9 + ( k + 1 ) ) * 3;
+					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
+					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
+					slac_base_mat_( idx[ 0 ] + 1, idx[ 0 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 1 ] + 1 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 1, idx[ 0 ] + 1 ) += -1;
+					slac_base_mat_( idx[ 0 ] + 2, idx[ 0 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 1 ] + 2 ) += 1;
+					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
+				}
+			}
+		}
+	}
+
+	int base_anchor = ( slac_resolution_ / 2 * 81 + slac_resolution_ / 2 * 9 + 0 ) * 3;
+	slac_base_mat_( base_anchor + 0, base_anchor + 0 ) += 1;
+	slac_base_mat_( base_anchor + 1, base_anchor + 1 ) += 1;
+	slac_base_mat_( base_anchor + 2, base_anchor + 2 ) += 1;
+}
+
+void pcl::gpu::KinfuTracker::addRegularizationTerm()
+{
+	double regscore = 0.0;
+	for ( int i = 0; i <= slac_resolution_; i++ ) {
+		for ( int j = 0; j <= slac_resolution_; j++ ) {
+			for ( int k = 0; k <= slac_resolution_; k++ ) {
+				int idx = ( i * 81 + j * 9 + k ) * 3;
+				std::vector< int > idxx;
+				if ( i > 0 ) {
+					idxx.push_back( ( ( i - 1 ) * 81 + j * 9 + k ) * 3 );
+				}
+				if ( i < slac_resolution_) {
+					idxx.push_back( ( ( i + 1 ) * 81 + j * 9 + k ) * 3 );
+				}
+				if ( j > 0 ) {
+					idxx.push_back( ( i * 81 + ( j - 1 ) * 9 + k ) * 3 );
+				}
+				if ( j < slac_resolution_) {
+					idxx.push_back( ( i * 81 + ( j + 1 ) * 9 + k ) * 3 );
+				}
+				if ( k > 0 ) {
+					idxx.push_back( ( i * 81 + j * 9 + ( k - 1 ) ) * 3 );
+				}
+				if ( k < slac_resolution_) {
+					idxx.push_back( ( i * 81 + j * 9 + ( k + 1 ) ) * 3 );
+				}
+
+				Eigen::Matrix3f R;
+				if ( i == slac_resolution_ / 2 && j == slac_resolution_ / 2 && k == 0 ) {
+					// anchor point, Rotation matrix is always identity
+					R = R.Identity();
+				} else {
+					R = GetRotation( idx, idxx, slac_init_ctr_, slac_this_ctr_ );
+				}
+
+				for ( int t = 0; t < ( int )idxx.size(); t++ ) {
+					Eigen::Vector3f bx = Eigen::Vector3f( 
+						slac_this_ctr_( idx ) - slac_this_ctr_( idxx[ t ] ), 
+						slac_this_ctr_( idx + 1 ) - slac_this_ctr_( idxx[ t ] + 1 ), 
+						slac_this_ctr_( idx + 2 ) - slac_this_ctr_( idxx[ t ] + 2 )
+						)
+						- R * Eigen::Vector3f( 
+						slac_init_ctr_( idx ) - slac_init_ctr_( idxx[ t ] ), 
+						slac_init_ctr_( idx + 1 ) - slac_init_ctr_( idxx[ t ] + 1 ),
+						slac_init_ctr_( idx + 2 ) - slac_init_ctr_( idxx[ t ] + 2 )
+						);
+					regscore += slac_num_ * bx.transpose() * bx;
+					slac_full_b_( idx ) += bx( 0 ) * slac_num_;
+					slac_full_b_( idxx[ t ] ) -= bx( 0 ) * slac_num_;
+					slac_full_b_( idx + 1 ) += bx( 1 ) * slac_num_;
+					slac_full_b_( idxx[ t ] + 1 ) -= bx( 1 ) * slac_num_;
+					slac_full_b_( idx + 2 ) += bx( 2 ) * slac_num_;
+					slac_full_b_( idxx[ t ] + 2 ) -= bx( 2 ) * slac_num_;
+				}
+			}
+		}
+	}
+
+}
+
+Eigen::Matrix3f pcl::gpu::KinfuTracker::GetRotation( const int idx, const std::vector< int > & idxx, const Eigen::VectorXf & ictr, const Eigen::VectorXf & ctr )
+{
+	int n = ( int )idxx.size();
+	Eigen::Matrix3f C = Eigen::Matrix3f::Zero();
+
+	for ( int i = 0; i < n; i++ ) {
+		Eigen::RowVector3f dif( ictr( idx ) - ictr( idxx[ i ] ), ictr( idx + 1 ) - ictr( idxx[ i ] + 1 ), ictr( idx + 2 ) - ictr( idxx[ i ] + 2 ) );
+		Eigen::RowVector3f diff( ctr( idx ) - ctr( idxx[ i ] ), ctr( idx + 1 ) - ctr( idxx[ i ] + 1 ), ctr( idx + 2 ) - ctr( idxx[ i ] + 2 ) );
+		C += dif.transpose() * diff;
+	}
+
+	Eigen::JacobiSVD< Eigen::Matrix3f > svd( C, Eigen::ComputeFullU | Eigen::ComputeFullV );
+	Eigen::Matrix3f U = svd.matrixU();
+	Eigen::Matrix3f V = svd.matrixV();
+	Eigen::Matrix3f R = V * U.transpose();
+	if ( R.determinant() < 0 ) {
+		U( 0, 2 ) *= -1;
+		U( 1, 2 ) *= -1;
+		U( 2, 2 ) *= -1;
+		R = V * U.transpose();
+	}
+	return R;
 }
 
 /*

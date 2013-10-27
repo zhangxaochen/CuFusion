@@ -368,13 +368,21 @@ namespace pcl
 		/** \brief Temporary buffer for SLAC */
         DeviceArray<float> gbuf_slac_triangle_;
 		/** \brief Temporary buffer for SLAC */
-        DeviceArray<float> gbuf_slac_block_;
-        /** \brief Buffer to store SLAC matrix. */
-        DeviceArray<float> gbuf_slac_b_;
+        DeviceArray<float> gbuf_slac_block_;  // last row is gbuf_slac_b_;
 
-		Eigen::Matrix<float, 2187, 2187, Eigen::RowMajor> slac_A_;
-		Eigen::Matrix<float, 6, 2187, Eigen::RowMajor> slac_block_;
-        Eigen::Matrix<float, 2187, 1> slac_b_;
+		Eigen::Matrix<float, 2187, 2187, Eigen::ColMajor> slac_A_;
+		Eigen::Matrix<float, 2187, 7, Eigen::ColMajor> slac_block_;
+		Eigen::VectorXf slac_init_ctr_;
+		Eigen::VectorXf slac_this_ctr_;
+		Eigen::MatrixXf slac_base_mat_;
+		Eigen::MatrixXf slac_full_mat_;
+		Eigen::VectorXf slac_full_b_;
+
+		DeviceArray<float> ctr_buf_;
+
+		void initSLACMatrices();
+		void addRegularizationTerm();
+		Eigen::Matrix3f GetRotation( const int idx, const std::vector< int > & idxx, const Eigen::VectorXf & ictr, const Eigen::VectorXf & ctr );
 
 		bool use_slac_;
 		int slac_resolution_;
@@ -382,6 +390,8 @@ namespace pcl
 		int slac_matrix_size_;
 		int slac_lean_matrix_size_;
 		int slac_lean_matrix_size_gpu_2d_;
+		int slac_full_matrix_size_;
+		std::vector< Eigen::Matrix4f > slac_trans_mats_;
 
         /** \brief Array of camera rotation matrices for each moment of time. */
         std::vector<Matrix3frm> rmats_;

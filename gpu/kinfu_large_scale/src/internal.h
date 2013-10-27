@@ -221,11 +221,11 @@ namespace pcl
                       DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host);
 
     void 
-    estimateCombinedEx (const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr, 
+    estimateCombinedEx (const Mat33& Rcurr, const Mat33& Rcurr_t, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr, 
                       const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, 
                       DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host,
-					  DeviceArray<float>& gbuf_slac_triangle, DeviceArray<float>& gbuf_slac_block, DeviceArray<float>& gbuf_slac_b,
-					  float* matrixSLAC_A_host, float* matrixSLAC_block_host, float* vectorSLAC_b_host);
+					  DeviceArray<float>& gbuf_slac_triangle, DeviceArray<float>& gbuf_slac_block,
+					  float* matrixSLAC_A_host, float* matrixSLAC_block_host);
 
     /** \brief Computation Ax=b for ICP iteration
       * \param[in] Rcurr Rotation of current camera pose guess 

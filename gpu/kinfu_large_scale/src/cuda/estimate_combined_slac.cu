@@ -65,6 +65,7 @@ namespace pcl
 			};
 
 			Mat33 Rcurr;
+			Mat33 Rcurr_t;
 			float3 tcurr;
 
 			PtrStep<float> vmap_curr;
@@ -77,6 +78,7 @@ namespace pcl
 
 			PtrStep<float> vmap_g_prev;
 			PtrStep<float> nmap_g_prev;
+			PtrStep<float> ctr;
 
 			float distThres;
 			float angleThres;
@@ -87,10 +89,9 @@ namespace pcl
 			mutable PtrStep<float_type> gbuf;
 			mutable float_type* gbuf_slac_triangle;
 			mutable float_type* gbuf_slac_block;
-			mutable float_type* gbuf_slac_b;
 
 			__device__ __forceinline__ bool
-				search (int x, int y, float3& n, float3& d, float3& s) const
+				search (int x, int y, float3& n, float3& d, float3& s, int3 &coo, float3 & res) const
 			{
 				float3 ncurr;
 				ncurr.x = nmap_curr.ptr (y)[x];
@@ -102,6 +103,19 @@ namespace pcl
 				vcurr.x = vmap_curr.ptr (y       )[x];
 				vcurr.y = vmap_curr.ptr (y + rows)[x];
 				vcurr.z = vmap_curr.ptr (y + 2 * rows)[x];
+
+				float3 vcoof;
+				vcoof.x = ( vcurr.x + 1.5 ) / 0.375;
+				vcoof.y = ( vcurr.y + 1.5 ) / 0.375;
+				vcoof.z = ( vcurr.z - 0.3 ) / 0.375;
+
+				int3 vcoo;
+				vcoo.x = __float2int_rd ( vcoof.x );
+				vcoo.y = __float2int_rd ( vcoof.y );
+				vcoo.z = __float2int_rd ( vcoof.z );
+
+				if ( vcoo.x < 0 || vcoo.x >= 8 || vcoo.y < 0 || vcoo.y >= 8 || vcoo.z < 0 || vcoo.z >= 8 )
+					return false;
 
 				float3 vcurr_g = Rcurr * vcurr + tcurr;
 
@@ -144,6 +158,10 @@ namespace pcl
 				n = nprev_g;
 				d = vprev_g;
 				s = vcurr_g;
+				
+				coo = vcoo;
+				res = make_float3( vcoof.x - vcoo.x, vcoof.y - vcoo.y, vcoof.z - vcoo.z );
+
 				return (true);
 			}
 
@@ -154,26 +172,68 @@ namespace pcl
 				int y = threadIdx.y + blockIdx.y * CTA_SIZE_Y;
 
 				float3 n, d, s;
+				int3 coo;
+				float3 res;
 				bool found_coresp = false;
 
 				if (x < cols && y < rows)
-					found_coresp = search (x, y, n, d, s);
-
-				int coo[3];         //projection
-				coo[0] = __float2int_rd ( ( s.x + 1.5 ) / 0.375 );      //4
-				coo[1] = __float2int_rd ( ( s.y + 1.5 ) / 0.375 );                      //4
-				coo[2] = __float2int_rd ( ( s.z - 0.3 ) / 0.375 );
+					found_coresp = search (x, y, n, d, s, coo, res);
 
 				float row[7];
+				int idx_[8];
+				int idx[24];
+				float val_[8];
+				float val[24];
 
-				if (found_coresp && coo[0]>=0 && coo[0]<8 && coo[1]>=0 && coo[1]<8 && coo[2]>=0 &&coo[2]<8 )
+				if ( found_coresp )
 				{
 					*(float3*)&row[0] = cross (s, n);
 					*(float3*)&row[3] = n;
-					row[6] = dot (n, d - s);
+					row[6] = dot (n, s - d);
+
+					float3 TitNq = Rcurr_t * n;
+					idx_[0] = ( coo.x * 81 + coo.y * 9 + coo.z ) * 3;
+					idx_[1] = ( coo.x * 81 + coo.y * 9 + (coo.z+1) ) * 3;
+					idx_[2] = ( coo.x * 81 + (coo.y+1) * 9 + coo.z ) * 3;
+					idx_[3] = ( coo.x * 81 + (coo.y+1) * 9 + (coo.z+1) ) * 3;
+					idx_[4] = ( (coo.x+1) * 81 + coo.y * 9 + coo.z ) * 3;
+					idx_[5] = ( (coo.x+1) * 81 + coo.y * 9 + (coo.z+1) ) * 3;
+					idx_[6] = ( (coo.x+1) * 81 + (coo.y+1) * 9 + coo.z ) * 3;
+					idx_[7] = ( (coo.x+1) * 81 + (coo.y+1) * 9 + (coo.z+1) ) * 3;
+					val_[0] = (1-res.x) * (1-res.y) * (1-res.z);
+					val_[1] = (1-res.x) * (1-res.y) * (res.z);
+					val_[2] = (1-res.x) * (res.y) * (1-res.z);
+					val_[3] = (1-res.x) * (res.y) * (res.z);
+					val_[4] = (res.x) * (1-res.y) * (1-res.z);
+					val_[5] = (res.x) * (1-res.y) * (res.z);
+					val_[6] = (res.x) * (res.y) * (1-res.z);
+					val_[7] = (res.x) * (res.y) * (res.z);
+
+					#pragma unroll
+					for ( int ll = 0; ll < 8; ll++ ) {
+						idx[ ll * 3 + 0 ] = idx_[ ll ] + 0;
+						val[ ll * 3 + 0 ] = val_[ ll ] * TitNq.x;
+						idx[ ll * 3 + 1 ] = idx_[ ll ] + 1;
+						val[ ll * 3 + 1 ] = val_[ ll ] * TitNq.y;
+						idx[ ll * 3 + 2 ] = idx_[ ll ] + 2;
+						val[ ll * 3 + 2 ] = val_[ ll ] * TitNq.z;
+					}
+					#pragma unroll
 					for ( int i = 0; i < 6; i++ )
+					{
+						#pragma unroll
 						for ( int j = 0; j < 24; j++ )
-							atomicAdd( gbuf_slac_block + i * 2187 + coo[0] * 81 + coo[1] * 9 + coo[2], 1.0 );
+							atomicAdd( gbuf_slac_block + i * 2187 + idx[ j ], val[ j ] * row[ i ] );
+					}
+					#pragma unroll
+					for ( int i = 0; i < 24; i++ )
+					{
+						atomicAdd( gbuf_slac_block + 6 * 2187 + idx[ i ], row[ 6 ] * val[ i ] );
+						atomicAdd( gbuf_slac_triangle + idx[ i ] * 2187 + idx[ i ], val[ i ] * val[ i ] );
+						#pragma unroll
+						for ( int j = i + 1; j < 24; j++ )
+							atomicAdd( gbuf_slac_triangle + idx[ j ] * 2187 + idx[ i ], val[ i ] * val[ j ] );
+					}
 				}
 				else
 					row[0] = row[1] = row[2] = row[3] = row[4] = row[5] = row[6] = 0.f;
@@ -181,10 +241,10 @@ namespace pcl
 				int tid = Block::flattenedThreadId ();
 
 				int shift = 0;
-#pragma unroll
+				#pragma unroll
 				for (int i = 0; i < 6; ++i)        //rows
 				{
-#pragma unroll
+					#pragma unroll
 					for (int j = i; j < 7; ++j)          // cols + b
 					{
 						gbuf.ptr (shift++)[ (blockIdx.x + gridDim.x * blockIdx.y) * CTA_SIZE + tid ] = row[i]*row[j];
@@ -246,19 +306,83 @@ namespace pcl
 		{
 			tr ();
 		}
+
+		struct ClearBuffer3
+		{
+			enum
+			{
+				CTA_SIZE = 512,
+				STRIDE = CTA_SIZE,
+				MAT_SIZE = 2187,
+				TRIANGLE_SIZE = ( MAT_SIZE * MAT_SIZE + MAT_SIZE ) / 2,
+				FULL_MAT_SIZE = MAT_SIZE * MAT_SIZE,
+				BLOCK_SIZE = MAT_SIZE * 7
+			};
+
+			/*
+			mutable PtrStep<float_type> gbuf;
+			int length;
+
+			__device__ __forceinline__ void
+				operator () () const
+			{
+				float_type *beg = gbuf.ptr();
+				float_type *end = beg + length;
+
+				int tid = threadIdx.x;
+
+				for (float_type *t = beg + tid; t < end; t += STRIDE) {
+					*t = 0;
+				}
+			}
+			*/
+		};
+
+		__global__ void
+			clearBufferKernel3 (float_type * gbuf, int length) 
+		{
+			float_type *beg = gbuf;
+			float_type *end = beg + length;
+
+			int tid = threadIdx.x;
+
+			for (float_type *t = beg + tid; t < end; t += ClearBuffer3::STRIDE) {
+				*t = 0;
+			}
+		}
+		
+		/*
+		__global__ void
+			clearBufferKernel3 ( const ClearBuffer3 cb )
+		{
+			cb ();
+		}
+		*/
 	}
 }
 
-void pcl::device::estimateCombinedEx (const Mat33& Rcurr, const float3& tcurr, 
+void pcl::device::estimateCombinedEx (const Mat33& Rcurr, const Mat33& Rcurr_t, const float3& tcurr, 
 	const MapArr& vmap_curr, const MapArr& nmap_curr, 
 	const Mat33& Rprev_inv, const float3& tprev, const Intr& intr,
 	const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, 
 	float distThres, float angleThres,
 	DeviceArray2D<float_type>& gbuf, DeviceArray<float_type>& mbuf, 
 	float_type* matrixA_host, float_type* vectorB_host,
-	DeviceArray<float>& gbuf_slac_triangle, DeviceArray<float>& gbuf_slac_block, DeviceArray<float>& gbuf_slac_b,
-	float* matrixSLAC_A_host, float* matrixSLAC_block_host, float* vectorSLAC_b_host)
+	DeviceArray<float>& gbuf_slac_triangle, DeviceArray<float>& gbuf_slac_block,
+	float* matrixSLAC_A_host, float* matrixSLAC_block_host)
 {
+	/*
+	ClearBuffer3 cr3;
+	cr3.gbuf = gbuf_slac_triangle;
+	cr3.length = cr3.TRIANGLE_SIZE;
+	clearBufferKernel3<<<1, ClearBuffer3::CTA_SIZE>>>(cr3);
+	cr3.gbuf = gbuf_slac_block;
+	cr3.length = cr3.BLOCK_SIZE;
+	clearBufferKernel3<<<1, ClearBuffer3::CTA_SIZE>>>(cr3);
+	*/
+	clearBufferKernel3<<<1, ClearBuffer3::CTA_SIZE>>>( gbuf_slac_triangle, ClearBuffer3::FULL_MAT_SIZE );
+	clearBufferKernel3<<<1, ClearBuffer3::CTA_SIZE>>>( gbuf_slac_block, ClearBuffer3::BLOCK_SIZE );
+
 	int cols = vmap_curr.cols ();
 	int rows = vmap_curr.rows () / 3;
 	dim3 block (Combined3::CTA_SIZE_X, Combined3::CTA_SIZE_Y);
@@ -269,6 +393,7 @@ void pcl::device::estimateCombinedEx (const Mat33& Rcurr, const float3& tcurr,
 	Combined3 cs3;
 
 	cs3.Rcurr = Rcurr;
+	cs3.Rcurr_t = Rcurr_t;
 	cs3.tcurr = tcurr;
 
 	cs3.vmap_curr = vmap_curr;
@@ -291,7 +416,6 @@ void pcl::device::estimateCombinedEx (const Mat33& Rcurr, const float3& tcurr,
 	cs3.gbuf = gbuf;
 	cs3.gbuf_slac_triangle = gbuf_slac_triangle;
 	cs3.gbuf_slac_block = gbuf_slac_block;
-	cs3.gbuf_slac_b = gbuf_slac_b;
 
 	combinedKernel3<<<grid, block>>>(cs3);
 	cudaSafeCall ( cudaGetLastError () );
@@ -318,4 +442,7 @@ void pcl::device::estimateCombinedEx (const Mat33& Rcurr, const float3& tcurr,
 				matrixA_host[j * 6 + i] = matrixA_host[i * 6 + j] = value;
 		}
 	}
+
+	gbuf_slac_triangle.download( matrixSLAC_A_host );
+	gbuf_slac_block.download( matrixSLAC_block_host );
 }

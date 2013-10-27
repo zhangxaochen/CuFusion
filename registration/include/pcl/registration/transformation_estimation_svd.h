@@ -34,7 +34,7 @@
  *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  *
- * $Id: transformation_estimation_svd.h 7116 2012-09-10 21:18:41Z rusu $
+ * $Id$
  *
  */
 #ifndef PCL_REGISTRATION_TRANSFORMATION_ESTIMATION_SVD_H_
@@ -62,8 +62,13 @@ namespace pcl
         typedef boost::shared_ptr<const TransformationEstimationSVD<PointSource, PointTarget, Scalar> > ConstPtr;
 
         typedef typename TransformationEstimation<PointSource, PointTarget, Scalar>::Matrix4 Matrix4;
-        
-        TransformationEstimationSVD () {};
+
+        /** \brief Constructor
+          * \param[in] use_umeyama Toggles whether or not to use 3rd party software*/
+        TransformationEstimationSVD (bool use_umeyama=true):
+          use_umeyama_ (use_umeyama)
+        {}
+
         virtual ~TransformationEstimationSVD () {};
 
         /** \brief Estimate a rigid rotation transformation between a source and a target point cloud using SVD.
@@ -125,9 +130,9 @@ namespace pcl
           * \param[in] target_it an iterator over the target point cloud dataset
           * \param[out] transformation_matrix the resultant transformation matrix
           */
-        void 
-        estimateRigidTransformation (ConstCloudIterator<PointSource>& source_it, 
-                                     ConstCloudIterator<PointTarget>& target_it, 
+        void
+        estimateRigidTransformation (ConstCloudIterator<PointSource>& source_it,
+                                     ConstCloudIterator<PointTarget>& target_it,
                                      Matrix4 &transformation_matrix) const;
 
         /** \brief Obtain a 4x4 rigid transformation matrix from a correlation matrix H = src * tgt'
@@ -136,14 +141,16 @@ namespace pcl
           * \param[in] cloud_tgt_demean the input target cloud, demeaned, in Eigen format
           * \param[in] centroid_tgt the input target cloud, in Eigen format
           * \param[out] transformation_matrix the resultant 4x4 rigid transformation matrix
-          */ 
-        void
+          */
+        virtual void
         getTransformationFromCorrelation (
             const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> &cloud_src_demean,
             const Eigen::Matrix<Scalar, 4, 1> &centroid_src,
             const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> &cloud_tgt_demean,
             const Eigen::Matrix<Scalar, 4, 1> &centroid_tgt,
             Matrix4 &transformation_matrix) const;
+
+        bool use_umeyama_;
      };
 
   }

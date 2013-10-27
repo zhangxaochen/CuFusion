@@ -879,7 +879,12 @@ struct KinFuLSApp
     kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance);
 
     Eigen::Matrix3f R = Eigen::Matrix3f::Identity ();   // * AngleAxisf( pcl::deg2rad(-30.f), Vector3f::UnitX());
-    Eigen::Vector3f t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2f);
+	Eigen::Vector3f t;
+	if ( vsz < 2.0f ) {
+	    t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 + 0.6);
+	} else {
+	    t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2);
+	}
 
     Eigen::Affine3f pose = Eigen::Translation3f (t) * Eigen::AngleAxisf (R);
 	transformation_inverse_ = pose.matrix().inverse();
@@ -1259,6 +1264,7 @@ struct KinFuLSApp
 			framed_transformation_.type_ = ( FramedTransformation::RegistrationType )ft.id1_;
 			framed_transformation_.flag_ = ft.id2_;
 			framed_transformation_.transformation_ = ft.transformation_;
+			framed_transformation_.frame_ = ft.frame_;
 
 			if ( ft.id1_ == 2 ) {
 				traj_token_ = kinfu_->getNumberOfPoses();
@@ -2349,7 +2355,7 @@ print_cli_help ()
   cout << "    --bbox <bbox file>                  : turn on bbox, used with --rgbdslam" << endl;
   cout << "    --mask <x1,x2,y1,y2>                : trunc the depth image with a window" << endl;
   cout << "    --camera <param_file>               : launch parameters from the file" << endl;
-  cout << "    --slac                              : enable slac (0x40 flag in schedule)" << endl;
+  cout << "    --slac <slac_num>                   : enable slac (0x40 flag in schedule)" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
