@@ -370,8 +370,8 @@ namespace pcl
 		/** \brief Temporary buffer for SLAC */
         DeviceArray<float> gbuf_slac_block_;  // last row is gbuf_slac_b_;
 
-		Eigen::Matrix<float, 2187, 2187, Eigen::ColMajor> slac_A_;
-		Eigen::Matrix<float, 2187, 7, Eigen::ColMajor> slac_block_;
+		Eigen::Matrix<float, 6591, 6591, Eigen::ColMajor> slac_A_;
+		Eigen::Matrix<float, 6591, 7, Eigen::ColMajor> slac_block_;
 		Eigen::VectorXf slac_init_ctr_;
 		Eigen::VectorXf slac_this_ctr_;
 		Eigen::MatrixXf slac_base_mat_;
@@ -379,6 +379,10 @@ namespace pcl
 		Eigen::VectorXf slac_full_b_;
 
 		DeviceArray<float> ctr_buf_;
+
+		inline int getSLACIndex( int i, int j, int k ) {
+			return ( i * ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) + j * ( slac_resolution_ + 1 ) + k ) * 3;
+		}
 
 		void initSLACMatrices();
 		void addRegularizationTerm();

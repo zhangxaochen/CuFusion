@@ -192,14 +192,14 @@ namespace pcl
 					row[6] = dot (n, s - d);
 
 					float3 TitNq = Rcurr_t * n;
-					idx_[0] = ( coo.x * 81 + coo.y * 9 + coo.z ) * 3;
-					idx_[1] = ( coo.x * 81 + coo.y * 9 + (coo.z+1) ) * 3;
-					idx_[2] = ( coo.x * 81 + (coo.y+1) * 9 + coo.z ) * 3;
-					idx_[3] = ( coo.x * 81 + (coo.y+1) * 9 + (coo.z+1) ) * 3;
-					idx_[4] = ( (coo.x+1) * 81 + coo.y * 9 + coo.z ) * 3;
-					idx_[5] = ( (coo.x+1) * 81 + coo.y * 9 + (coo.z+1) ) * 3;
-					idx_[6] = ( (coo.x+1) * 81 + (coo.y+1) * 9 + coo.z ) * 3;
-					idx_[7] = ( (coo.x+1) * 81 + (coo.y+1) * 9 + (coo.z+1) ) * 3;
+					idx_[0] = ( coo.x * 169 + coo.y * 13 + coo.z ) * 3;
+					idx_[1] = ( coo.x * 169 + coo.y * 13 + (coo.z+1) ) * 3;
+					idx_[2] = ( coo.x * 169 + (coo.y+1) * 13 + coo.z ) * 3;
+					idx_[3] = ( coo.x * 169 + (coo.y+1) * 13 + (coo.z+1) ) * 3;
+					idx_[4] = ( (coo.x+1) * 169 + coo.y * 13 + coo.z ) * 3;
+					idx_[5] = ( (coo.x+1) * 169 + coo.y * 13 + (coo.z+1) ) * 3;
+					idx_[6] = ( (coo.x+1) * 169 + (coo.y+1) * 13 + coo.z ) * 3;
+					idx_[7] = ( (coo.x+1) * 169 + (coo.y+1) * 13 + (coo.z+1) ) * 3;
 					val_[0] = (1-res.x) * (1-res.y) * (1-res.z);
 					val_[1] = (1-res.x) * (1-res.y) * (res.z);
 					val_[2] = (1-res.x) * (res.y) * (1-res.z);
@@ -223,16 +223,16 @@ namespace pcl
 					{
 						#pragma unroll
 						for ( int j = 0; j < 24; j++ )
-							atomicAdd( gbuf_slac_block + i * 2187 + idx[ j ], val[ j ] * row[ i ] );
+							atomicAdd( gbuf_slac_block + i * 6591 + idx[ j ], val[ j ] * row[ i ] );
 					}
 					#pragma unroll
 					for ( int i = 0; i < 24; i++ )
 					{
-						atomicAdd( gbuf_slac_block + 6 * 2187 + idx[ i ], row[ 6 ] * val[ i ] );
-						atomicAdd( gbuf_slac_triangle + idx[ i ] * 2187 + idx[ i ], val[ i ] * val[ i ] );
+						atomicAdd( gbuf_slac_block + 6 * 6591 + idx[ i ], row[ 6 ] * val[ i ] );
+						atomicAdd( gbuf_slac_triangle + idx[ i ] * 6591 + idx[ i ], val[ i ] * val[ i ] );
 						#pragma unroll
 						for ( int j = i + 1; j < 24; j++ )
-							atomicAdd( gbuf_slac_triangle + idx[ j ] * 2187 + idx[ i ], val[ i ] * val[ j ] );
+							atomicAdd( gbuf_slac_triangle + idx[ j ] * 6591 + idx[ i ], val[ i ] * val[ j ] );
 					}
 				}
 				else
@@ -313,7 +313,7 @@ namespace pcl
 			{
 				CTA_SIZE = 512,
 				STRIDE = CTA_SIZE,
-				MAT_SIZE = 2187,
+				MAT_SIZE = 6591,
 				TRIANGLE_SIZE = ( MAT_SIZE * MAT_SIZE + MAT_SIZE ) / 2,
 				FULL_MAT_SIZE = MAT_SIZE * MAT_SIZE,
 				BLOCK_SIZE = MAT_SIZE * 7

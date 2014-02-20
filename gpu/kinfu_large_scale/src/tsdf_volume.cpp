@@ -39,6 +39,7 @@
 #include "internal.h"
 #include <algorithm>
 #include <Eigen/Core>
+#include <pcl/common/time.h>
 
 #include <iostream>
 
@@ -471,7 +472,17 @@ pcl::gpu::TsdfVolume::downloadTsdfAndWeighs (std::vector<float>& tsdf, std::vect
   int volumeSize = volume_.cols() * volume_.rows();
   tsdf.resize (volumeSize);
   weights.resize (volumeSize);
-  volume_.download(&tsdf[0], volume_.cols() * sizeof(int));
+  {
+    std::cout << std::endl;
+    ScopeTime t("CUDA download");
+    volume_.download(&tsdf[0], volume_.cols() * sizeof(int));
+  }
+ // {
+	//std::cout << std::endl;
+	//ScopeTime t("CUDA upload");
+	//volume_.upload (&tsdf[0], volume_.cols() * sizeof(int), volume_.rows(), volume_.cols() );
+ //   //volume_.download(&tsdf[0], volume_.cols() * sizeof(int));
+ // }
 
 #pragma omp parallel for
   for(int i = 0; i < (int) tsdf.size(); ++i)

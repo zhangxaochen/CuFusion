@@ -47,6 +47,7 @@
 #include <Eigen/Cholesky>
 #include <Eigen/Geometry>
 #include <Eigen/LU>
+#include <Eigen/Eigenvalues>
 
 #ifdef HAVE_OPENCV
 #include <opencv2/opencv.hpp>
@@ -88,19 +89,20 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 
 	// set cyclical buffer values
 	cyclical_.setDistanceThreshold (shifting_distance_);
-	cyclical_.setVolumeSize (volume_size_, volume_size_, volume_size_);
+	cyclical_.setVolumeSize (volume_size(0), volume_size(1), volume_size(2));
 
 	setDepthIntrinsics (525.f, 525.f); // default values, can be overwritten
 
 	init_Rcam_ = Eigen::Matrix3f::Identity ();// * AngleAxisf(-30.f/180*3.1415926, Vector3f::UnitX());
-	init_tcam_ = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2f);
+	//init_tcam_ = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2f);
+	init_tcam_ = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 + 0.3);
 
 	const int iters[] = {10, 5, 4};
 	std::copy (iters, iters + LEVELS, icp_iterations_);
 
 	const float default_distThres = 0.10f; //meters
 	const float default_angleThres = sin (20.f * 3.14159254f / 180.f);
-	const float default_tranc_dist = 0.03f; //meters
+	const float default_tranc_dist = 0.03f / 3.0f * volume_size(0); //meters
 
 	setIcpCorespFilteringParams (default_distThres, default_angleThres);
 	tsdf_volume_->setTsdfTruncDist (default_tranc_dist);
@@ -301,7 +303,7 @@ bool
 	else
 	{
 		//ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
-		//depth_raw.copyTo(depths_curr[0]);
+		//depth_raw.copyTo(depths_curr_[0]);
 		device::bilateralFilter (depth_raw, depths_curr_[0]);
 
 		if (max_icp_distance_ > 0)
@@ -322,6 +324,34 @@ bool
 	//can't perform more on first frame
 	if (global_time_ == 0)
 	{
+		/*
+		// save nmaps_curr_[ 0 ];
+		std::vector< float > temp;
+		int ttemp;
+		temp.resize( 640 * 480 * 3 );
+		//nmaps_curr_[ 0 ].download( &( temp[ 0 ] ), nmaps_curr_[ 0 ].cols() * sizeof( float ) );
+		nmaps_curr_[ 0 ].download( temp, ttemp );
+
+		FILE * f = fopen( "nmap0.txt", "w" );
+		for ( int i = 0; i < 480 * 640 * 3; i++ ) {
+			if ( temp[ i ] >= 0 && temp[ i ] <= 1 )
+				fprintf( f, "%.6f\n", temp[ i ] );
+			else
+				fprintf( f, "%.6f\n", 0 );
+		}
+		fclose( f );
+
+		//vmaps_curr_[ 0 ].download( &( temp[ 0 ] ), vmaps_curr_[ 0 ].cols() * sizeof( float ) );
+		vmaps_curr_[ 0 ].download( temp, ttemp );
+		f = fopen( "vmap0.txt", "w" );
+		for ( int i = 0; i < 480 * 640 * 3; i++ ) {
+			if ( temp[ i ] >= 0 && temp[ i ] <= 1 )
+				fprintf( f, "%.6f\n", temp[ i ] );
+			else
+				fprintf( f, "%.6f\n", 0 );
+		}
+		fclose( f );
+		*/
 
 		Matrix3frm initial_cam_rot = rmats_[0]; //  [Ri|ti] - pos of camera, i.e.
 		Matrix3frm initial_cam_rot_inv = initial_cam_rot.inverse ();
@@ -357,8 +387,6 @@ bool
 
 		if(perform_last_scan_)
 			finished_ = true;
-
-
 		++global_time_;
 		return (false);
 	}
@@ -657,12 +685,12 @@ bool
 			slac_full_mat_ = slac_base_mat_ * slac_num_;
 		}
 		int idx = frame_ptr->frame_ - 1;
-		slac_full_mat_.block< 2187, 2187 >( 0, 0 ) += slac_A_;
-		slac_full_mat_.block< 2187, 6 >( 0, 2187 + idx * 6 ) = slac_block_.block< 2187, 6 >( 0, 0 );
-		slac_full_mat_.block< 6, 6 >( 2187 + idx * 6, 2187 + idx * 6 ) = A_;
+		slac_full_mat_.block< 6591, 6591 >( 0, 0 ) += slac_A_;
+		slac_full_mat_.block< 6591, 6 >( 0, 6591 + idx * 6 ) = slac_block_.block< 6591, 6 >( 0, 0 );
+		slac_full_mat_.block< 6, 6 >( 6591 + idx * 6, 6591 + idx * 6 ) = A_;
 		
-		slac_full_b_.block< 2187, 1 >( 0, 0 ) += slac_block_.block< 2187, 1 >( 0, 6 );
-		slac_full_b_.block< 6, 1 >( 2187 + idx * 6, 0 ) = b_;
+		slac_full_b_.block< 6591, 1 >( 0, 0 ) += slac_block_.block< 6591, 1 >( 0, 6 );
+		slac_full_b_.block< 6, 1 >( 6591 + idx * 6, 0 ) = b_;
 
 		if ( frame_ptr->frame_ == slac_num_ ) {
 			addRegularizationTerm();
@@ -670,6 +698,7 @@ bool
 			Eigen::LLT< Eigen::MatrixXf, Eigen::Upper > solver( slac_full_mat_ );
 			Eigen::VectorXf result = - solver.solve( slac_full_b_ );
 
+			/*
 			std::ofstream file("slac_full.txt");
 			if ( file.is_open() ) {
 				file << slac_full_mat_ << endl;
@@ -680,6 +709,7 @@ bool
 				file1 << slac_full_b_ << endl;
 				file1.close();
 			}
+			*/
 			std::ofstream file2("slac_full_result.txt");
 			if ( file2.is_open() ) {
 				file2 << result << endl;
@@ -922,7 +952,7 @@ void
 {
 	use_slac_ = true;
 	slac_num_ = slac_num;
-	slac_resolution_ = 8;
+	slac_resolution_ = 12;
 	slac_lean_matrix_size_ = ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * ( slac_resolution_ + 1 ) * 3;
 	//slac_lean_matrix_size_gpu_2d_ = ( slac_lean_matrix_size_ * slac_lean_matrix_size_ - slac_lean_matrix_size_ ) / 2 + slac_lean_matrix_size_;
 	slac_lean_matrix_size_gpu_2d_ = slac_lean_matrix_size_ * slac_lean_matrix_size_;
@@ -930,11 +960,11 @@ void
 	gbuf_slac_block_.create( 7 * slac_lean_matrix_size_ );
 	ctr_buf_.create( slac_lean_matrix_size_ );
 
-	slac_full_matrix_size_ = slac_num_ * 6 + 2187;
+	slac_full_matrix_size_ = slac_num_ * 6 + slac_lean_matrix_size_;
 
 	initSLACMatrices();
 
-	ctr_buf_.upload( slac_this_ctr_.data(), 2187 );
+	ctr_buf_.upload( slac_this_ctr_.data(), slac_lean_matrix_size_ );
 }
 
 void pcl::gpu::KinfuTracker::initSLACMatrices()
@@ -942,17 +972,18 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 	slac_trans_mats_.clear();
 	slac_base_mat_ = Eigen::MatrixXf( slac_full_matrix_size_, slac_full_matrix_size_ );
 	slac_full_mat_ = Eigen::MatrixXf( slac_full_matrix_size_, slac_full_matrix_size_ );
-	slac_this_ctr_ = Eigen::VectorXf( 2187 );
+	slac_this_ctr_ = Eigen::VectorXf( slac_lean_matrix_size_ );
 	slac_full_b_ = Eigen::VectorXf( slac_full_matrix_size_ );
 	slac_full_b_.setZero();
 
 	for ( int i = 0; i <= slac_resolution_; i++ ) {
 		for ( int j = 0; j <= slac_resolution_; j++ ) {
 			for ( int k = 0; k <= slac_resolution_; k++ ) {
-				Eigen::Vector4d pos( i * 0.375, j * 0.375, k * 0.375, 1 );
-				slac_this_ctr_( ( i * 81 + j * 9 + k ) * 3 + 0 ) = pos( 0 );
-				slac_this_ctr_( ( i * 81 + j * 9 + k ) * 3 + 1 ) = pos( 1 );
-				slac_this_ctr_( ( i * 81 + j * 9 + k ) * 3 + 2 ) = pos( 2 );
+				Eigen::Vector4d pos( i * volume_size_ / slac_resolution_, j * volume_size_ / slac_resolution_, k * volume_size_ / slac_resolution_, 1 );
+				int idx = getSLACIndex( i, j, k );
+				slac_this_ctr_( idx + 0 ) = pos( 0 );
+				slac_this_ctr_( idx + 1 ) = pos( 1 );
+				slac_this_ctr_( idx + 2 ) = pos( 2 );
 			}
 		}
 	}
@@ -961,10 +992,10 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 	for ( int i = 0; i <= slac_resolution_; i++ ) {
 		for ( int j = 0; j <= slac_resolution_; j++ ) {
 			for ( int k = 0; k <= slac_resolution_; k++ ) {
-				int idx[ 2 ] = { ( i * 81 + j * 9 + k ) * 3, 0 };
+				int idx[ 2 ] = { getSLACIndex( i, j, k ), 0 };
 				double val[ 2 ] = { 1, -1 };
 				if ( i > 0 ) {
-					idx[ 1 ] = ( ( i - 1 ) * 81 + j * 9 + k ) * 3;
+					idx[ 1 ] = getSLACIndex( i - 1, j, k );
 					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
@@ -976,7 +1007,7 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
 				}
 				if ( i < slac_resolution_ ) {
-					idx[ 1 ] = ( ( i + 1 ) * 81 + j * 9 + k ) * 3;
+					idx[ 1 ] = getSLACIndex( i + 1, j, k );
 					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
 					slac_base_mat_( idx[ 0 ], idx[ 1 ] ) += -1;
@@ -988,7 +1019,7 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 					slac_base_mat_( idx[ 0 ] + 2, idx[ 1 ] + 2 ) += -1;
 				}
 				if ( j > 0 ) {
-					idx[ 1 ] = ( i * 81 + ( j - 1 ) * 9 + k ) * 3;
+					idx[ 1 ] = getSLACIndex( i, j - 1, k );
 					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
@@ -1000,7 +1031,7 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
 				}
 				if ( j < slac_resolution_ ) {
-					idx[ 1 ] = ( i * 81 + ( j + 1 ) * 9 + k ) * 3;
+					idx[ 1 ] = getSLACIndex( i, j + 1, k );
 					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
@@ -1012,7 +1043,7 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
 				}
 				if ( k > 0 ) {
-					idx[ 1 ] = ( i * 81 + j * 9 + ( k - 1 ) ) * 3;
+					idx[ 1 ] = getSLACIndex( i, j, k - 1 );
 					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
@@ -1024,7 +1055,7 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 					slac_base_mat_( idx[ 1 ] + 2, idx[ 0 ] + 2 ) += -1;
 				}
 				if ( k < slac_resolution_ ) {
-					idx[ 1 ] = ( i * 81 + j * 9 + ( k + 1 ) ) * 3;
+					idx[ 1 ] = getSLACIndex( i, j, k + 1 );
 					slac_base_mat_( idx[ 0 ], idx[ 0 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 1 ] ) += 1;
 					slac_base_mat_( idx[ 1 ], idx[ 0 ] ) += -1;
@@ -1039,7 +1070,7 @@ void pcl::gpu::KinfuTracker::initSLACMatrices()
 		}
 	}
 
-	int base_anchor = ( slac_resolution_ / 2 * 81 + slac_resolution_ / 2 * 9 + 0 ) * 3;
+	int base_anchor = getSLACIndex( slac_resolution_ / 2, slac_resolution_ / 2, 0 );
 	slac_base_mat_( base_anchor + 0, base_anchor + 0 ) += 1;
 	slac_base_mat_( base_anchor + 1, base_anchor + 1 ) += 1;
 	slac_base_mat_( base_anchor + 2, base_anchor + 2 ) += 1;
@@ -1051,25 +1082,25 @@ void pcl::gpu::KinfuTracker::addRegularizationTerm()
 	for ( int i = 0; i <= slac_resolution_; i++ ) {
 		for ( int j = 0; j <= slac_resolution_; j++ ) {
 			for ( int k = 0; k <= slac_resolution_; k++ ) {
-				int idx = ( i * 81 + j * 9 + k ) * 3;
+				int idx = getSLACIndex( i, j, k );
 				std::vector< int > idxx;
 				if ( i > 0 ) {
-					idxx.push_back( ( ( i - 1 ) * 81 + j * 9 + k ) * 3 );
+					idxx.push_back( getSLACIndex( i - 1, j, k ) );
 				}
 				if ( i < slac_resolution_) {
-					idxx.push_back( ( ( i + 1 ) * 81 + j * 9 + k ) * 3 );
+					idxx.push_back( getSLACIndex( i + 1, j, k ) );
 				}
 				if ( j > 0 ) {
-					idxx.push_back( ( i * 81 + ( j - 1 ) * 9 + k ) * 3 );
+					idxx.push_back( getSLACIndex( i, j - 1, k ) );
 				}
 				if ( j < slac_resolution_) {
-					idxx.push_back( ( i * 81 + ( j + 1 ) * 9 + k ) * 3 );
+					idxx.push_back( getSLACIndex( i, j + 1, k ) );
 				}
 				if ( k > 0 ) {
-					idxx.push_back( ( i * 81 + j * 9 + ( k - 1 ) ) * 3 );
+					idxx.push_back( getSLACIndex( i, j, k - 1 ) );
 				}
 				if ( k < slac_resolution_) {
-					idxx.push_back( ( i * 81 + j * 9 + ( k + 1 ) ) * 3 );
+					idxx.push_back( getSLACIndex( i, j, k + 1 ) );
 				}
 
 				Eigen::Matrix3f R;

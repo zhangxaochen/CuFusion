@@ -242,6 +242,11 @@ pcl::gpu::CyclicalBuffer::computeAndSetNewCubeMetricOrigin (const pcl::PointXYZ 
   shiftY = (int)( (new_cube_origin_meters.y - buffer_.origin_metric.y) * ( buffer_.voxels_size.y / (float) (buffer_.volume_size.y) ) );
   shiftZ = (int)( (new_cube_origin_meters.z - buffer_.origin_metric.z) * ( buffer_.voxels_size.z / (float) (buffer_.volume_size.z) ) );
 
+  new_cube_origin_meters.x = buffer_.origin_metric.x + shiftX / ( buffer_.voxels_size.x / (float) (buffer_.volume_size.x) );
+  new_cube_origin_meters.y = buffer_.origin_metric.y + shiftY / ( buffer_.voxels_size.y / (float) (buffer_.volume_size.y) );
+  new_cube_origin_meters.z = buffer_.origin_metric.z + shiftZ / ( buffer_.voxels_size.z / (float) (buffer_.volume_size.z) );
+  PCL_INFO ("The new cube's metric origin is coerced to (%f, %f, %f).\n", new_cube_origin_meters.x, new_cube_origin_meters.y, new_cube_origin_meters.z);
+
   // update the cube's metric origin 
   buffer_.origin_metric = new_cube_origin_meters;
 }

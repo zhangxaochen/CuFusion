@@ -176,6 +176,8 @@ namespace pcl
         CTA_SIZE_X = 32, CTA_SIZE_Y = 8,
         MAX_WEIGHT = 1 << 7
 		//MAX_WEIGHT = 15
+		//MAX_WEIGHT = 255
+		//MAX_WEIGHT = 15
       };
 
       mutable PtrStep<short2> volume;

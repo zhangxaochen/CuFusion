@@ -65,6 +65,7 @@ namespace pcl
 
 	//should be multiple of 32
     enum { VOLUME_X = 512, VOLUME_Y = 512, VOLUME_Z = 512 };
+	//enum { VOLUME_X = 512, VOLUME_Y = 512, VOLUME_Z = 1024 };
     //enum { VOLUME_X = 392, VOLUME_Y = 392, VOLUME_Z = 392 };
 
 	

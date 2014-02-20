@@ -876,21 +876,22 @@ struct KinFuLSApp
     if(shiftDistance > 2.5 * vsz)
       PCL_WARN ("WARNING Shifting distance (%.2f) is very large compared to the volume size (%.2f).\nYou can modify it using --shifting_distance.\n", shiftDistance, vsz);
 
+	//volume_size (2) *= 2;
     kinfu_ = new pcl::gpu::KinfuTracker(volume_size, shiftDistance);
 
     Eigen::Matrix3f R = Eigen::Matrix3f::Identity ();   // * AngleAxisf( pcl::deg2rad(-30.f), Vector3f::UnitX());
 	Eigen::Vector3f t;
 	if ( vsz < 2.0f ) {
-	    t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 + 0.6);
+	    t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 + 0.3);
 	} else {
-	    t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 * 1.2);
+	    t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 + 0.3);
 	}
 
     Eigen::Affine3f pose = Eigen::Translation3f (t) * Eigen::AngleAxisf (R);
 	transformation_inverse_ = pose.matrix().inverse();
 
     kinfu_->setInitialCameraPose (pose);
-    kinfu_->volume().setTsdfTruncDist (0.030f/*meters*/);
+    kinfu_->volume().setTsdfTruncDist (0.030f / 3.0f * volume_size(0)/*meters*/);
     kinfu_->setIcpCorespFilteringParams (0.1f/*meters*/, sin ( pcl::deg2rad(20.f) ));
     kinfu_->setDepthTruncationForICP(2.5f/*meters*/);
     //kinfu_->setDepthTruncationForIntegrate(2.5f/*meters*/);
@@ -976,9 +977,10 @@ struct KinFuLSApp
   }
 
   void
-  toggleLogRecord()
+  toggleLogRecord( std::string record_log_file )
   {
     record_log_ = true;
+	record_log_file_ = record_log_file;
 	cout << "Log record: " << ( record_log_ ? "On" : "Off" ) << endl;
   }
 
@@ -1079,9 +1081,10 @@ struct KinFuLSApp
   toggleSchedule( string schedule_file )
   {
 	  schedule_traj_.loadFromFile( schedule_file );
-	  use_schedule_ = use_graph_registration_;
+	  use_schedule_ = true;
+	  //use_schedule_ = use_graph_registration_;
 
-	  if ( use_schedule_ ) {
+	  if ( use_graph_registration_ ) {
 			next_pointers_.resize( rgbd_traj_.data_.size() );
 			for ( int i = 0; i < ( int )rgbd_graph_.edges_.size(); i++ ) {
 				RGBDGraph::RGBDGraphEdge & edge = rgbd_graph_.edges_[ i ];
@@ -1119,26 +1122,30 @@ struct KinFuLSApp
   void
   writeLogFile()
   {
-    time_t rawtime;
-    struct tm *timeinfo;
-    time(&rawtime);
-    timeinfo = localtime(&rawtime);
-    char strFileName[ 1024 ];
-    sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.log",
-        timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+	  if ( record_log_file_.length() == 0 ) {
+		  time_t rawtime;
+		  struct tm *timeinfo;
+		  time(&rawtime);
+		  timeinfo = localtime(&rawtime);
+		  char strFileName[ 1024 ];
+		  sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.log",
+			  timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
 
-    printf("Creating log file %s\n", strFileName);
+		  printf("Creating log file %s\n", strFileName);
 
-	kinfu_traj_.saveToFile( string( strFileName ) );
+		  kinfu_traj_.saveToFile( string( strFileName ) );
 
-	if ( kinfu_traj_.data_.size() == kinfu_traj_.cov_.size() ) {
-		sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.cov",
-			timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+		  if ( kinfu_traj_.data_.size() == kinfu_traj_.cov_.size() ) {
+			  sprintf(strFileName, "%04d%02d%02d-%02d%02d%02d.cov",
+				  timeinfo->tm_year+1900, timeinfo->tm_mon+1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
 
-		printf("Creating cov file %s\n", strFileName);
+			  printf("Creating cov file %s\n", strFileName);
 
-		kinfu_traj_.saveCovToFile( string( strFileName ) );
-	}
+			  kinfu_traj_.saveCovToFile( string( strFileName ) );
+		  }
+	  } else {
+		  kinfu_traj_.saveToFile( record_log_file_ );
+	  }
   }
 
   void
@@ -1271,7 +1278,7 @@ struct KinFuLSApp
 				cout << traj_token_ << endl;
 			}
 
-			if ( frame_id_ == 0 || frame_id_ + 1 != ft.frame_ ) {
+			if ( frame_id_ + 1 != ft.frame_ ) {
 				( ( ONIGrabber * ) &capture_ )->seekDepthFrame( ft.frame_ );
 			}
 			schedule_traj_.index_++;
@@ -1544,6 +1551,15 @@ struct KinFuLSApp
 
 	  if ( record_log_ ) {
 		  if ( use_schedule_ ) {
+			  	 if ( framed_transformation_.flag_ & framed_transformation_.SaveAbsoluteMatrix ) {
+					kinfu_traj_.data_.push_back( FramedTransformation( 
+						kinfu_traj_.data_.size(),
+						frame_id_ - 1,
+						frame_id_,
+						kinfu_->getCameraPose().matrix()
+						) );
+					kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+				  }
 			  if ( framed_transformation_.flag_ & framed_transformation_.ResetFlag ) {
 				  schedule_matrices_.clear();
 			  }
@@ -1553,42 +1569,35 @@ struct KinFuLSApp
 				  //PCL_INFO( "Frame #%d : insert matrix into hash map\n", frame_id_ );
 			  } else if ( framed_transformation_.flag_ & framed_transformation_.IgnoreIntegrationFlag ) {
 				  if ( framed_transformation_.flag_ & framed_transformation_.SaveAbsoluteMatrix ) {
-					kinfu_traj_.data_.push_back( FramedTransformation( 
-						kinfu_traj_.data_.size(),
-						frame_id_ - 1,
-						frame_id_,
-						kinfu_->getCameraPose().matrix()
-						) );
-					kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
 				  } else {
-					  int i = frame_id_ - 1;
-					  vector< int > & prev = next_pointers_[ i ];
-					  hash_map< int, Matrix4f >::const_iterator it;
-					  for ( int k = 0; k < prev.size(); k++ ) {
-						  it = schedule_matrices_.find( prev[ k ] );
-						  if ( it != schedule_matrices_.end() ) {
-							  // found!
-							  kinfu_traj_.data_.push_back( FramedTransformation( 
-								  kinfu_traj_.data_.size(),
-								  prev[ k ] + 1,
-								  frame_id_,
-								  it->second * kinfu_->getCameraPose().matrix()
-								  ) );
-							  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
-							  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
-						  } else {
-							  // not found! write down the absolute transformation
-							  kinfu_traj_.data_.push_back( FramedTransformation( 
-								  kinfu_traj_.data_.size(),
-								  file_index_,
-								  frame_id_,
-								  kinfu_->getCameraPose().matrix()
-								  ) );
-							  kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
-							  break;
-							  //PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
-						  }
-					  }
+					int i = frame_id_ - 1;
+					vector< int > & prev = next_pointers_[ i ];
+					hash_map< int, Matrix4f >::const_iterator it;
+					for ( int k = 0; k < prev.size(); k++ ) {
+						it = schedule_matrices_.find( prev[ k ] );
+						if ( it != schedule_matrices_.end() ) {
+							// found!
+							kinfu_traj_.data_.push_back( FramedTransformation( 
+								kinfu_traj_.data_.size(),
+								prev[ k ] + 1,
+								frame_id_,
+								it->second * kinfu_->getCameraPose().matrix()
+								) );
+							kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+							//PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
+						} else {
+							// not found! write down the absolute transformation
+							kinfu_traj_.data_.push_back( FramedTransformation( 
+								kinfu_traj_.data_.size(),
+								file_index_,
+								frame_id_,
+								kinfu_->getCameraPose().matrix()
+								) );
+							kinfu_traj_.cov_.push_back( kinfu_->getCoVarianceMatrix() );
+							break;
+							//PCL_INFO( "Frame #%d : find edge base %d\n", frame_id_, prev[ k ] + 1 );
+						}
+					}
 				  }
 			  }
 		  } else if ( use_graph_registration_ ) {
@@ -1601,7 +1610,7 @@ struct KinFuLSApp
 		  } else {
 			  if ( kinfu_->getGlobalTime() > 0 ) {
 				// global_time_ == 0 only when lost and reset, in this case, we lose one frame
-				kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), kinfu_->getGlobalTime() - 1, frame_counter_, kinfu_->getCameraPose().matrix() ) );
+				kinfu_traj_.data_.push_back( FramedTransformation( kinfu_traj_.data_.size(), kinfu_->getGlobalTime() - 1, frame_id_, kinfu_->getCameraPose().matrix() ) );
 			  }
 		  }
 	  }
@@ -1979,6 +1988,10 @@ void startRecording() {
 
 				try { 
 					this->execute (depth_, rgb24_, has_data); 
+
+					//cout << frame_id_ << " : " << framed_transformation_.frame_ << endl;
+					//boost::this_thread::sleep (boost::posix_time::millisec (300));
+
 					if ( recording_ && has_data ) {
 					xn_mock_depth_.SetData( xn_depth_, frame_counter_, frame_counter_ * 30000 + 1 );
 					xn_mock_image_.SetData( xn_image_, frame_counter_, frame_counter_ * 30000 );
@@ -2104,6 +2117,7 @@ void startRecording() {
   bool record_script_;
   bool play_script_;
   bool record_log_;
+  string record_log_file_;
 
   bool use_rgbdslam_;
   RGBDTrajectory rgbd_traj_;
@@ -2346,7 +2360,7 @@ print_cli_help ()
   cout << "    --use_rgbdslam <log file>           : use rgbdslam estimation" << endl;
   cout << "    --fragment <X_frames>               : fragments the stream every <X_frames>" << endl;
   cout << "    --fragment_start <X_frames>         : fragments start from <X_frames>" << endl;
-  cout << "    --record_log                        : record transformation log file" << endl;
+  cout << "    --record_log <log_file>             : record transformation log file" << endl;
   cout << "    --graph_registration <graph file>   : register the fragments in the file" << endl;
   cout << "    --schedule <schedule file>          : schedule Kinfu processing from the file" << endl;
   cout << "    --seek_start <X_frames>              : start from X_frames" << endl;
@@ -2520,8 +2534,11 @@ main (int argc, char* argv[])
 		app.toggleSLAC( slac_num );
   }
 
-  if ( pc::find_switch (argc, argv, "--record_log") )
-	  app.toggleLogRecord();
+  if ( pc::find_switch (argc, argv, "--record_log") ) {
+	  std::string record_log_file;
+	  pc::parse_argument( argc, argv, "--record_log", record_log_file );
+	  app.toggleLogRecord( record_log_file );
+  }
 
   if ( pc::find_switch ( argc, argv, "--world" ) )
 	  app.kinfu_->toggleExtractWorld();
