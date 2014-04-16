@@ -551,7 +551,7 @@ struct ImageView
   }
 
   void
-  showScene (KinfuTracker& kinfu, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool registration, int frame_id, Eigen::Affine3f* pose_ptr = 0)
+  showScene (KinfuTracker& kinfu, const PtrStepSz<const pcl::gpu::PixelRGB>& rgb24, bool registration, int frame_id, Eigen::Affine3f* pose_ptr = 0, string basedir = "image/")
   {
     if (pose_ptr)
     {
@@ -575,7 +575,7 @@ struct ImageView
     
 	if ( frame_id != -1 ) {
 		char filename[ 1024 ];
-		sprintf( filename, "image/kinfu/%06d.png", frame_id );
+		sprintf( filename, "%skinfu/%06d.png", basedir.c_str(), frame_id );
 
 		cv::Mat m( 480, 640, CV_8UC3, (void*)&view_host_[0] );
 		cv::imwrite( filename, m );
@@ -599,11 +599,11 @@ struct ImageView
   }
 
   void
-  showTraj( const cv::Mat & traj, int frame_id ) {
+  showTraj( const cv::Mat & traj, int frame_id, string basedir ) {
     viewerTraj_.showRGBImage ( (unsigned char *) traj.data, traj.cols, traj.rows, "short_image" );
-	if ( frame_id != -1 ) {
+	if ( frame_id != -1 && basedir.compare( "image/" ) == 0 ) {
 		char filename[ 1024 ];
-		sprintf( filename, "image/traj/%06d.png", frame_id );
+		sprintf( filename, "%straj/%06d.png", basedir.c_str(), frame_id );
 		cv::imwrite( filename, traj );
 	}
   }
@@ -859,9 +859,11 @@ struct KinFuLSApp
 {
   enum { PCD_BIN = 1, PCD_ASCII = 2, PLY = 3, MESH_PLY = 7, MESH_VTK = 8 };
   
-  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart, float trunc_dist) : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
+  KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart, float trunc_dist, float sx, float sy, float sz) 
+	  : exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
     registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_( 480, 640, CV_8UC3, cv::Scalar( 255, 255, 255 )),
-	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false)
+	use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false),
+	rgbd_odometry_( false )
   {    
     //Init Kinfu Tracker
     Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -886,6 +888,9 @@ struct KinFuLSApp
 	} else {
 	    t = volume_size * 0.5f - Vector3f (0, 0, volume_size (2) / 2 + 0.3);
 	}
+	t( 0 ) += sx;
+	t( 1 ) += sy;
+	t( 2 ) += sz;
 
     Eigen::Affine3f pose = Eigen::Translation3f (t) * Eigen::AngleAxisf (R);
 	transformation_inverse_ = pose.matrix().inverse();
@@ -947,6 +952,13 @@ struct KinFuLSApp
   {
 	  kinfu_image_ = true;
 	  cout << "Output images to image folder." << endl;
+  }
+
+  void
+  toggleRGBDOdometry()
+  {
+	  rgbd_odometry_ = true;
+	  cout << "Using RGBDOdometry." << endl;
   }
 
   void 
@@ -1376,14 +1388,18 @@ struct KinFuLSApp
 		  }
 		if ( fragment_rate_ > 0 ) {
 			if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
-				framed_transformation_.flag_ |= framed_transformation_.ResetFlag;
+				framed_transformation_.flag_ = framed_transformation_.ResetFlag;
+			} else if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ ) {
+				framed_transformation_.flag_ = FramedTransformation::SavePointCloudFlag;
 			} else {
 				framed_transformation_.flag_ = 0;
 			}
 		}
 	  } else if ( fragment_rate_ > 0 ) {
 			if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ + 1 ) {
-				framed_transformation_.flag_ |= framed_transformation_.ResetFlag;
+				framed_transformation_.flag_ = framed_transformation_.ResetFlag;
+			} else if ( frame_id_ > 0 && frame_id_ % ( fragment_rate_ * 2 ) == fragment_start_ ) {
+				framed_transformation_.flag_ = FramedTransformation::SavePointCloudFlag;
 			} else {
 				framed_transformation_.flag_ = 0;
 			}
@@ -1535,18 +1551,60 @@ struct KinFuLSApp
     
 		processFramedTransformation();
 
-        //run kinfu algorithm
-        if (integrate_colors_)
-          has_image = (*kinfu_) (depth_device_, &image_view_.colors_device_, &framed_transformation_);
-        else
-          has_image = (*kinfu_) (depth_device_);
+		if ( rgbd_odometry_ ) {
+			vector<int> iterCounts(3);
+			iterCounts[0] = 10;
+			iterCounts[1] = 5;
+			iterCounts[2] = 4;
+
+			vector<float> minGradMagnitudes(3);
+			minGradMagnitudes[0] = 9;
+			minGradMagnitudes[1] = 3;
+			minGradMagnitudes[2] = 1;
+
+			const float minDepth = 0.f; //in meters
+			const float maxDepth = 7.5f; //in meters
+			const float maxDepthDiff = 0.07f; //in meters
+
+			float vals[] = {525., 0., 3.1950000000000000e+02,
+				0., 525., 2.3950000000000000e+02,
+				0., 0., 1.};
+
+			const cv::Mat cameraMatrix = cv::Mat(3,3,CV_32FC1,vals);
+			const cv::Mat distCoeff(1,5,CV_32FC1,cv::Scalar(0));
+
+			//run kinfu algorithm
+			if (integrate_colors_) {
+				has_image = (*kinfu_)(
+					grayImage0_, depthFlt0_, cv::Mat(),
+					grayImage1_, depthFlt1_, cv::Mat(),
+					cameraMatrix, minDepth, maxDepth, maxDepthDiff,
+					iterCounts, minGradMagnitudes,
+					depth_device_, &image_view_.colors_device_, &framed_transformation_
+				);
+			} else {
+				has_image = (*kinfu_)(
+					grayImage0_, depthFlt0_, cv::Mat(),
+					grayImage1_, depthFlt1_, cv::Mat(),
+					cameraMatrix, minDepth, maxDepth, maxDepthDiff,
+					iterCounts, minGradMagnitudes,
+					depth_device_
+				);
+			}
+		} else {
+			//run kinfu algorithm
+			if (integrate_colors_)
+				has_image = (*kinfu_) (depth_device_, &image_view_.colors_device_, &framed_transformation_);
+			else
+				has_image = (*kinfu_) (depth_device_);
+		}
       }
             
       image_view_.showDepth (depth_);
 
 	  // update traj_
       drawTrajectory();
-	  image_view_.showTraj (traj_, kinfu_image_ ? frame_id_ : -1);
+	  image_view_.showTraj (traj_, kinfu_image_ ? frame_id_ : -1, kinfu_image_dir_);
       //image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
 
 	  if ( record_log_ ) {
@@ -1644,7 +1702,7 @@ struct KinFuLSApp
 	}
 	*/
 
-	if ( use_schedule_ && record_log_ && ( framed_transformation_.flag_ & framed_transformation_.SavePointCloudFlag ) ) {
+	if ( ( use_schedule_ || fragment_rate_ > 0 ) && record_log_ && ( framed_transformation_.flag_ & framed_transformation_.SavePointCloudFlag ) && ten_has_data_fail_then_we_call_it_a_day_ == 0 ) {
 		scene_cloud_view_.show( *kinfu_, integrate_colors_ );
 		if(scene_cloud_view_.point_colors_ptr_->points.empty()) // no colors
 		{
@@ -1662,6 +1720,7 @@ struct KinFuLSApp
 			writeCloudFile (file_index_, KinFuLSApp::PCD_BIN, merge<PointXYZRGB>(*scene_cloud_view_.cloud_ptr_, *scene_cloud_view_.point_colors_ptr_));
 		}
 
+		/*s
 		if ( framed_transformation_.flag_ & framed_transformation_.SaveAbsoluteMatrix ) {
 		} else {
 		  char filename[ 1024 ];
@@ -1672,6 +1731,7 @@ struct KinFuLSApp
 		  kinfu_traj_.saveToFile( filename );
 		  kinfu_traj_.clear();
 		}
+		*/
 
 		/*
 		//std::vector< int > raw_data;
@@ -1723,7 +1783,7 @@ struct KinFuLSApp
     if (has_image)
     {
       Eigen::Affine3f viewer_pose = getViewerPose(scene_cloud_view_.cloud_viewer_);
-      image_view_.showScene (*kinfu_, rgb24, registration_, kinfu_image_ ? frame_id_ : -1, independent_camera_ ? &viewer_pose : 0);
+      image_view_.showScene (*kinfu_, rgb24, registration_, kinfu_image_ ? frame_id_ : -1, independent_camera_ ? &viewer_pose : 0, kinfu_image_dir_);
     }
 
     if (current_frame_cloud_view_)
@@ -1842,6 +1902,19 @@ struct KinFuLSApp
 	  }
 	  //cout << "[" << boost::this_thread::get_id() << "] : " << "Process Depth " << depth_wrapper->getDepthMetaData().FrameID() << ", " << depth_wrapper->getDepthMetaData().Timestamp() 
 		 // << " Image" << image_wrapper->getMetaData().FrameID() << ", " << image_wrapper->getMetaData().Timestamp() << endl;
+
+	  if ( rgbd_odometry_ ) {
+		  depthFlt0_.copyTo( depthFlt1_ );
+		  grayImage0_.copyTo( grayImage1_ );
+
+		  cv::Mat depth_mat( depth_wrapper->getHeight(), depth_wrapper->getWidth(), CV_16UC1 );
+		  cv::Mat image_mat( image_wrapper->getHeight(), image_wrapper->getWidth(), CV_8UC3 );
+		  depth_wrapper->fillDepthImageRaw( depth_wrapper->getWidth(), depth_wrapper->getHeight(), ( unsigned short * )depth_mat.data );
+		  image_wrapper->fillRGB( image_wrapper->getWidth(), image_wrapper->getHeight(), ( unsigned char* )image_mat.data );
+
+	      cv::cvtColor( image_mat, grayImage0_, CV_RGB2GRAY );
+		  depth_mat.convertTo( depthFlt0_, CV_32FC1, 1./1000 );
+	  }
       
 	  if ( recording_ ) {
 		xn_depth_.CopyFrom( depth_wrapper->getDepthMetaData() );
@@ -1962,6 +2035,8 @@ void startRecording() {
 			pcd_source_? capture_.registerCallback (func3) : need_colors ? ( triggered_capture ? capture_.registerCallback (func1t) : capture_.registerCallback (func1) ) : capture_.registerCallback (func2);
 
 		{
+			ten_has_data_fail_then_we_call_it_a_day_ = 0;
+
 			boost::unique_lock<boost::mutex> lock(data_ready_mutex_);
 
 			capture_.start ();
@@ -1985,6 +2060,11 @@ void startRecording() {
 					( ( ONIGrabber * ) &capture_ )->trigger(); // Triggers new frame
 				}
 				has_data = data_ready_cond_.timed_wait (lock, boost::posix_time::millisec(300));
+				if ( has_data ) {
+					ten_has_data_fail_then_we_call_it_a_day_ = 0;
+				} else {
+					ten_has_data_fail_then_we_call_it_a_day_++;
+				}
 
 				try { 
 					this->execute (depth_, rgb24_, has_data); 
@@ -2016,7 +2096,11 @@ void startRecording() {
 				*/
 
 				scene_cloud_view_.cloud_viewer_.spinOnce (3);
-				//~ cout << "In main loop" << endl;                  
+				//~ cout << "In main loop" << endl;          
+	
+				if ( ten_has_data_fail_then_we_call_it_a_day_ >= 20 ) {
+					exit_ = true;
+				}
 			} 
 			exit_ = true;
 			boost::this_thread::sleep (boost::posix_time::millisec (300));
@@ -2150,6 +2234,7 @@ void startRecording() {
   int snapshot_rate_;
 
   bool kinfu_image_;
+  std::string kinfu_image_dir_;
 
   xn::MockDepthGenerator xn_mock_depth_;
   xn::MockImageGenerator xn_mock_image_;
@@ -2191,6 +2276,11 @@ void startRecording() {
 
   bool use_mask_;
   int mask_[ 4 ];
+
+  bool rgbd_odometry_;
+  cv::Mat grayImage0_, grayImage1_, depthFlt0_, depthFlt1_;
+
+  int ten_has_data_fail_then_we_call_it_a_day_;
 
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   static void
@@ -2370,6 +2460,10 @@ print_cli_help ()
   cout << "    --mask <x1,x2,y1,y2>                : trunc the depth image with a window" << endl;
   cout << "    --camera <param_file>               : launch parameters from the file" << endl;
   cout << "    --slac <slac_num>                   : enable slac (0x40 flag in schedule)" << endl;
+  cout << "    --rgbd_odometry                     : turn on rgbd odometry" << endl;
+  cout << "    --shift_x <in_meters>               : initial shift along x axis" << endl;
+  cout << "    --shift_y <in_meters>               : initial shift along y axis" << endl;
+  cout << "    --shift_z <in_meters>               : initial shift along z axis" << endl;
   cout << endl << "";
   cout << "Valid depth data sources:" << endl; 
   cout << "    -dev <device> (default), -oni <oni_file>, -pcd <pcd_file or directory>" << endl;
@@ -2473,7 +2567,14 @@ main (int argc, char* argv[])
   float trunc_dist = 2.5f;
   pc::parse_argument ( argc, argv, "--integration_trunc", trunc_dist );
 
-  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start, trunc_dist);
+  float shift_x = 0.0f;
+  float shift_y = 0.0f;
+  float shift_z = 0.0f;
+  pc::parse_argument ( argc, argv, "--shift_x", shift_x );
+  pc::parse_argument ( argc, argv, "--shift_y", shift_y );
+  pc::parse_argument ( argc, argv, "--shift_z", shift_z );
+
+  KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start, trunc_dist, shift_x, shift_y, shift_z);
 
   if ( pc::parse_argument( argc, argv, "--camera", camera_file ) > 0 ) {
 	  app.toggleCameraParam( camera_file );
@@ -2543,8 +2644,18 @@ main (int argc, char* argv[])
   if ( pc::find_switch ( argc, argv, "--world" ) )
 	  app.kinfu_->toggleExtractWorld();
 
-  if ( pc::find_switch ( argc, argv, "--kinfu_image" ) )
+  if ( pc::find_switch ( argc, argv, "--kinfu_image" ) ) {
 	  app.toggleKinfuImage();
+	  if ( oni_file.find( "input.oni" ) != string::npos ) {
+		  app.kinfu_image_dir_ = oni_file.substr( 0, oni_file.length() - 9 );
+	  } else {
+		  app.kinfu_image_dir_ = "image/";
+	  }
+	  boost::filesystem::create_directories( app.kinfu_image_dir_ + "kinfu/" );
+  }
+
+  if ( pc::find_switch( argc, argv, "--rgbd_odometry" ) )
+	  app.toggleRGBDOdometry();
 
   std::string mask;
   if ( pc::parse_argument( argc, argv, "--mask", mask ) > 0 ) {

@@ -48,12 +48,337 @@
 #include <Eigen/Geometry>
 #include <Eigen/LU>
 #include <Eigen/Eigenvalues>
+#include <opencv2/core/eigen.hpp>
 
-#ifdef HAVE_OPENCV
-#include <opencv2/opencv.hpp>
-//~ #include <opencv2/gpu/gpu.hpp>
-//~ #include <pcl/gpu/utils/timers_opencv.hpp>
-#endif
+using namespace cv;
+
+#include <limits>
+
+//////////////////////////////
+// RGBDOdometry part
+//////////////////////////////
+
+inline static
+void computeC_RigidBodyMotion( double* C, double dIdx, double dIdy, const Point3f& p3d, double fx, double fy )
+{
+    double invz  = 1. / p3d.z,
+           v0 = dIdx * fx * invz,
+           v1 = dIdy * fy * invz,
+           v2 = -(v0 * p3d.x + v1 * p3d.y) * invz;
+
+    C[0] = -p3d.z * v1 + p3d.y * v2;
+    C[1] =  p3d.z * v0 - p3d.x * v2;
+    C[2] = -p3d.y * v0 + p3d.x * v1;
+    C[3] = v0;
+    C[4] = v1;
+    C[5] = v2;
+}
+
+inline static
+void computeProjectiveMatrix( const Mat& ksi, Mat& Rt )
+{
+    CV_Assert( ksi.size() == Size(1,6) && ksi.type() == CV_64FC1 );
+
+    // for infinitesimal transformation
+    Rt = Mat::eye(4, 4, CV_64FC1);
+
+    Mat R = Rt(Rect(0,0,3,3));
+    Mat rvec = ksi.rowRange(0,3);
+
+    Rodrigues( rvec, R );
+
+    Rt.at<double>(0,3) = ksi.at<double>(3);
+    Rt.at<double>(1,3) = ksi.at<double>(4);
+    Rt.at<double>(2,3) = ksi.at<double>(5);
+}
+
+static
+void cvtDepth2Cloud( const Mat& depth, Mat& cloud, const Mat& cameraMatrix )
+{
+    //CV_Assert( cameraMatrix.type() == CV_64FC1 );
+    const double inv_fx = 1.f/cameraMatrix.at<double>(0,0);
+    const double inv_fy = 1.f/cameraMatrix.at<double>(1,1);
+    const double ox = cameraMatrix.at<double>(0,2);
+    const double oy = cameraMatrix.at<double>(1,2);
+    cloud.create( depth.size(), CV_32FC3 );
+    for( int y = 0; y < cloud.rows; y++ )
+    {
+        Point3f* cloud_ptr = reinterpret_cast<Point3f*>(cloud.ptr(y));
+        const float* depth_prt = reinterpret_cast<const float*>(depth.ptr(y));
+        for( int x = 0; x < cloud.cols; x++ )
+        {
+            float z = depth_prt[x];
+            cloud_ptr[x].x = (float)((x - ox) * z * inv_fx);
+            cloud_ptr[x].y = (float)((y - oy) * z * inv_fy);
+            cloud_ptr[x].z = z;
+        }
+    }
+}
+
+static inline
+void set2shorts( int& dst, int short_v1, int short_v2 )
+{
+    unsigned short* ptr = reinterpret_cast<unsigned short*>(&dst);
+    ptr[0] = static_cast<unsigned short>(short_v1);
+    ptr[1] = static_cast<unsigned short>(short_v2);
+}
+
+static inline
+void get2shorts( int src, int& short_v1, int& short_v2 )
+{
+    typedef union { int vint32; unsigned short vuint16[2]; } s32tou16;
+    const unsigned short* ptr = (reinterpret_cast<s32tou16*>(&src))->vuint16;
+    short_v1 = ptr[0];
+    short_v2 = ptr[1];
+}
+
+static
+int computeCorresp( const Mat& K, const Mat& K_inv, const Mat& Rt,
+                    const Mat& depth0, const Mat& depth1, const Mat& texturedMask1, float maxDepthDiff,
+                    Mat& corresps )
+{
+    CV_Assert( K.type() == CV_64FC1 );
+    CV_Assert( K_inv.type() == CV_64FC1 );
+    CV_Assert( Rt.type() == CV_64FC1 );
+
+    corresps.create( depth1.size(), CV_32SC1 );
+
+    Mat R = Rt(Rect(0,0,3,3)).clone();
+
+    Mat KRK_inv = K * R * K_inv;
+    const double * KRK_inv_ptr = reinterpret_cast<const double *>(KRK_inv.ptr());
+
+    Mat Kt = Rt(Rect(3,0,1,3)).clone();
+    Kt = K * Kt;
+    const double * Kt_ptr = reinterpret_cast<const double *>(Kt.ptr());
+
+    Rect r(0, 0, depth1.cols, depth1.rows);
+
+    corresps = Scalar(-1);
+    int correspCount = 0;
+    for( int v1 = 0; v1 < depth1.rows; v1++ )
+    {
+        for( int u1 = 0; u1 < depth1.cols; u1++ )
+        {
+            float d1 = depth1.at<float>(v1,u1);
+            if( !cvIsNaN(d1) && texturedMask1.at<uchar>(v1,u1) )
+            {
+                float transformed_d1 = (float)(d1 * (KRK_inv_ptr[6] * u1 + KRK_inv_ptr[7] * v1 + KRK_inv_ptr[8]) + Kt_ptr[2]);
+                int u0 = cvRound((d1 * (KRK_inv_ptr[0] * u1 + KRK_inv_ptr[1] * v1 + KRK_inv_ptr[2]) + Kt_ptr[0]) / transformed_d1);
+                int v0 = cvRound((d1 * (KRK_inv_ptr[3] * u1 + KRK_inv_ptr[4] * v1 + KRK_inv_ptr[5]) + Kt_ptr[1]) / transformed_d1);
+
+                if( r.contains(Point(u0,v0)) )
+                {
+                    float d0 = depth0.at<float>(v0,u0);
+                    if( !cvIsNaN(d0) && std::abs(transformed_d1 - d0) <= maxDepthDiff )
+                    {
+                        int c = corresps.at<int>(v0,u0);
+                        if( c != -1 )
+                        {
+                            int exist_u1, exist_v1;
+                            get2shorts( c, exist_u1, exist_v1);
+
+                            float exist_d1 = (float)(depth1.at<float>(exist_v1,exist_u1) * (KRK_inv_ptr[6] * exist_u1 + KRK_inv_ptr[7] * exist_v1 + KRK_inv_ptr[8]) + Kt_ptr[2]);
+
+                            if( transformed_d1 > exist_d1 )
+                                continue;
+                        }
+                        else
+                            correspCount++;
+
+                        set2shorts( corresps.at<int>(v0,u0), u1, v1 );
+                    }
+                }
+            }
+        }
+    }
+
+    return correspCount;
+}
+
+static inline
+void preprocessDepth( Mat depth0, Mat depth1,
+                      const Mat& validMask0, const Mat& validMask1,
+                      float minDepth, float maxDepth )
+{
+    CV_DbgAssert( depth0.size() == depth1.size() );
+
+    for( int y = 0; y < depth0.rows; y++ )
+    {
+        for( int x = 0; x < depth0.cols; x++ )
+        {
+            float& d0 = depth0.at<float>(y,x);
+            if( !cvIsNaN(d0) && (d0 > maxDepth || d0 < minDepth || d0 <= 0 || (!validMask0.empty() && !validMask0.at<uchar>(y,x))) )
+                d0 = std::numeric_limits<float>::quiet_NaN();
+
+            float& d1 = depth1.at<float>(y,x);
+            if( !cvIsNaN(d1) && (d1 > maxDepth || d1 < minDepth || d1 <= 0 || (!validMask1.empty() && !validMask1.at<uchar>(y,x))) )
+                d1 = std::numeric_limits<float>::quiet_NaN();
+        }
+    }
+}
+
+static
+void buildPyramids( const Mat& image0, const Mat& image1,
+                    const Mat& depth0, const Mat& depth1,
+                    const Mat& cameraMatrix, int sobelSize, double sobelScale,
+                    const vector<float>& minGradMagnitudes,
+                    vector<Mat>& pyramidImage0, vector<Mat>& pyramidDepth0,
+                    vector<Mat>& pyramidImage1, vector<Mat>& pyramidDepth1,
+                    vector<Mat>& pyramid_dI_dx1, vector<Mat>& pyramid_dI_dy1,
+                    vector<Mat>& pyramidTexturedMask1, vector<Mat>& pyramidCameraMatrix )
+{
+    const int pyramidMaxLevel = (int)minGradMagnitudes.size() - 1;
+
+    buildPyramid( image0, pyramidImage0, pyramidMaxLevel );
+    buildPyramid( image1, pyramidImage1, pyramidMaxLevel );
+
+    pyramid_dI_dx1.resize( pyramidImage1.size() );
+    pyramid_dI_dy1.resize( pyramidImage1.size() );
+    pyramidTexturedMask1.resize( pyramidImage1.size() );
+
+    pyramidCameraMatrix.reserve( pyramidImage1.size() );
+
+    Mat cameraMatrix_dbl;
+    cameraMatrix.convertTo( cameraMatrix_dbl, CV_64FC1 );
+
+    for( size_t i = 0; i < pyramidImage1.size(); i++ )
+    {
+        Sobel( pyramidImage1[i], pyramid_dI_dx1[i], CV_16S, 1, 0, sobelSize );
+        Sobel( pyramidImage1[i], pyramid_dI_dy1[i], CV_16S, 0, 1, sobelSize );
+
+        const Mat& dx = pyramid_dI_dx1[i];
+        const Mat& dy = pyramid_dI_dy1[i];
+
+        Mat texturedMask( dx.size(), CV_8UC1, Scalar(0) );
+        const float minScalesGradMagnitude2 = (float)((minGradMagnitudes[i] * minGradMagnitudes[i]) / (sobelScale * sobelScale));
+        for( int y = 0; y < dx.rows; y++ )
+        {
+            for( int x = 0; x < dx.cols; x++ )
+            {
+                float m2 = (float)(dx.at<short>(y,x)*dx.at<short>(y,x) + dy.at<short>(y,x)*dy.at<short>(y,x));
+                if( m2 >= minScalesGradMagnitude2 )
+                    texturedMask.at<uchar>(y,x) = 255;
+            }
+        }
+        pyramidTexturedMask1[i] = texturedMask;
+        Mat levelCameraMatrix = i == 0 ? cameraMatrix_dbl : 0.5f * pyramidCameraMatrix[i-1];
+        levelCameraMatrix.at<double>(2,2) = 1.;
+        pyramidCameraMatrix.push_back( levelCameraMatrix );
+    }
+
+    buildPyramid( depth0, pyramidDepth0, pyramidMaxLevel );
+    buildPyramid( depth1, pyramidDepth1, pyramidMaxLevel );
+}
+
+static
+bool solveSystem( const Mat& C, const Mat& dI_dt, double detThreshold, Mat& ksi, Eigen::Matrix<float, 6, 6, Eigen::RowMajor> & AA, Eigen::Matrix<float, 6, 1> & bb )
+{
+    Mat A = C.t() * C;
+    Mat B = -C.t() * dI_dt;
+
+	cv2eigen( A, AA );
+	cv2eigen( B, bb );
+
+    double det = cv::determinant(A);
+
+    if( fabs (det) < detThreshold || cvIsNaN(det) || cvIsInf(det) )
+        return false;
+
+    cv::solve( A, B, ksi, DECOMP_CHOLESKY );
+    return true;
+}
+
+typedef void (*ComputeCFuncPtr)( double* C, double dIdx, double dIdy, const Point3f& p3d, double fx, double fy );
+
+static
+bool computeKsi( int transformType,
+                 const Mat& image0, const Mat&  cloud0,
+                 const Mat& image1, const Mat& dI_dx1, const Mat& dI_dy1,
+                 const Mat& corresps, int correspsCount,
+                 double fx, double fy, double sobelScale, double determinantThreshold,
+                 Mat& ksi,
+				 Eigen::Matrix<float, 6, 6, Eigen::RowMajor> & AA, Eigen::Matrix<float, 6, 1> & bb )
+{
+    int Cwidth = -1;
+    ComputeCFuncPtr computeCFuncPtr = 0;
+    computeCFuncPtr = computeC_RigidBodyMotion;
+    Cwidth = 6;
+    Mat C( correspsCount, Cwidth, CV_64FC1 );
+    Mat dI_dt( correspsCount, 1, CV_64FC1 );
+
+	double sigma = 0;
+    int pointCount = 0;
+    for( int v0 = 0; v0 < corresps.rows; v0++ )
+    {
+        for( int u0 = 0; u0 < corresps.cols; u0++ )
+        {
+            if( corresps.at<int>(v0,u0) != -1 )
+            {
+                int u1, v1;
+                get2shorts( corresps.at<int>(v0,u0), u1, v1 );
+                double diff = static_cast<double>(image1.at<uchar>(v1,u1)) -
+                              static_cast<double>(image0.at<uchar>(v0,u0));
+                sigma += diff * diff;
+                pointCount++;
+            }
+        }
+    }
+    sigma = std::sqrt(sigma/pointCount);
+
+    pointCount = 0;
+    for( int v0 = 0; v0 < corresps.rows; v0++ )
+    {
+        for( int u0 = 0; u0 < corresps.cols; u0++ )
+        {
+            if( corresps.at<int>(v0,u0) != -1 )
+            {
+                int u1, v1;
+                get2shorts( corresps.at<int>(v0,u0), u1, v1 );
+
+                double diff = static_cast<double>(image1.at<uchar>(v1,u1)) -
+                              static_cast<double>(image0.at<uchar>(v0,u0));
+                double w = sigma + std::abs(diff);
+                w = w > DBL_EPSILON ? 1./w : 1.;
+
+                (*computeCFuncPtr)( (double*)C.ptr(pointCount),
+                                     w * sobelScale * dI_dx1.at<short int>(v1,u1),
+                                     w * sobelScale * dI_dy1.at<short int>(v1,u1),
+                                     cloud0.at<Point3f>(v0,u0), fx, fy);
+
+                dI_dt.at<double>(pointCount) = w * diff;
+                pointCount++;
+            }
+        }
+    }
+
+	Mat sln;
+    bool solutionExist = solveSystem( C, dI_dt, determinantThreshold, sln, AA, bb );
+
+	/*
+	cout << C << endl;
+	cout << dI_dt << endl;
+	cout << sln << endl;
+
+	cout << endl;
+	*/
+
+	if( solutionExist )
+    {
+        ksi.create(6,1,CV_64FC1);
+        ksi = Scalar(0);
+
+        Mat subksi;
+        subksi = ksi;
+        sln.copyTo( subksi );
+    }
+
+    return solutionExist;
+}
+
+//////////////////////////////
+// RGBDOdometry part end
+//////////////////////////////
 
 using namespace std;
 using namespace pcl::device;
@@ -833,6 +1158,433 @@ bool
 
 	//if(has_shifted && perform_last_scan_)
 	//  extractAndMeshWorld ();
+
+	++global_time_;
+	return (true);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+bool
+	pcl::gpu::KinfuTracker::operator() (
+			const cv::Mat& image0, const cv::Mat& _depth0, const cv::Mat& validMask0,
+			const cv::Mat& image1, const cv::Mat& _depth1, const cv::Mat& validMask1,
+			const cv::Mat& cameraMatrix, float minDepth, float maxDepth, float maxDepthDiff,
+			const std::vector<int>& iterCounts, const std::vector<float>& minGradientMagnitudes,
+			const DepthMap& depth_raw, const View * pcolor, FramedTransformation * frame_ptr
+	)
+{
+	//ScopeTime time( "Kinfu Tracker All" );
+	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->ResetFlag ) ) {
+		reset();
+		if ( frame_ptr->type_ == frame_ptr->DirectApply )
+		{
+			Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
+			rmats_[0] = aff_rgbd.linear();
+			tvecs_[0] = aff_rgbd.translation();
+		}
+	}
+
+	device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
+	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreRegistrationFlag ) ) {
+	}
+	else
+	{
+		//ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
+		//depth_raw.copyTo(depths_curr_[0]);
+		device::bilateralFilter (depth_raw, depths_curr_[0]);
+
+		if (max_icp_distance_ > 0)
+			device::truncateDepth(depths_curr_[0], max_icp_distance_);
+
+		for (int i = 1; i < LEVELS; ++i)
+			device::pyrDown (depths_curr_[i-1], depths_curr_[i]);
+
+		for (int i = 0; i < LEVELS; ++i)
+		{
+			device::createVMap (intr(i), depths_curr_[i], vmaps_curr_[i]);
+			//device::createNMap(vmaps_curr_[i], nmaps_curr_[i]);
+			computeNormalsEigen (vmaps_curr_[i], nmaps_curr_[i]);
+		}
+		pcl::device::sync ();
+	}
+
+	//can't perform more on first frame
+	if (global_time_ == 0)
+	{
+		Matrix3frm initial_cam_rot = rmats_[0]; //  [Ri|ti] - pos of camera, i.e.
+		Matrix3frm initial_cam_rot_inv = initial_cam_rot.inverse ();
+		Vector3f   initial_cam_trans = tvecs_[0]; //  transform from camera to global coo space for (i-1)th camera pose
+
+		Mat33&  device_initial_cam_rot = device_cast<Mat33> (initial_cam_rot);
+		Mat33&  device_initial_cam_rot_inv = device_cast<Mat33> (initial_cam_rot_inv);
+		float3& device_initial_cam_trans = device_cast<float3>(initial_cam_trans);
+
+		float3 device_volume_size = device_cast<const float3>(tsdf_volume_->getSize());
+
+		device::integrateTsdfVolume(depth_raw, intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
+		//device::integrateTsdfVolume(depths_curr_[ 0 ], intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
+
+		for (int i = 0; i < LEVELS; ++i)
+			device::tranformMaps (vmaps_curr_[i], nmaps_curr_[i], device_initial_cam_rot, device_initial_cam_trans, vmaps_g_prev_[i], nmaps_g_prev_[i]);
+
+		if(perform_last_scan_)
+			finished_ = true;
+		++global_time_;
+		return (false);
+	}
+
+	///////////////////////////////////////////////////////////////////////////////////////////
+	// Iterative Closest Point
+
+	// GET PREVIOUS GLOBAL TRANSFORM
+	// Previous global rotation
+    const int sobelSize = 3;
+    const double sobelScale = 1./8;
+
+    Mat depth0 = _depth0.clone(),
+        depth1 = _depth1.clone();
+
+	// check RGB-D input data
+    CV_Assert( !image0.empty() );
+    CV_Assert( image0.type() == CV_8UC1 );
+    CV_Assert( depth0.type() == CV_32FC1 && depth0.size() == image0.size() );
+
+    CV_Assert( image1.size() == image0.size() );
+    CV_Assert( image1.type() == CV_8UC1 );
+    CV_Assert( depth1.type() == CV_32FC1 && depth1.size() == image0.size() );
+
+    // check masks
+    CV_Assert( validMask0.empty() || (validMask0.type() == CV_8UC1 && validMask0.size() == image0.size()) );
+    CV_Assert( validMask1.empty() || (validMask1.type() == CV_8UC1 && validMask1.size() == image0.size()) );
+
+    // check camera params
+    CV_Assert( cameraMatrix.type() == CV_32FC1 && cameraMatrix.size() == Size(3,3) );
+
+    // other checks
+    CV_Assert( iterCounts.empty() || minGradientMagnitudes.empty() ||
+               minGradientMagnitudes.size() == iterCounts.size() );
+
+    vector<int> defaultIterCounts;
+    vector<float> defaultMinGradMagnitudes;
+    vector<int> const* iterCountsPtr = &iterCounts;
+    vector<float> const* minGradientMagnitudesPtr = &minGradientMagnitudes;
+
+    preprocessDepth( depth0, depth1, validMask0, validMask1, minDepth, maxDepth );
+
+    vector<Mat> pyramidImage0, pyramidDepth0,
+                pyramidImage1, pyramidDepth1, pyramid_dI_dx1, pyramid_dI_dy1, pyramidTexturedMask1,
+                pyramidCameraMatrix;
+    buildPyramids( image0, image1, depth0, depth1, cameraMatrix, sobelSize, sobelScale, *minGradientMagnitudesPtr,
+                   pyramidImage0, pyramidDepth0, pyramidImage1, pyramidDepth1,
+                   pyramid_dI_dx1, pyramid_dI_dy1, pyramidTexturedMask1, pyramidCameraMatrix );
+
+    Mat resultRt = Mat::eye(4,4,CV_64FC1);
+    Mat currRt, ksi;
+
+	Matrix3frm cam_rot_global_prev = rmats_[global_time_ - 1];            // [Ri|ti] - pos of camera, i.e.
+	// Previous global translation
+	Vector3f   cam_trans_global_prev = tvecs_[global_time_ - 1];          // transform from camera to global coo space for (i-1)th camera pose
+
+	if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->InitializeOnly ) ) {
+		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
+		cam_rot_global_prev = aff_rgbd.linear();
+		cam_trans_global_prev = aff_rgbd.translation();
+	} else if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->IncrementalOnly ) ) {
+		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ * getCameraPose().matrix() );
+		cam_rot_global_prev = aff_rgbd.linear();
+		cam_trans_global_prev = aff_rgbd.translation();
+	}
+
+
+	// Previous global inverse rotation
+	Matrix3frm cam_rot_global_prev_inv = cam_rot_global_prev.inverse ();  // Rprev.t();
+
+	// GET CURRENT GLOBAL TRANSFORM
+	Matrix3frm cam_rot_global_curr = cam_rot_global_prev;                 // transform to global coo for ith camera pose
+	Vector3f   cam_trans_global_curr = cam_trans_global_prev;
+
+	// CONVERT TO DEVICE TYPES 
+	//LOCAL PREVIOUS TRANSFORM
+	Mat33&  device_cam_rot_local_prev_inv = device_cast<Mat33> (cam_rot_global_prev_inv);
+	Mat33&  device_cam_rot_local_prev = device_cast<Mat33> (cam_rot_global_prev); 
+
+	float3& device_cam_trans_local_prev_tmp = device_cast<float3> (cam_trans_global_prev);
+	float3 device_cam_trans_local_prev;
+	device_cam_trans_local_prev.x = device_cam_trans_local_prev_tmp.x - (getCyclicalBufferStructure ())->origin_metric.x;
+	device_cam_trans_local_prev.y = device_cam_trans_local_prev_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
+	device_cam_trans_local_prev.z = device_cam_trans_local_prev_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;
+	float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
+
+	///////////////////////////////////////////////////////////////////////////////////////////
+	// Ray casting
+	/*Mat33& device_Rcurr = device_cast<Mat33> (Rcurr);*/
+	{          
+		//ScopeTime time( ">>> raycast" );
+		raycast (intr, device_cam_rot_local_prev, device_cam_trans_local_prev, tsdf_volume_->getTsdfTruncDist (), device_volume_size, tsdf_volume_->data (), getCyclicalBufferStructure (), vmaps_g_prev_[0], nmaps_g_prev_[0]);    
+	}
+	{
+		// POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
+		//ScopeTime time( ">>> transformation based on raycast" );
+		Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
+		float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
+
+		//~ PCL_INFO ("Raycasting with cube origin at %f, %f, %f\n", cube_origin.x, cube_origin.y, cube_origin.z);
+
+		MapArr& vmap_temp = vmaps_g_prev_[0];
+		MapArr& nmap_temp = nmaps_g_prev_[0];
+
+		device::tranformMaps (vmap_temp, nmap_temp, rotation_id, cube_origin, vmaps_g_prev_[0], nmaps_g_prev_[0]);
+
+		for (int i = 1; i < LEVELS; ++i)
+		{
+			resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
+			resizeNMap (nmaps_g_prev_[i-1], nmaps_g_prev_[i]);
+		}
+		pcl::device::sync ();
+	}
+
+	if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreRegistrationFlag ) )
+	{
+		rmats_.push_back (cam_rot_global_prev); 
+		tvecs_.push_back (cam_trans_global_prev);
+	}
+	else if ( frame_ptr != NULL && ( frame_ptr->type_ == frame_ptr->DirectApply ) )
+	{
+		//Eigen::Affine3f aff_rgbd( getCameraPose( 0 ).matrix() * frame_ptr->transformation_ );
+		Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
+		cam_rot_global_curr = aff_rgbd.linear();
+		cam_trans_global_curr = aff_rgbd.translation();
+		rmats_.push_back (cam_rot_global_curr); 
+		tvecs_.push_back (cam_trans_global_curr);
+	}
+	else
+	{
+		//ScopeTime time(">>> icp-all");
+
+		Eigen::Matrix4f result_trans = Eigen::Matrix4f::Identity();
+		Eigen::Affine3f mat_prev;
+		mat_prev.linear() = cam_rot_global_prev;
+		mat_prev.translation() = cam_trans_global_prev;
+
+		for (int level_index = LEVELS-1; level_index>=0; --level_index)
+		{
+			int iter_num = icp_iterations_[level_index];
+
+			// current maps
+			MapArr& vmap_curr = vmaps_curr_[level_index];
+			MapArr& nmap_curr = nmaps_curr_[level_index];   
+
+			// previous maps
+			MapArr& vmap_g_prev = vmaps_g_prev_[level_index];
+			MapArr& nmap_g_prev = nmaps_g_prev_[level_index];
+
+			// We need to transform the maps from global to the local coordinates
+			Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); // Identity Rotation Matrix. Because we only need translation
+			float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
+			cube_origin.x = -cube_origin.x;
+			cube_origin.y = -cube_origin.y;
+			cube_origin.z = -cube_origin.z;
+
+			MapArr& vmap_temp = vmap_g_prev;
+			MapArr& nmap_temp = nmap_g_prev;
+			device::tranformMaps (vmap_temp, nmap_temp, rotation_id, cube_origin, vmap_g_prev, nmap_g_prev); 
+
+			const Mat& levelCameraMatrix = pyramidCameraMatrix[ level_index ];
+
+			const Mat& levelImage0 = pyramidImage0[ level_index ];
+			const Mat& levelDepth0 = pyramidDepth0[ level_index ];
+			Mat levelCloud0;
+			cvtDepth2Cloud( pyramidDepth0[ level_index ], levelCloud0, levelCameraMatrix );
+
+			const Mat& levelImage1 = pyramidImage1[ level_index ];
+			const Mat& levelDepth1 = pyramidDepth1[ level_index ];
+			const Mat& level_dI_dx1 = pyramid_dI_dx1[ level_index ];
+			const Mat& level_dI_dy1 = pyramid_dI_dy1[ level_index ];
+
+			CV_Assert( level_dI_dx1.type() == CV_16S );
+			CV_Assert( level_dI_dy1.type() == CV_16S );
+
+			const double fx = levelCameraMatrix.at<double>(0,0);
+			const double fy = levelCameraMatrix.at<double>(1,1);
+			const double determinantThreshold = 1e-6;
+
+			Mat corresps( levelImage0.size(), levelImage0.type() );
+
+			for (int iter = 0; iter < iter_num; ++iter)
+			{
+				// rgbd odometry part
+				bool odo_good = true;
+
+				int correspsCount = computeCorresp( levelCameraMatrix, levelCameraMatrix.inv(), resultRt.inv(DECOMP_SVD),
+													levelDepth0, levelDepth1, pyramidTexturedMask1[ level_index ], maxDepthDiff,
+													corresps );
+				if( correspsCount == 0 ) {
+					odo_good = false;
+				} else {
+					odo_good = computeKsi( 0,
+										levelImage0, levelCloud0,
+										levelImage1, level_dI_dx1, level_dI_dy1,
+										corresps, correspsCount,
+										fx, fy, sobelScale, determinantThreshold,
+										ksi, AA_, bb_ );
+				}
+
+				if ( odo_good == false ) {
+					AA_.setZero();
+					bb_.setZero();
+				}
+
+				//computeProjectiveMatrix( ksi, currRt );
+				//resultRt = currRt * resultRt;
+
+				//CONVERT TO DEVICE TYPES
+				// CURRENT LOCAL TRANSFORM
+				Mat33&  device_cam_rot_local_curr = device_cast<Mat33> (cam_rot_global_curr);/// We have not dealt with changes in rotations
+
+				float3& device_cam_trans_local_curr_tmp = device_cast<float3> (cam_trans_global_curr);
+				float3 device_cam_trans_local_curr; 
+				device_cam_trans_local_curr.x = device_cam_trans_local_curr_tmp.x - (getCyclicalBufferStructure ())->origin_metric.x;
+				device_cam_trans_local_curr.y = device_cam_trans_local_curr_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
+				device_cam_trans_local_curr.z = device_cam_trans_local_curr_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;
+
+				estimateCombinedPrevSpace (device_cam_rot_local_curr, device_cam_trans_local_curr, vmap_curr, nmap_curr, device_cam_rot_local_prev_inv, device_cam_trans_local_prev, intr (level_index), 
+					vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A_.data (), b_.data ());
+
+				//checking nullspace
+				//AAA_ = A_ + AA_ * ( 0.1 / 255.0 / 255.0 );
+				//bbb_ = b_ + bb_ * ( 0.1 / 255.0 / 255.0 );
+				//AAA_ = A_ + AA_ * ( 1.0 / 255.0 / 255.0 );
+				//bbb_ = b_ + bb_ * ( 1.0 / 255.0 / 255.0 );
+				AAA_ = A_ + AA_ * ( 25.0 / 255.0 / 255.0 );
+				bbb_ = b_ + bb_ * ( 25.0 / 255.0 / 255.0 );
+				//AAA_ = AA_;
+				//bbb_ = bb_;
+
+				double det = AAA_.determinant ();
+
+				if ( fabs (det) < 1e-15 || pcl_isnan (det) )
+				{
+					if (pcl_isnan (det)) cout << "qnan" << endl;
+
+					PCL_ERROR ("LOST ... @%d frame.%d level.%d iteration, matrices are\n", global_time_, level_index, iter);
+					cout << "Determinant : " << det << endl;
+					cout << "Singular matrix :" << endl << A_ << endl;
+					cout << "Corresponding b :" << endl << b_ << endl;
+
+					if ( frame_ptr != NULL && frame_ptr->type_ == frame_ptr->InitializeOnly ) {
+						Eigen::Affine3f aff_rgbd( frame_ptr->transformation_ );
+						cam_rot_global_curr = aff_rgbd.linear();
+						cam_trans_global_curr = aff_rgbd.translation();
+						break;
+					} else {
+						reset ();
+						return (false);
+					}
+				}
+
+				//Eigen::Matrix<float, 6, 1> result = A_.llt ().solve (b_).cast<float>();
+				//Eigen::Matrix<float, 6, 1> result = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(b);
+				//Eigen::Matrix<float, 6, 1> result = AA_.llt ().solve (bb_).cast<float>();
+				Eigen::Matrix< float, 6, 1 > result = AAA_.llt().solve( bbb_ ).cast< float >();
+
+				float alpha = result (0);
+				float beta  = result (1);
+				float gamma = result (2);
+
+				Eigen::Matrix3f cam_rot_incremental = (Eigen::Matrix3f)AngleAxisf (gamma, Vector3f::UnitZ ()) * AngleAxisf (beta, Vector3f::UnitY ()) * AngleAxisf (alpha, Vector3f::UnitX ());
+				Vector3f cam_trans_incremental = result.tail<3> ();
+
+				//cout << AA_ / ( 255.0 * 255.0 ) << endl;
+				//cout << A_ << endl;
+				//cout << endl;
+
+				//compose
+				//cam_trans_global_curr = cam_rot_incremental * cam_trans_global_curr + cam_trans_incremental;
+				//cam_rot_global_curr = cam_rot_incremental * cam_rot_global_curr;
+				Eigen::Affine3f mat_inc;
+				mat_inc.linear() = cam_rot_incremental;
+				mat_inc.translation() = cam_trans_incremental;
+
+				result_trans = mat_inc * result_trans;
+				Eigen::Matrix4d temp = result_trans.cast< double >();
+				eigen2cv( temp, resultRt );
+
+				Eigen::Affine3f mat_curr;
+				mat_curr.matrix() = mat_prev.matrix() * result_trans;
+
+				cam_rot_global_curr = mat_curr.linear();
+				cam_trans_global_curr = mat_curr.translation();
+			}
+		}
+
+		/*
+		cout << global_time_ << endl;
+		cout << cam_trans_global_curr << endl;
+		cout << cam_rot_global_curr << endl;
+		cout << resultRt << endl;
+		cout << endl;
+		*/
+
+		//save tranform
+		rmats_.push_back (cam_rot_global_curr); 
+		tvecs_.push_back (cam_trans_global_curr);
+	}
+
+	bool has_shifted = false;
+	if ( force_shift_ ) {
+		has_shifted = cyclical_.checkForShift(tsdf_volume_, color_volume_, getCameraPose (), 0.6 * volume_size_, true, perform_last_scan_, force_shift_, extract_world_);
+		force_shift_ = false;
+	} else {
+		force_shift_ = cyclical_.checkForShift(tsdf_volume_, color_volume_, getCameraPose (), 0.6 * volume_size_, false, perform_last_scan_, force_shift_, extract_world_);
+	}
+
+	if(has_shifted)
+		PCL_WARN ("SHIFTING\n");
+
+	// get NEW local rotation 
+	Matrix3frm cam_rot_local_curr_inv = cam_rot_global_curr.inverse ();
+	Mat33&  device_cam_rot_local_curr_inv = device_cast<Mat33> (cam_rot_local_curr_inv);
+	Mat33&  device_cam_rot_local_curr = device_cast<Mat33> (cam_rot_global_curr); 
+
+	// get NEW local translation
+	float3& device_cam_trans_local_curr_tmp = device_cast<float3> (cam_trans_global_curr);
+	float3 device_cam_trans_local_curr;
+	device_cam_trans_local_curr.x = device_cam_trans_local_curr_tmp.x - (getCyclicalBufferStructure ())->origin_metric.x;
+	device_cam_trans_local_curr.y = device_cam_trans_local_curr_tmp.y - (getCyclicalBufferStructure ())->origin_metric.y;
+	device_cam_trans_local_curr.z = device_cam_trans_local_curr_tmp.z - (getCyclicalBufferStructure ())->origin_metric.z;  
+
+
+	///////////////////////////////////////////////////////////////////////////////////////////
+	// Integration check - We do not integrate volume if camera does not move.  
+	float rnorm = rodrigues2(cam_rot_global_curr.inverse() * cam_rot_global_prev).norm();
+	float tnorm = (cam_trans_global_curr - cam_trans_global_prev).norm();    
+	const float alpha = 1.f;
+	bool integrate = (rnorm + alpha * tnorm)/2 >= integration_metric_threshold_;
+	integrate = true;
+
+	///////////////////////////////////////////////////////////////////////////////////////////
+	// Volume integration
+	if (integrate)
+	{
+		//integrateTsdfVolume(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tranc_dist, volume_);
+		if ( frame_ptr != NULL && ( frame_ptr->flag_ & frame_ptr->IgnoreIntegrationFlag ) ) {
+		} else {
+			//ScopeTime time( ">>> integrate" );
+			integrateTsdfVolume (depth_raw, intr, device_volume_size, device_cam_rot_local_curr_inv, device_cam_trans_local_curr, tsdf_volume_->getTsdfTruncDist (), tsdf_volume_->data (), getCyclicalBufferStructure (), depthRawScaled_);
+		}
+	}
+
+	{
+		if ( pcolor && color_volume_ )
+		{
+			//ScopeTime time( ">>> update color" );
+			const float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
+
+			device::updateColorVolume(intr, tsdf_volume_->getTsdfTruncDist(), device_cam_rot_local_curr_inv, device_cam_trans_local_curr, vmaps_g_prev_[0], 
+				*pcolor, device_volume_size, color_volume_->data(), getCyclicalBufferStructure(), color_volume_->getMaxWeight());
+		}
+	}
 
 	++global_time_;
 	return (true);
