@@ -205,7 +205,18 @@ namespace pcl
           buffer_.origin_metric.x = 0.f; buffer_.origin_metric.y = 0.f; buffer_.origin_metric.z = 0.f;
           initBuffer (tsdf_volume, color_volume);
         }
-        
+
+        void resetBuffer (pcl::gpu::TsdfVolume::Ptr tsdf_volume)
+        {
+          buffer_.origin_GRID.x = 0; buffer_.origin_GRID.y = 0; buffer_.origin_GRID.z = 0;
+          buffer_.origin_GRID_global.x = 0.f; buffer_.origin_GRID_global.y = 0.f; buffer_.origin_GRID_global.z = 0.f;
+          buffer_.origin_metric.x = 0.f; buffer_.origin_metric.y = 0.f; buffer_.origin_metric.z = 0.f;
+          PtrStep<short2> localVolume = tsdf_volume->data();          
+          buffer_.tsdf_memory_start = &(localVolume.ptr (0)[0]);
+          buffer_.tsdf_memory_end = &(localVolume.ptr (buffer_.voxels_size.y * (buffer_.voxels_size.z - 1) + (buffer_.voxels_size.y - 1) )[buffer_.voxels_size.x - 1]);
+          buffer_.tsdf_rolling_buff_origin = buffer_.tsdf_memory_start;
+        }
+
         /** \brief Return a pointer to the world model
           */ 
         pcl::WorldModel<pcl::PointXYZI>*

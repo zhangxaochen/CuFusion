@@ -134,6 +134,19 @@ pcl::gpu::RayCaster::generateDepthImage(Depth& depth) const
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void
+pcl::gpu::RayCaster::generateNormalImage(View& view) const
+{
+  device::Intr intr (fx_, fy_, cx_, cy_, 0);
+  view.create(rows, cols);    
+  
+  Matrix<float, 3, 3, RowMajor> R_inv = camera_pose_.linear().inverse();
+  Vector3f t = camera_pose_.translation();
+  
+  device::generateNormal(device_cast<Mat33>(R_inv), device_cast<const float3>(t), vertex_map_, normal_map_, view);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 pcl::gpu::RayCaster::MapArr
 pcl::gpu::RayCaster::getVertexMap() const
 {

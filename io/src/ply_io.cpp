@@ -1331,7 +1331,7 @@ pcl::io::savePLYFile (const std::string &file_name, const pcl::PolygonMesh &mesh
   }
   // Faces
   fs << "\nelement face "<< nr_faces;
-  fs << "\nproperty list uchar int vertex_index";
+  fs << "\nproperty list uchar int vertex_indices";
   fs << "\nend_header\n";
 
   // Write down vertices
@@ -1409,7 +1409,7 @@ pcl::io::savePLYFileBinary (const std::string &file_name, const pcl::PolygonMesh
   }
   // Open file
   std::ofstream fs;
-  fs.open (file_name.c_str ());
+  fs.open (file_name.c_str (), std::ios_base::binary | std::ios_base::out);
   if (!fs)
   {
     PCL_ERROR ("[pcl::io::savePLYFile] Error during opening (%s)!\n", file_name.c_str ());
@@ -1450,7 +1450,7 @@ pcl::io::savePLYFileBinary (const std::string &file_name, const pcl::PolygonMesh
   }
   // Faces
   fs << "\nelement face "<< nr_faces;
-  fs << "\nproperty list uchar int vertex_index";
+  fs << "\nproperty list uchar int vertex_indices";
   fs << "\nend_header\n";
 
   // Close the file

@@ -172,6 +172,59 @@ namespace pcl
 {
   namespace device
   {
+    __global__ void generateNormalKernel(const Mat33 R_inv, const float3 t, const PtrStep<float> vmap, const PtrStep<float> nmap, PtrStepSz<uchar3> normal)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x < normal.cols && y < normal.rows)
+      {
+        float3 v, n;
+        v.x = vmap.ptr (y)[x];
+        n.x = nmap.ptr (y)[x];
+
+        uchar3 color = make_uchar3 (0, 0, 0);
+
+        if (!isnan (v.x) && !isnan (n.x))
+        {
+          v.y = vmap.ptr (y + normal.rows)[x];
+          v.z = vmap.ptr (y + 2 * normal.rows)[x];
+
+          n.y = nmap.ptr (y + normal.rows)[x];
+          n.z = nmap.ptr (y + 2 * normal.rows)[x];
+
+		  int rr = (int)( 127.5 * ( dot( R_inv.data[ 0 ], n ) + 1.0 ) );
+		  rr = max( 0, min( 255, rr ) );
+		  int gg = (int)( 127.5 * ( dot( R_inv.data[ 1 ], n ) + 1.0 ) );
+		  gg = max( 0, min( 255, gg ) );
+		  int bb = (int)( 127.5 * ( 1.0 - dot( R_inv.data[ 2 ], n ) ) );
+		  bb = max( 0, min( 255, bb ) );
+
+		  color = make_uchar3( rr, gg, bb );
+        }
+        normal.ptr (y)[x] = color;
+	  }
+    }     
+  }
+}
+
+void
+pcl::device::generateNormal (const Mat33& R_inv, const float3& t, const MapArr& vmap, const MapArr& nmap, PtrStepSz<uchar3> dst)
+{
+  dim3 block(32, 8);
+  dim3 grid(divUp(dst.cols, block.x), divUp(dst.rows, block.y));
+  
+  generateNormalKernel<<<grid, block>>>(R_inv, t, vmap, nmap, dst);
+  cudaSafeCall (cudaGetLastError ());
+  cudaSafeCall (cudaDeviceSynchronize ());  
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+namespace pcl
+{
+  namespace device
+  {
     __global__ void 
     paint3DViewKernel(const PtrStep<uchar3> colors, PtrStepSz<uchar3> dst, float colors_weight)
     {

@@ -365,7 +365,10 @@ namespace pcl
     void
     generateDepth (const Mat33& R_inv, const float3& t, const MapArr& vmap, DepthMap& dst);
 
-     /** \brief Paints 3D view with color map
+    void
+    generateNormal (const Mat33& R_inv, const float3& t, const MapArr& vmap, const MapArr& nmap, PtrStepSz<uchar3> dst);
+
+	/** \brief Paints 3D view with color map
       * \param[in] colors rgb color frame from OpenNI   
       * \param[out] dst output 3D view
       * \param[in] colors_wight weight for colors   
