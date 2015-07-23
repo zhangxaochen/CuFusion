@@ -170,7 +170,9 @@ namespace openni_wrapper
 
   Image::Image (boost::shared_ptr<xn::ImageMetaData> image_meta_data) throw ()
   : image_md_ (image_meta_data)
+  //: image_md_ ( new xn::ImageMetaData() )
   {
+	  //image_md_->InitFrom( *image_meta_data );
   }
 
   Image::~Image () throw () { }

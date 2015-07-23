@@ -175,6 +175,9 @@ namespace pcl
       {
         CTA_SIZE_X = 32, CTA_SIZE_Y = 8,
         MAX_WEIGHT = 1 << 7
+		//MAX_WEIGHT = 15
+		//MAX_WEIGHT = 255
+		//MAX_WEIGHT = 15
       };
 
       mutable PtrStep<short2> volume;
@@ -397,7 +400,11 @@ namespace pcl
       float yl = (y - intr.cy) / intr.fy;
       float lambda = sqrtf (xl * xl + yl * yl + 1);
 
-      scaled.ptr (y)[x] = Dp * lambda/1000.f; //meters
+	  float res = Dp * lambda/1000.f; //meters
+	  if ( intr.trunc_dist > 0 && res > intr.trunc_dist )
+		  scaled.ptr (y)[x] = 0;
+	  else
+		scaled.ptr (y)[x] = res;
     }
 
     __global__ void
@@ -652,6 +659,92 @@ namespace pcl
         }       // for(int z = 0; z < VOLUME_Z; ++z)
     }      // __global__
   }
+
+    __global__ void
+    tsdf23test (const PtrStepSz<float> depthScaled, PtrStep<short2> volume,
+            const float tranc_dist, const Mat33 Rcurr_inv, const float3 tcurr, const Intr intr, const float3 cell_size, const pcl::gpu::tsdf_buffer buffer)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x >= buffer.voxels_size.x || y >= buffer.voxels_size.y)
+        return;
+
+      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+
+      float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
+
+      float v_x = (Rcurr_inv.data[0].x * v_g_x + Rcurr_inv.data[0].y * v_g_y + Rcurr_inv.data[0].z * v_g_z) * intr.fx;
+      float v_y = (Rcurr_inv.data[1].x * v_g_x + Rcurr_inv.data[1].y * v_g_y + Rcurr_inv.data[1].z * v_g_z) * intr.fy;
+      float v_z = (Rcurr_inv.data[2].x * v_g_x + Rcurr_inv.data[2].y * v_g_y + Rcurr_inv.data[2].z * v_g_z);
+
+      float z_scaled = 0;
+
+      float Rcurr_inv_0_z_scaled = Rcurr_inv.data[0].z * cell_size.z * intr.fx;
+      float Rcurr_inv_1_z_scaled = Rcurr_inv.data[1].z * cell_size.z * intr.fy;
+
+      float tranc_dist_inv = 1.0f / tranc_dist;
+
+      short2* pos = volume.ptr (y) + x;
+      
+      // shift the pointer to relative indices
+      shift_tsdf_pointer(&pos, buffer);
+      
+      int elem_step = volume.step * buffer.voxels_size.y / sizeof(short2);
+
+//#pragma unroll
+      for (int z = 0; z < buffer.voxels_size.z;
+           ++z,
+           v_g_z += cell_size.z,
+           z_scaled += cell_size.z,
+           v_x += Rcurr_inv_0_z_scaled,
+           v_y += Rcurr_inv_1_z_scaled,
+           pos += elem_step)
+      {
+        
+        // As the pointer is incremented in the for loop, we have to make sure that the pointer is never outside the memory
+        if(pos > buffer.tsdf_memory_end)
+          pos -= (buffer.tsdf_memory_end - buffer.tsdf_memory_start + 1);
+        
+        float inv_z = 1.0f / (v_z + Rcurr_inv.data[2].z * z_scaled);
+        if (inv_z < 0)
+            continue;
+
+        // project to current cam
+		// old code
+        int2 coo =
+        {
+          __float2int_rn (v_x * inv_z + intr.cx),
+          __float2int_rn (v_y * inv_z + intr.cy)
+        };
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
+        {
+          float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+
+          float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters
+          {
+            float tsdf = fmin (1.0f, sdf * tranc_dist_inv);
+
+            //read and unpack
+            float tsdf_prev;
+            int weight_prev;
+            unpack_tsdf (*pos, tsdf_prev, weight_prev);
+
+            const int Wrk = 1;
+
+            float tsdf_new = (tsdf_prev * weight_prev + Wrk * tsdf) / (weight_prev + Wrk);
+            int weight_new = min (weight_prev + Wrk, Tsdf::MAX_WEIGHT);
+
+            pack_tsdf (tsdf_new, weight_new, *pos);
+          }
+        }
+      }       // for(int z = 0; z < VOLUME_Z; ++z)
+    }      // __global__
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -680,6 +773,10 @@ pcl::device::integrateTsdfVolume (const PtrStepSz<ushort>& depth, const Intr& in
   dim3 grid (divUp (buffer->voxels_size.x, block.x), divUp (buffer->voxels_size.y, block.y));
 
   tsdf23<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size, *buffer);    
+
+//  for ( int i = 0; i < 100; i++ )
+//    tsdf23test<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size, *buffer);    
+
   //tsdf23normal_hack<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size);
 
   cudaSafeCall ( cudaGetLastError () );
@@ -695,6 +792,7 @@ pcl::device::clearTSDFSlice (PtrStep<short2> volume, pcl::gpu::tsdf_buffer* buff
 
     int3 minBounds, maxBounds;
     
+	/*
     //X
     if(newX >= 0)
     {
@@ -725,7 +823,30 @@ pcl::device::clearTSDFSlice (PtrStep<short2> volume, pcl::gpu::tsdf_buffer* buff
     
     if(minBounds.y > maxBounds.y)
      std::swap(minBounds.y, maxBounds.y);
-    
+	 */
+	if ( shiftX >= 0 ) {
+		minBounds.x = buffer->origin_GRID.x;
+		maxBounds.x = newX - 1;
+	} else {
+		minBounds.x = newX;
+		maxBounds.x = buffer->origin_GRID.x - 1;
+	}
+	if ( minBounds.x < 0 ) {
+		minBounds.x += buffer->voxels_size.x;
+		maxBounds.x += buffer->voxels_size.x;
+	}
+
+	if ( shiftY >= 0 ) {
+		minBounds.y = buffer->origin_GRID.y;
+		maxBounds.y = newY - 1;
+	} else {
+		minBounds.y = newY;
+		maxBounds.y = buffer->origin_GRID.y - 1;
+	}
+	if ( minBounds.y < 0 ) {
+		minBounds.y += buffer->voxels_size.y;
+		maxBounds.y += buffer->voxels_size.y;
+	}
     //Z
      minBounds.z = buffer->origin_GRID.z;
      maxBounds.z = shiftZ;

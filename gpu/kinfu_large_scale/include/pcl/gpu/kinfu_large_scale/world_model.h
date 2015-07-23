@@ -49,6 +49,8 @@
 #include <pcl/point_types.h>
 #include <pcl/io/pcd_io.h>
 #include <pcl/gpu/kinfu_large_scale/tsdf_buffer.h>
+#include <pcl/gpu/kinfu_large_scale/standalone_marching_cubes.h>
+#include <pcl/gpu/kinfu_large_scale/impl/standalone_marching_cubes.hpp>
 
 namespace pcl
 {
@@ -159,7 +161,7 @@ namespace pcl
         * \param[in] overlap optional overlap (in percent) between each cube (usefull to create overlapped meshes).
         */
       void getWorldAsCubes (double size, std::vector<PointCloudPtr> &cubes, std::vector<Eigen::Vector3f> &transforms, double overlap = 0.0);
-      
+      void getWorldAsCubes (double size, std::vector<PointCloudPtr> &cubes, std::vector<Eigen::Vector3f> &transforms, double overlap, pcl::gpu::StandaloneMarchingCubes<pcl::PointXYZI> & mcubes);
       
     private:
 

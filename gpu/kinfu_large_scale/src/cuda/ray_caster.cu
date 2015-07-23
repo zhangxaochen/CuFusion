@@ -239,10 +239,10 @@ namespace pcl
 
           tsdf = readTsdf (g.x, g.y, g.z, buffer);
 
-          if (tsdf_prev < 0.f && tsdf > 0.f)
+          if (tsdf_prev < 0.f && tsdf >= 0.f)
             break;
 
-          if (tsdf_prev > 0.f && tsdf < 0.f)           //zero crossing
+          if (tsdf_prev >= 0.f && tsdf < 0.f)           //zero crossing
           {
             float Ftdt = interpolateTrilineary (ray_start, ray_dir, time_curr + time_step, buffer);
             if (isnan (Ftdt))

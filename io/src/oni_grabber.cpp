@@ -82,6 +82,7 @@ ONIGrabber::ONIGrabber (const std::string& file_name, bool repeat, bool stream)
   , point_cloud_rgba_signal_ ()
 {
   openni_wrapper::OpenNIDriver& driver = openni_wrapper::OpenNIDriver::getInstance ();
+
   device_ = boost::dynamic_pointer_cast< openni_wrapper::DeviceONI> (driver.createVirtualDevice (file_name, repeat, stream));
 
   if (!device_->hasDepthStream ())
@@ -187,22 +188,49 @@ ONIGrabber::start ()
   }
   else
   {
+	  data_updated_ = false;
+  }
+}
+
+void ONIGrabber::trigger()
+{
 	data_updated_ = false;
     if (device_->hasImageStream ()) {
-      device_->trigger ();
-	  data_updated_ = true;
+      if ( device_->trigger () )
+		data_updated_ = true;
 	}
 
     if (device_->hasDepthStream ()) {
-      device_->trigger ();
-	  data_updated_ = true;
+      if ( device_->trigger () )
+		data_updated_ = true;
 	}
 
     if (device_->hasIRStream ()) {
-      device_->trigger ();
-	  data_updated_ = true;
+      if ( device_->trigger () )
+		data_updated_ = true;
 	}
-  }
+
+	if ( !data_updated_ && !rgb_sync_.empty() ) {
+		boost::thread( &Synchronizer<boost::shared_ptr<openni_wrapper::Image>, boost::shared_ptr<openni_wrapper::DepthImage> >::finalize, &rgb_sync_ );
+	}
+}
+
+void ONIGrabber::seekImageFrame( int frame )
+{
+	rgb_sync_.reset();
+	device_->seekImageFrame( frame );
+}
+
+void ONIGrabber::seekDepthFrame( int frame )
+{
+	rgb_sync_.reset();
+	device_->seekDepthFrame( frame );
+}
+
+void ONIGrabber::seekIRFrame( int frame )
+{
+	rgb_sync_.reset();
+	device_->seekIRFrame( frame );
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -262,7 +290,9 @@ ONIGrabber::imageCallback(boost::shared_ptr<openni_wrapper::Image> image, void*)
   if (num_slots<sig_cb_openni_point_cloud_rgb> () > 0 ||
       num_slots<sig_cb_openni_point_cloud_rgba> () > 0 ||
       num_slots<sig_cb_openni_image_depth_image > () > 0)
-    rgb_sync_.add0(image, image->getTimeStamp());
+  {
+    rgb_sync_.add0 (image, image->getTimeStamp ());
+  }
 
   if (image_signal_->num_slots() > 0)
     image_signal_->operator()(image);
@@ -277,7 +307,9 @@ ONIGrabber::depthCallback(boost::shared_ptr<openni_wrapper::DepthImage> depth_im
   if (num_slots<sig_cb_openni_point_cloud_rgb> () > 0 ||
       num_slots<sig_cb_openni_point_cloud_rgba> () > 0 ||
       num_slots<sig_cb_openni_image_depth_image> () > 0)
-    rgb_sync_.add1(depth_image, depth_image->getTimeStamp());
+  {
+    rgb_sync_.add1 (depth_image, depth_image->getTimeStamp ());
+  }
 
   if (num_slots<sig_cb_openni_point_cloud_i > () > 0 ||
       num_slots<sig_cb_openni_ir_depth_image > () > 0)

@@ -77,7 +77,7 @@ pcl::gpu::RayCaster::run(const TsdfVolume& volume, const Affine3f& camera_pose, 
   camera_pose_.linear() = camera_pose.linear();
   camera_pose_.translation() = camera_pose.translation();
   volume_size_ = volume.getSize();
-  device::Intr intr (fx_, fy_, cx_, cy_);
+  device::Intr intr (fx_, fy_, cx_, cy_, 0);
 
   vertex_map_.create(rows * 3, cols);
   normal_map_.create(rows * 3, cols);
@@ -123,7 +123,7 @@ pcl::gpu::RayCaster::generateSceneView(View& view, const Vector3f& light_source_
 void
 pcl::gpu::RayCaster::generateDepthImage(Depth& depth) const
 {
-  device::Intr intr (fx_, fy_, cx_, cy_);
+  device::Intr intr (fx_, fy_, cx_, cy_, 0);
   
   depth.create(rows, cols);    
   
@@ -131,6 +131,19 @@ pcl::gpu::RayCaster::generateDepthImage(Depth& depth) const
   Vector3f t = camera_pose_.translation();
   
   device::generateDepth(device_cast<Mat33>(R_inv), device_cast<const float3>(t), vertex_map_, depth);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void
+pcl::gpu::RayCaster::generateNormalImage(View& view) const
+{
+  device::Intr intr (fx_, fy_, cx_, cy_, 0);
+  view.create(rows, cols);    
+  
+  Matrix<float, 3, 3, RowMajor> R_inv = camera_pose_.linear().inverse();
+  Vector3f t = camera_pose_.translation();
+  
+  device::generateNormal(device_cast<Mat33>(R_inv), device_cast<const float3>(t), vertex_map_, normal_map_, view);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

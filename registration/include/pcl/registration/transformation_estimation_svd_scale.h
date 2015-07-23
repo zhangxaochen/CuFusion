@@ -3,6 +3,7 @@
  *
  *  Point Cloud Library (PCL) - www.pointclouds.org
  *  Copyright (c) 2010-2011, Willow Garage, Inc.
+ *  Copyright (c) 2012-, Open Perception, Inc.
  *
  *  All rights reserved.
  *
@@ -16,7 +17,7 @@
  *     copyright notice, this list of conditions and the following
  *     disclaimer in the documentation and/or other materials provided
  *     with the distribution.
- *   * Neither the name of Willow Garage, Inc. nor the names of its
+ *   * Neither the name of the copyright holder(s) nor the names of its
  *     contributors may be used to endorse or promote products derived
  *     from this software without specific prior written permission.
  *
@@ -62,6 +63,11 @@ namespace pcl
 
         typedef typename TransformationEstimationSVD<PointSource, PointTarget, Scalar>::Matrix4 Matrix4;
 
+        /** \brief Inherits from TransformationEstimationSVD, but forces it to not use the Umeyama method */
+        TransformationEstimationSVDScale ():
+          TransformationEstimationSVD<PointSource, PointTarget, Scalar> (false)
+      {}
+
       protected:
         /** \brief Obtain a 4x4 rigid transformation matrix from a correlation matrix H = src * tgt'
           * \param[in] cloud_src_demean the input source cloud, demeaned, in Eigen format
@@ -71,10 +77,10 @@ namespace pcl
           * \param[out] transformation_matrix the resultant 4x4 rigid transformation matrix
           */ 
         void
-        getTransformationFromCorrelation (const Eigen::MatrixXf &cloud_src_demean,
-                                          const Eigen::Vector4f &centroid_src,
-                                          const Eigen::MatrixXf &cloud_tgt_demean,
-                                          const Eigen::Vector4f &centroid_tgt,
+        getTransformationFromCorrelation (const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> &cloud_src_demean,
+                                          const Eigen::Matrix<Scalar, 4, 1> &centroid_src,
+                                          const Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> &cloud_tgt_demean,
+                                          const Eigen::Matrix<Scalar, 4, 1> &centroid_tgt,
                                           Matrix4 &transformation_matrix) const;
     };
 

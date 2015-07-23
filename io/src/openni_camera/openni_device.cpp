@@ -369,33 +369,38 @@ openni_wrapper::OpenNIDevice::Init ()
     boost::unique_lock<boost::mutex> depth_lock (depth_mutex_);
     XnStatus status = depth_generator_.GetRealProperty ("ZPPS", pixel_size);
     if (status != XN_STATUS_OK)
-      THROW_OPENNI_EXCEPTION ("reading the pixel size of IR camera failed. Reason: %s", xnGetStatusString (status));
+      //THROW_OPENNI_EXCEPTION ("reading the pixel size of IR camera failed. Reason: %s", xnGetStatusString (status));
+	  pixel_size = 0.105200;
 
-    XnUInt64 depth_focal_length_SXGA;
+	XnUInt64 depth_focal_length_SXGA;
     status = depth_generator_.GetIntProperty ("ZPD", depth_focal_length_SXGA);
     if (status != XN_STATUS_OK)
-      THROW_OPENNI_EXCEPTION ("reading the focal length of IR camera failed. Reason: %s", xnGetStatusString (status));
+      //THROW_OPENNI_EXCEPTION ("reading the focal length of IR camera failed. Reason: %s", xnGetStatusString (status));
+	  depth_focal_length_SXGA = 120;
 
     XnDouble baseline;
     status = depth_generator_.GetRealProperty ("LDDIS", baseline);
     if (status != XN_STATUS_OK)
-      THROW_OPENNI_EXCEPTION ("reading the baseline failed. Reason: %s", xnGetStatusString (status));
+      //THROW_OPENNI_EXCEPTION ("reading the baseline failed. Reason: %s", xnGetStatusString (status));
+	  baseline = 7.5;
 
-    status = depth_generator_.GetIntProperty ("ShadowValue", shadow_value_);
+	status = depth_generator_.GetIntProperty ("ShadowValue", shadow_value_);
     if (status != XN_STATUS_OK)
-      THROW_OPENNI_EXCEPTION ("reading the value for pixels in shadow regions failed. Reason: %s", xnGetStatusString (status));
+      //THROW_OPENNI_EXCEPTION ("reading the value for pixels in shadow regions failed. Reason: %s", xnGetStatusString (status));
+	  shadow_value_ = 0;
 
-    status = depth_generator_.GetIntProperty ("NoSampleValue", no_sample_value_);
+	status = depth_generator_.GetIntProperty ("NoSampleValue", no_sample_value_);
     if (status != XN_STATUS_OK)
-      THROW_OPENNI_EXCEPTION ("reading the value for pixels with no depth estimation failed. Reason: %s", xnGetStatusString (status));
+      //THROW_OPENNI_EXCEPTION ("reading the value for pixels with no depth estimation failed. Reason: %s", xnGetStatusString (status));
+	  no_sample_value_ = 0;
 
-    // baseline from cm -> meters
+	// baseline from cm -> meters
     baseline_ = static_cast<float> (baseline * 0.01);
 
     //focal length from mm -> pixels (valid for 1280x1024)
     depth_focal_length_SXGA_ = static_cast<float> (static_cast<XnDouble> (depth_focal_length_SXGA) / pixel_size);
 
-    depth_thread_ = boost::thread (&OpenNIDevice::DepthDataThreadFunction, this);
+	depth_thread_ = boost::thread (&OpenNIDevice::DepthDataThreadFunction, this);
   }
 
   if (hasImageStream ())

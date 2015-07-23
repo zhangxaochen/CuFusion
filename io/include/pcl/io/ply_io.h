@@ -16,7 +16,7 @@
  *     copyright notice, this list of conditions and the following
  *     disclaimer in the documentation and/or other materials provided
  *     with the distribution.
- *   * Neither the name of Willow Garage, Inc. nor the names of its
+ *   * Neither the name of the copyright holder(s) nor the names of its
  *     contributors may be used to endorse or promote products derived
  *     from this software without specific prior written permission.
  *
@@ -33,7 +33,7 @@
  *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  *  POSSIBILITY OF SUCH DAMAGE.
  *
- * $Id: ply_io.h 7137 2012-09-12 22:19:39Z koller $
+ * $Id: ply_io.h 8687 2013-02-13 09:41:48Z nizar $
  *
  */
 
@@ -287,6 +287,13 @@ namespace pcl
       inline void
       vertexFloatPropertyCallback (pcl::io::ply::float32 value);
 
+      /** Callback function for an anonymous vertex uint property.
+        * Writes down a uint value in cloud data.
+        * param[in] value uint value parsed
+        */      
+      inline void
+      vertexUnsignedIntPropertyCallback (pcl::io::ply::uint32 value);
+
       /** Callback function for vertex RGB color.
         * This callback is in charge of packing red green and blue in a single int
         * before writing it down in cloud data.
@@ -302,6 +309,13 @@ namespace pcl
         */
       inline void
       vertexIntensityCallback (pcl::io::ply::uint8 intensity);
+
+      /** Callback function for vertex alpha.
+        * extracts RGB value, append alpha and put it back
+        * param[in] alpha
+        */
+      inline void
+      vertexAlphaCallback (pcl::io::ply::uint8 alpha);
       
       /** Callback function for origin x component.
         * param[in] value origin x value
@@ -394,6 +408,22 @@ namespace pcl
         */
       void
       appendFloatProperty (const std::string& name, const size_t& count = 1);
+
+      /** Amend float property from cloud fields identified by \a old_name renaming 
+        * it \a new_name.
+        * param[in] old_name property old name
+        * param[in] new_name property new name
+        */
+      void
+      amendProperty (const std::string& old_name, const std::string& new_name, uint8_t datatype = 0);
+
+      /** Append an unsigned int property to the cloud fields.
+        * param[in] name property name
+        * param[in] count property count: 1 for scalar properties and higher for a 
+        * list property.
+        */
+      void
+      appendUnsignedIntProperty (const std::string& name, const size_t& count = 1);
 
       /** Callback function for the begin of vertex line */
       void
@@ -778,6 +808,14 @@ namespace pcl
       */
     PCL_EXPORTS int
     savePLYFile (const std::string &file_name, const pcl::PolygonMesh &mesh, unsigned precision = 5);
+    
+    /** \brief Saves a PolygonMesh in binary PLY format.
+      * \param[in] file_name the name of the file to write to disk
+      * \param[in] mesh the polygonal mesh to save
+      * \ingroup io
+      */
+    PCL_EXPORTS int
+    savePLYFileBinary (const std::string &file_name, const pcl::PolygonMesh &mesh);
   }
 }
 

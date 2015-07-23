@@ -110,7 +110,10 @@ namespace pcl
       void
       generateDepthImage(Depth& depth) const;
       
-      /** \brief Returns raycasterd vertex map. */ 
+      void
+      generateNormalImage(View& view) const;
+
+	  /** \brief Returns raycasterd vertex map. */ 
       MapArr
       getVertexMap() const;
 

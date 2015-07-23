@@ -86,7 +86,8 @@ main (int argc, char** argv)
   
   std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> clouds;
   std::vector<Eigen::Vector3f> transforms;
-  
+
+  /*
   //Get world as a vector of cubes 
   wm.getWorldAsCubes (pcl::device::VOLUME_X, clouds, transforms, 0.025); // 2.5% overlapp (12 cells with a 512-wide cube)
 
@@ -104,6 +105,24 @@ main (int argc, char** argv)
   //~ std::vector< boost::shared_ptr<pcl::PolygonMesh> > meshes;
 
   m_cubes.getMeshesFromTSDFVector (clouds, transforms);
+  */
+
+  //Creating the standalone marching cubes instance
+  float volume_size = pcl::device::VOLUME_SIZE;
+  pcl::console::parse_argument (argc, argv, "--volume_size", volume_size);
+  pcl::console::parse_argument (argc, argv, "-vs", volume_size);
+
+  PCL_WARN("Processing world with volume size set to %.2f meters\n", volume_size);
+
+  pcl::gpu::StandaloneMarchingCubes<pcl::PointXYZI> m_cubes(pcl::device::VOLUME_X,pcl::device::VOLUME_Y,pcl::device::VOLUME_Z,volume_size);
+
+  //~ //Creating the output
+  //~ boost::shared_ptr<pcl::PolygonMesh> mesh_ptr_;
+  //~ std::vector< boost::shared_ptr<pcl::PolygonMesh> > meshes;
+  
+  //Get world as a vector of cubes 
+  //wm.getWorldAsCubes (pcl::device::VOLUME_X, clouds, transforms, 0.025); // 2.5% overlapp (12 cells with a 512-wide cube)
+  wm.getWorldAsCubes (pcl::device::VOLUME_X, clouds, transforms, 0.025, m_cubes);
 
  PCL_INFO( "Done!\n");
   return (0);

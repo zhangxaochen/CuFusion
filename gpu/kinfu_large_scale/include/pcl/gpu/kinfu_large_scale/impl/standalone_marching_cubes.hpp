@@ -245,6 +245,74 @@ pcl::gpu::StandaloneMarchingCubes<PointT>::convertTrianglesToMesh (const pcl::gp
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+template <class T>
+inline void hash_combine(std::size_t & seed, const T & v)
+{
+  std::hash<T> hasher;
+  seed ^= hasher(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+}
+
+struct PointXYZHasher {
+    size_t operator() (const pcl::PointXYZ &v) const {
+		size_t h = std::hash<float>()(v.x);
+		hash_combine(h,v.y);
+		hash_combine(h,v.z);
+        return h;
+    }
+};
+
+struct PointXYZEqualer {
+    bool operator() (const pcl::PointXYZ& t1, const pcl::PointXYZ& t2) const {
+		return ( t1.x == t2.x && t1.y == t2.y && t1.z == t2.z );
+    }
+};
+template <typename PointT> typename pcl::gpu::StandaloneMarchingCubes<PointT>::MeshPtr
+pcl::gpu::StandaloneMarchingCubes<PointT>::convertTrianglesToMeshCompact (const pcl::gpu::DeviceArray<pcl::PointXYZ>& triangles)
+{ 
+  if (triangles.empty () )
+  {
+    return MeshPtr ();
+  }
+
+  pcl::PointCloud<pcl::PointXYZ> cloud;
+  cloud.width  = (int)triangles.size ();
+  cloud.height = 1;
+  triangles.download (cloud.points);
+
+  boost::shared_ptr<pcl::PolygonMesh> mesh_ptr ( new pcl::PolygonMesh () ); 
+
+  std::unordered_map< pcl::PointXYZ, int, PointXYZHasher, PointXYZEqualer > map;
+  pcl::PointCloud<pcl::PointXYZ> compactcloud;
+  for ( size_t i = 0; i < cloud.size(); i++ ) {
+	  if ( map.find( cloud.points[ i ] ) == map.end() ) {
+		  map.insert( std::pair< pcl::PointXYZ, int >( cloud.points[ i ], compactcloud.size() ) );
+		  compactcloud.push_back( cloud.points[ i ] );
+	  }
+  }
+
+  PCL_INFO( "[convertTrianglesToMeshCompact] Reduce mesh vertices from %d to %d\n", cloud.size(), compactcloud.size() );
+  
+  pcl::toROSMsg (compactcloud, mesh_ptr->cloud);
+      
+  //mesh_ptr->polygons.resize (triangles.size () / 3);
+  for (size_t i = 0; i < triangles.size () / 3; ++i)
+  {
+    pcl::Vertices v;
+    //v.vertices.push_back (i*3+0);
+    //v.vertices.push_back (i*3+2);
+    //v.vertices.push_back (i*3+1);              
+	v.vertices.push_back( map.find( cloud.points[ i*3+0 ] )->second );
+	v.vertices.push_back( map.find( cloud.points[ i*3+2 ] )->second );
+	v.vertices.push_back( map.find( cloud.points[ i*3+1 ] )->second );
+    //mesh_ptr->polygons[i] = v;
+	if ( v.vertices[ 0 ] != v.vertices[ 1 ] && v.vertices[ 1 ] != v.vertices[ 2 ] && v.vertices[ 2 ] != v.vertices[ 0 ] ) {
+		mesh_ptr->polygons.push_back( v );
+	}
+  }    
+  return (mesh_ptr);
+}
+
+///////////////////////////////////////////////////////////////////////////////
 
 template <typename PointT> typename pcl::gpu::StandaloneMarchingCubes<PointT>::MeshPtr
 pcl::gpu::StandaloneMarchingCubes<PointT>::runMarchingCubes ()
@@ -260,7 +328,8 @@ pcl::gpu::StandaloneMarchingCubes<PointT>::runMarchingCubes ()
   pcl::gpu::DeviceArray<pcl::PointXYZ> triangles_device = marching_cubes_->run (*tsdf_volume_const_, triangles_buffer_device_); 
 
   //Creating mesh
-  boost::shared_ptr<pcl::PolygonMesh> mesh_ptr_ = convertTrianglesToMesh (triangles_device);
+  //boost::shared_ptr<pcl::PolygonMesh> mesh_ptr_ = convertTrianglesToMesh (triangles_device);
+  boost::shared_ptr<pcl::PolygonMesh> mesh_ptr_ = convertTrianglesToMeshCompact (triangles_device);
 
   if(mesh_ptr_ != 0)
   {

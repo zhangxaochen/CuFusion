@@ -75,6 +75,11 @@ namespace openni_wrapper
     virtual bool isImageResizeSupported (unsigned input_width, unsigned input_height, unsigned output_width, unsigned output_height) const throw ();
 
     bool trigger ();
+
+	bool seekDepthFrame( int frame );
+	bool seekImageFrame( int frame );
+	bool seekIRFrame( int frame );
+
     bool isStreaming () const throw ();
   protected:
     virtual boost::shared_ptr<Image> getCurrentImage (boost::shared_ptr<xn::ImageMetaData> image_meta_data) const throw ();

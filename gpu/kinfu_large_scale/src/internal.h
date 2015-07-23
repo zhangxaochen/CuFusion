@@ -56,6 +56,7 @@ namespace pcl
     typedef float4 PointType;
 
     //Tsdf fixed point divisor (if old format is enabled)
+    //const int DIVISOR = 2047;     // SHRT_MAX;
     const int DIVISOR = 32767;     // SHRT_MAX;
     
     //RGB images resolution
@@ -64,6 +65,7 @@ namespace pcl
 
 	//should be multiple of 32
     enum { VOLUME_X = 512, VOLUME_Y = 512, VOLUME_Z = 512 };
+	//enum { VOLUME_X = 512, VOLUME_Y = 512, VOLUME_Z = 1024 };
     //enum { VOLUME_X = 392, VOLUME_Y = 392, VOLUME_Z = 392 };
 
 	
@@ -79,14 +81,15 @@ namespace pcl
       */ 
     struct Intr
     {
-      float fx, fy, cx, cy;
-      Intr () {}
-      Intr (float fx_, float fy_, float cx_, float cy_) : fx(fx_), fy(fy_), cx(cx_), cy(cy_) {}
+      float fx, fy, cx, cy, trunc_dist;
+      Intr () {};
+      Intr (float fx_, float fy_, float cx_, float cy_, float trunc_dist_)
+        : fx(fx_), fy(fy_), cx(cx_), cy(cy_), trunc_dist(trunc_dist_) {};
 
       Intr operator()(int level_index) const
       { 
         int div = 1 << level_index; 
-        return (Intr (fx / div, fy / div, cx / div, cy / div));
+        return (Intr (fx / div, fy / div, cx / div, cy / div, trunc_dist));
       }
     };
 
@@ -217,7 +220,19 @@ namespace pcl
     estimateCombined (const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr, 
                       const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, 
                       DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host);
-   
+
+	void 
+    estimateCombinedPrevSpace (const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr, 
+                      const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, 
+                      DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host);
+
+    void 
+    estimateCombinedEx (const Mat33& Rcurr, const Mat33& Rcurr_t, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr, 
+                      const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, 
+                      DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host,
+					  DeviceArray<float>& gbuf_slac_triangle, DeviceArray<float>& gbuf_slac_block,
+					  float* matrixSLAC_A_host, float* matrixSLAC_block_host);
+
     /** \brief Computation Ax=b for ICP iteration
       * \param[in] Rcurr Rotation of current camera pose guess 
       * \param[in] tcurr translation of current camera pose guess 
@@ -350,7 +365,10 @@ namespace pcl
     void
     generateDepth (const Mat33& R_inv, const float3& t, const MapArr& vmap, DepthMap& dst);
 
-     /** \brief Paints 3D view with color map
+    void
+    generateNormal (const Mat33& R_inv, const float3& t, const MapArr& vmap, const MapArr& nmap, PtrStepSz<uchar3> dst);
+
+	/** \brief Paints 3D view with color map
       * \param[in] colors rgb color frame from OpenNI   
       * \param[out] dst output 3D view
       * \param[in] colors_wight weight for colors   
