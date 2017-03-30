@@ -51,16 +51,21 @@
 #include <Eigen/Eigenvalues>
 #include <opencv2/core/eigen.hpp>
 
-using namespace cv;
+//using namespace cv;
 
 #include <limits>
+
+//zc: @2017-3-22 17:45:39
+#include <pcl/console/time.h> //zc: tictoc
+pcl::console::TicToc tt0, tt1, tt2, tt3; //一些备用计时器
+static int callCnt = 0;
 
 //////////////////////////////
 // RGBDOdometry part
 //////////////////////////////
 
 inline static
-	void computeC_RigidBodyMotion( double* C, double dIdx, double dIdy, const Point3f& p3d, double fx, double fy )
+	void computeC_RigidBodyMotion( double* C, double dIdx, double dIdy, const cv::Point3f& p3d, double fx, double fy )
 {
 	double invz  = 1. / p3d.z,
 		v0 = dIdx * fx * invz,
@@ -76,15 +81,15 @@ inline static
 }
 
 inline static
-	void computeProjectiveMatrix( const Mat& ksi, Mat& Rt )
+	void computeProjectiveMatrix( const cv::Mat& ksi, cv::Mat& Rt )
 {
-	CV_Assert( ksi.size() == Size(1,6) && ksi.type() == CV_64FC1 );
+	CV_Assert( ksi.size() == cv::Size(1,6) && ksi.type() == CV_64FC1 );
 
 	// for infinitesimal transformation
-	Rt = Mat::eye(4, 4, CV_64FC1);
+	Rt = cv::Mat::eye(4, 4, CV_64FC1);
 
-	Mat R = Rt(Rect(0,0,3,3));
-	Mat rvec = ksi.rowRange(0,3);
+	cv::Mat R = Rt(cv::Rect(0,0,3,3));
+	cv::Mat rvec = ksi.rowRange(0,3);
 
 	Rodrigues( rvec, R );
 
@@ -94,7 +99,7 @@ inline static
 }
 
 static
-	void cvtDepth2Cloud( const Mat& depth, Mat& cloud, const Mat& cameraMatrix )
+	void cvtDepth2Cloud( const cv::Mat& depth, cv::Mat& cloud, const cv::Mat& cameraMatrix )
 {
 	//CV_Assert( cameraMatrix.type() == CV_64FC1 );
 	const double inv_fx = 1.f/cameraMatrix.at<double>(0,0);
@@ -104,7 +109,7 @@ static
 	cloud.create( depth.size(), CV_32FC3 );
 	for( int y = 0; y < cloud.rows; y++ )
 	{
-		Point3f* cloud_ptr = reinterpret_cast<Point3f*>(cloud.ptr(y));
+		cv::Point3f* cloud_ptr = reinterpret_cast<cv::Point3f*>(cloud.ptr(y));
 		const float* depth_prt = reinterpret_cast<const float*>(depth.ptr(y));
 		for( int x = 0; x < cloud.cols; x++ )
 		{
@@ -134,9 +139,9 @@ static inline
 }
 
 static
-	int computeCorresp( const Mat& K, const Mat& K_inv, const Mat& Rt,
-	const Mat& depth0, const Mat& depth1, const Mat& texturedMask1, float maxDepthDiff,
-	Mat& corresps )
+	int computeCorresp( const cv::Mat& K, const cv::Mat& K_inv, const cv::Mat& Rt,
+	const cv::Mat& depth0, const cv::Mat& depth1, const cv::Mat& texturedMask1, float maxDepthDiff,
+	cv::Mat& corresps )
 {
 	CV_Assert( K.type() == CV_64FC1 );
 	CV_Assert( K_inv.type() == CV_64FC1 );
@@ -144,18 +149,18 @@ static
 
 	corresps.create( depth1.size(), CV_32SC1 );
 
-	Mat R = Rt(Rect(0,0,3,3)).clone();
+	cv::Mat R = Rt(cv::Rect(0,0,3,3)).clone();
 
-	Mat KRK_inv = K * R * K_inv;
+	cv::Mat KRK_inv = K * R * K_inv;
 	const double * KRK_inv_ptr = reinterpret_cast<const double *>(KRK_inv.ptr());
 
-	Mat Kt = Rt(Rect(3,0,1,3)).clone();
+	cv::Mat Kt = Rt(cv::Rect(3,0,1,3)).clone();
 	Kt = K * Kt;
 	const double * Kt_ptr = reinterpret_cast<const double *>(Kt.ptr());
 
-	Rect r(0, 0, depth1.cols, depth1.rows);
+	cv::Rect r(0, 0, depth1.cols, depth1.rows);
 
-	corresps = Scalar(-1);
+	corresps = cv::Scalar(-1);
 	int correspCount = 0;
 	for( int v1 = 0; v1 < depth1.rows; v1++ )
 	{
@@ -168,7 +173,7 @@ static
 				int u0 = cvRound((d1 * (KRK_inv_ptr[0] * u1 + KRK_inv_ptr[1] * v1 + KRK_inv_ptr[2]) + Kt_ptr[0]) / transformed_d1);
 				int v0 = cvRound((d1 * (KRK_inv_ptr[3] * u1 + KRK_inv_ptr[4] * v1 + KRK_inv_ptr[5]) + Kt_ptr[1]) / transformed_d1);
 
-				if( r.contains(Point(u0,v0)) )
+				if( r.contains(cv::Point(u0,v0)) )
 				{
 					float d0 = depth0.at<float>(v0,u0);
 					if( !cvIsNaN(d0) && std::abs(transformed_d1 - d0) <= maxDepthDiff )
@@ -198,8 +203,8 @@ static
 }
 
 static inline
-	void preprocessDepth( Mat depth0, Mat depth1,
-	const Mat& validMask0, const Mat& validMask1,
+	void preprocessDepth( cv::Mat depth0, cv::Mat depth1,
+	const cv::Mat& validMask0, const cv::Mat& validMask1,
 	float minDepth, float maxDepth )
 {
 	CV_DbgAssert( depth0.size() == depth1.size() );
@@ -220,14 +225,14 @@ static inline
 }
 
 static
-	void buildPyramids( const Mat& image0, const Mat& image1,
-	const Mat& depth0, const Mat& depth1,
-	const Mat& cameraMatrix, int sobelSize, double sobelScale,
+	void buildPyramids( const cv::Mat& image0, const cv::Mat& image1,
+	const cv::Mat& depth0, const cv::Mat& depth1,
+	const cv::Mat& cameraMatrix, int sobelSize, double sobelScale,
 	const vector<float>& minGradMagnitudes,
-	vector<Mat>& pyramidImage0, vector<Mat>& pyramidDepth0,
-	vector<Mat>& pyramidImage1, vector<Mat>& pyramidDepth1,
-	vector<Mat>& pyramid_dI_dx1, vector<Mat>& pyramid_dI_dy1,
-	vector<Mat>& pyramidTexturedMask1, vector<Mat>& pyramidCameraMatrix )
+	vector<cv::Mat>& pyramidImage0, vector<cv::Mat>& pyramidDepth0,
+	vector<cv::Mat>& pyramidImage1, vector<cv::Mat>& pyramidDepth1,
+	vector<cv::Mat>& pyramid_dI_dx1, vector<cv::Mat>& pyramid_dI_dy1,
+	vector<cv::Mat>& pyramidTexturedMask1, vector<cv::Mat>& pyramidCameraMatrix )
 {
 	const int pyramidMaxLevel = (int)minGradMagnitudes.size() - 1;
 
@@ -240,7 +245,7 @@ static
 
 	pyramidCameraMatrix.reserve( pyramidImage1.size() );
 
-	Mat cameraMatrix_dbl;
+	cv::Mat cameraMatrix_dbl;
 	cameraMatrix.convertTo( cameraMatrix_dbl, CV_64FC1 );
 
 	for( size_t i = 0; i < pyramidImage1.size(); i++ )
@@ -248,10 +253,10 @@ static
 		Sobel( pyramidImage1[i], pyramid_dI_dx1[i], CV_16S, 1, 0, sobelSize );
 		Sobel( pyramidImage1[i], pyramid_dI_dy1[i], CV_16S, 0, 1, sobelSize );
 
-		const Mat& dx = pyramid_dI_dx1[i];
-		const Mat& dy = pyramid_dI_dy1[i];
+		const cv::Mat& dx = pyramid_dI_dx1[i];
+		const cv::Mat& dy = pyramid_dI_dy1[i];
 
-		Mat texturedMask( dx.size(), CV_8UC1, Scalar(0) );
+		cv::Mat texturedMask( dx.size(), CV_8UC1, cv::Scalar(0) );
 		const float minScalesGradMagnitude2 = (float)((minGradMagnitudes[i] * minGradMagnitudes[i]) / (sobelScale * sobelScale));
 		for( int y = 0; y < dx.rows; y++ )
 		{
@@ -263,7 +268,7 @@ static
 			}
 		}
 		pyramidTexturedMask1[i] = texturedMask;
-		Mat levelCameraMatrix = i == 0 ? cameraMatrix_dbl : 0.5f * pyramidCameraMatrix[i-1];
+		cv::Mat levelCameraMatrix = i == 0 ? cameraMatrix_dbl : 0.5f * pyramidCameraMatrix[i-1];
 		levelCameraMatrix.at<double>(2,2) = 1.;
 		pyramidCameraMatrix.push_back( levelCameraMatrix );
 	}
@@ -273,10 +278,10 @@ static
 }
 
 static
-	bool solveSystem( const Mat& C, const Mat& dI_dt, double detThreshold, Mat& ksi, Eigen::Matrix<float, 6, 6, Eigen::RowMajor> & AA, Eigen::Matrix<float, 6, 1> & bb )
+	bool solveSystem( const cv::Mat& C, const cv::Mat& dI_dt, double detThreshold, cv::Mat& ksi, Eigen::Matrix<float, 6, 6, Eigen::RowMajor> & AA, Eigen::Matrix<float, 6, 1> & bb )
 {
-	Mat A = C.t() * C;
-	Mat B = -C.t() * dI_dt;
+	cv::Mat A = C.t() * C;
+	cv::Mat B = -C.t() * dI_dt;
 
 	cv2eigen( A, AA );
 	cv2eigen( B, bb );
@@ -286,27 +291,27 @@ static
 	if( fabs (det) < detThreshold || cvIsNaN(det) || cvIsInf(det) )
 		return false;
 
-	cv::solve( A, B, ksi, DECOMP_CHOLESKY );
+	cv::solve( A, B, ksi, cv::DECOMP_CHOLESKY );
 	return true;
 }
 
-typedef void (*ComputeCFuncPtr)( double* C, double dIdx, double dIdy, const Point3f& p3d, double fx, double fy );
+typedef void (*ComputeCFuncPtr)( double* C, double dIdx, double dIdy, const cv::Point3f& p3d, double fx, double fy );
 
 static
 	bool computeKsi( int transformType,
-	const Mat& image0, const Mat&  cloud0,
-	const Mat& image1, const Mat& dI_dx1, const Mat& dI_dy1,
-	const Mat& corresps, int correspsCount,
+	const cv::Mat& image0, const cv::Mat&  cloud0,
+	const cv::Mat& image1, const cv::Mat& dI_dx1, const cv::Mat& dI_dy1,
+	const cv::Mat& corresps, int correspsCount,
 	double fx, double fy, double sobelScale, double determinantThreshold,
-	Mat& ksi,
+	cv::Mat& ksi,
 	Eigen::Matrix<float, 6, 6, Eigen::RowMajor> & AA, Eigen::Matrix<float, 6, 1> & bb )
 {
 	int Cwidth = -1;
 	ComputeCFuncPtr computeCFuncPtr = 0;
 	computeCFuncPtr = computeC_RigidBodyMotion;
 	Cwidth = 6;
-	Mat C( correspsCount, Cwidth, CV_64FC1 );
-	Mat dI_dt( correspsCount, 1, CV_64FC1 );
+	cv::Mat C( correspsCount, Cwidth, CV_64FC1 );
+	cv::Mat dI_dt( correspsCount, 1, CV_64FC1 );
 
 	double sigma = 0;
 	int pointCount = 0;
@@ -345,7 +350,7 @@ static
 				(*computeCFuncPtr)( (double*)C.ptr(pointCount),
 					w * sobelScale * dI_dx1.at<short int>(v1,u1),
 					w * sobelScale * dI_dy1.at<short int>(v1,u1),
-					cloud0.at<Point3f>(v0,u0), fx, fy);
+					cloud0.at<cv::Point3f>(v0,u0), fx, fy);
 
 				dI_dt.at<double>(pointCount) = w * diff;
 				pointCount++;
@@ -353,7 +358,7 @@ static
 		}
 	}
 
-	Mat sln;
+	cv::Mat sln;
 	bool solutionExist = solveSystem( C, dI_dt, determinantThreshold, sln, AA, bb );
 
 	/*
@@ -367,9 +372,9 @@ static
 	if( solutionExist )
 	{
 		ksi.create(6,1,CV_64FC1);
-		ksi = Scalar(0);
+		ksi = cv::Scalar(0);
 
-		Mat subksi;
+		cv::Mat subksi;
 		subksi = ksi;
 		sln.copyTo( subksi );
 	}
@@ -458,7 +463,7 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	// initialize cyclical buffer
 	//cyclical_.initBuffer(tsdf_volume_, color_volume_);
 
-}
+}//KinfuTracker-ctor
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void
@@ -1210,7 +1215,7 @@ bool
 
 	++global_time_;
 	return (true);
-}
+}//operator()
 
 cv::Mat pcl::gpu::KinfuTracker::bdrodometry_interpmax( cv::Mat depth )
 {
@@ -1246,6 +1251,7 @@ cv::Mat pcl::gpu::KinfuTracker::bdrodometry_getOcclusionBoundary( cv::Mat depth,
 	mask.setTo( 0 );
 
 	cv::Mat depth_max = bdrodometry_interpmax( depth );
+    cv::imshow("depth_max", depth_max); //zc
 
 	int nbr[ 8 ][ 2 ] = {
 		{ -1, -1 },
@@ -1277,6 +1283,9 @@ cv::Mat pcl::gpu::KinfuTracker::bdrodometry_getOcclusionBoundary( cv::Mat depth,
 bool
 	pcl::gpu::KinfuTracker::bdrodometry(const DepthMap& depth_raw, const View * pcolor)
 {
+    printf("callCnt:= %d\n", callCnt);
+    callCnt++;
+
 	//ScopeTime time( "Kinfu Tracker All" );
 	device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
 
@@ -1292,7 +1301,7 @@ bool
 	pcl::PointCloud< pcl::PointNormal >::Ptr maskedpts( new pcl::PointCloud< pcl::PointNormal >() );
 
 	{
-		ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all");
+		//ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all"); //release 下 ~12ms
 		device::bilateralFilter (depth_raw, depths_curr_[0]);
 
 		int c;
@@ -1302,6 +1311,9 @@ bool
 		std::sprintf( filename, "image/bf/%06d.png", global_time_ + 1 );
 		cv::Mat m( 480, 640, CV_16UC1, (void *)&data[0] );
 		//cv::imwrite( filename, m );
+        cv::Mat m8u; //zc
+        m.convertTo(m8u, CV_8UC1, UCHAR_MAX/3e3);
+		cv::imshow( "m8u", m8u );
 		
 		m.convertTo( md, CV_32FC1, 1.0 / 1000.0, 0.0 );
 		md_mask = bdrodometry_getOcclusionBoundary( md );
@@ -1626,6 +1638,9 @@ bool
 				int ll = 0;
 				AA_.setZero();
 				bb_.setZero();
+                //printf("level_index, iter, transformed->size(): %d, %d, %d\n", level_index, iter, transformed->size());
+                //zc: transformed 点云并不缩放, 而且不慢; 见: http://codepad.org/AkP2y8z7
+                tt0.tic();
 				for ( int l = 0; l < transformed->size(); l++ ) {
 					vmaptree.nearestKSearch( transformed->points[ l ], 1, pointIdxNKNSearch, pointNKNSquaredDistance );
 					/*
@@ -1665,6 +1680,9 @@ bool
 						*/
 					}
 				}
+                //printf("bdr-vmaptree.nearestKSearch: "); tt0.toc_print();
+                //zc: 这里nearestKSearch比我们程序中快 8倍, 没懂; 输出见: http://codepad.org/AkP2y8z7
+
 				//cout << vmappcd->size() << " : " << transformed->size() << " --> " << ll << endl;
 				//cout << rr << endl;
 
@@ -1806,7 +1824,7 @@ bool
 
 	++global_time_;
 	return (true);
-}
+}//bdrodometry
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool
@@ -2130,7 +2148,7 @@ bool
 
 	++global_time_;
 	return (true);
-}
+}//kdtreeodometry
 
 bool pcl::gpu::KinfuTracker::slac(const DepthMap& depth_rawraw, const DepthMap& depth_raw, const View * pcolor)
 {
@@ -2525,7 +2543,7 @@ bool pcl::gpu::KinfuTracker::slac(const DepthMap& depth_rawraw, const DepthMap& 
 
 	++global_time_;
 	return (true);
-}
+}//slac
 
 void pcl::gpu::KinfuTracker::OptimizeSLAC()
 {
@@ -2914,7 +2932,7 @@ void pcl::gpu::KinfuTracker::OptimizeSLAC()
 
 		cout << "boosted " << fragments.size() << endl;
 	}
-}
+}//OptimizeSLAC
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2996,7 +3014,7 @@ bool
 	const int sobelSize = 3;
 	const double sobelScale = 1./8;
 
-	Mat depth0 = _depth0.clone(),
+	cv::Mat depth0 = _depth0.clone(),
 		depth1 = _depth1.clone();
 
 	// check RGB-D input data
@@ -3013,7 +3031,7 @@ bool
 	CV_Assert( validMask1.empty() || (validMask1.type() == CV_8UC1 && validMask1.size() == image0.size()) );
 
 	// check camera params
-	CV_Assert( cameraMatrix.type() == CV_32FC1 && cameraMatrix.size() == Size(3,3) );
+	CV_Assert( cameraMatrix.type() == CV_32FC1 && cameraMatrix.size() == cv::Size(3,3) );
 
 	// other checks
 	CV_Assert( iterCounts.empty() || minGradientMagnitudes.empty() ||
@@ -3026,15 +3044,15 @@ bool
 
 	preprocessDepth( depth0, depth1, validMask0, validMask1, minDepth, maxDepth );
 
-	vector<Mat> pyramidImage0, pyramidDepth0,
+	vector<cv::Mat> pyramidImage0, pyramidDepth0,
 		pyramidImage1, pyramidDepth1, pyramid_dI_dx1, pyramid_dI_dy1, pyramidTexturedMask1,
 		pyramidCameraMatrix;
 	buildPyramids( image0, image1, depth0, depth1, cameraMatrix, sobelSize, sobelScale, *minGradientMagnitudesPtr,
 		pyramidImage0, pyramidDepth0, pyramidImage1, pyramidDepth1,
 		pyramid_dI_dx1, pyramid_dI_dy1, pyramidTexturedMask1, pyramidCameraMatrix );
 
-	Mat resultRt = Mat::eye(4,4,CV_64FC1);
-	Mat currRt, ksi;
+	cv::Mat resultRt = cv::Mat::eye(4,4,CV_64FC1);
+	cv::Mat currRt, ksi;
 
 	Matrix3frm cam_rot_global_prev = rmats_[global_time_ - 1];            // [Ri|ti] - pos of camera, i.e.
 	// Previous global translation
@@ -3144,17 +3162,17 @@ bool
 			MapArr& nmap_temp = nmap_g_prev;
 			device::tranformMaps (vmap_temp, nmap_temp, rotation_id, cube_origin, vmap_g_prev, nmap_g_prev); 
 
-			const Mat& levelCameraMatrix = pyramidCameraMatrix[ level_index ];
+			const cv::Mat& levelCameraMatrix = pyramidCameraMatrix[ level_index ];
 
-			const Mat& levelImage0 = pyramidImage0[ level_index ];
-			const Mat& levelDepth0 = pyramidDepth0[ level_index ];
-			Mat levelCloud0;
+			const cv::Mat& levelImage0 = pyramidImage0[ level_index ];
+			const cv::Mat& levelDepth0 = pyramidDepth0[ level_index ];
+			cv::Mat levelCloud0;
 			cvtDepth2Cloud( pyramidDepth0[ level_index ], levelCloud0, levelCameraMatrix );
 
-			const Mat& levelImage1 = pyramidImage1[ level_index ];
-			const Mat& levelDepth1 = pyramidDepth1[ level_index ];
-			const Mat& level_dI_dx1 = pyramid_dI_dx1[ level_index ];
-			const Mat& level_dI_dy1 = pyramid_dI_dy1[ level_index ];
+			const cv::Mat& levelImage1 = pyramidImage1[ level_index ];
+			const cv::Mat& levelDepth1 = pyramidDepth1[ level_index ];
+			const cv::Mat& level_dI_dx1 = pyramid_dI_dx1[ level_index ];
+			const cv::Mat& level_dI_dy1 = pyramid_dI_dy1[ level_index ];
 
 			CV_Assert( level_dI_dx1.type() == CV_16S );
 			CV_Assert( level_dI_dy1.type() == CV_16S );
@@ -3163,14 +3181,14 @@ bool
 			const double fy = levelCameraMatrix.at<double>(1,1);
 			const double determinantThreshold = 1e-6;
 
-			Mat corresps( levelImage0.size(), levelImage0.type() );
+			cv::Mat corresps( levelImage0.size(), levelImage0.type() );
 
 			for (int iter = 0; iter < iter_num; ++iter)
 			{
 				// rgbd odometry part
 				bool odo_good = true;
 
-				int correspsCount = computeCorresp( levelCameraMatrix, levelCameraMatrix.inv(), resultRt.inv(DECOMP_SVD),
+				int correspsCount = computeCorresp( levelCameraMatrix, levelCameraMatrix.inv(), resultRt.inv(cv::DECOMP_SVD),
 					levelDepth0, levelDepth1, pyramidTexturedMask1[ level_index ], maxDepthDiff,
 					corresps );
 				if( correspsCount == 0 ) {
@@ -3342,7 +3360,7 @@ bool
 
 	++global_time_;
 	return (true);
-}
+}//operator()
 
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3424,7 +3442,7 @@ bool
 	const int sobelSize = 3;
 	const double sobelScale = 1./8;
 
-	Mat depth0 = _depth0.clone(),
+	cv::Mat depth0 = _depth0.clone(),
 		depth1 = _depth1.clone();
 
 	// check RGB-D input data
@@ -3441,7 +3459,7 @@ bool
 	CV_Assert( validMask1.empty() || (validMask1.type() == CV_8UC1 && validMask1.size() == image0.size()) );
 
 	// check camera params
-	CV_Assert( cameraMatrix.type() == CV_32FC1 && cameraMatrix.size() == Size(3,3) );
+	CV_Assert( cameraMatrix.type() == CV_32FC1 && cameraMatrix.size() == cv::Size(3,3) );
 
 	// other checks
 	CV_Assert( iterCounts.empty() || minGradientMagnitudes.empty() ||
@@ -3471,15 +3489,15 @@ bool
 
 	preprocessDepth( depth0, depth1, validMask0, validMask1, minDepth, maxDepth );
 
-	vector<Mat> pyramidImage0, pyramidDepth0,
+	vector<cv::Mat> pyramidImage0, pyramidDepth0,
 		pyramidImage1, pyramidDepth1, pyramid_dI_dx1, pyramid_dI_dy1, pyramidTexturedMask1,
 		pyramidCameraMatrix;
 	buildPyramids( image0, image1, depth0, depth1, cameraMatrix, sobelSize, sobelScale, *minGradientMagnitudesPtr,
 		pyramidImage0, pyramidDepth0, pyramidImage1, pyramidDepth1,
 		pyramid_dI_dx1, pyramid_dI_dy1, pyramidTexturedMask1, pyramidCameraMatrix );
 
-	Mat resultRt = Mat::eye(4,4,CV_64FC1);
-	Mat currRt, ksi;
+	cv::Mat resultRt = cv::Mat::eye(4,4,CV_64FC1);
+	cv::Mat currRt, ksi;
 
 	Matrix3frm cam_rot_global_prev = rmats_[global_time_ - 1];            // [Ri|ti] - pos of camera, i.e.
 	// Previous global translation
@@ -3575,17 +3593,17 @@ bool
 			cube_origin.y = -cube_origin.y;
 			cube_origin.z = -cube_origin.z;
 
-			const Mat& levelCameraMatrix = pyramidCameraMatrix[ level_index ];
+			const cv::Mat& levelCameraMatrix = pyramidCameraMatrix[ level_index ];
 
-			const Mat& levelImage0 = pyramidImage0[ level_index ];
-			const Mat& levelDepth0 = pyramidDepth0[ level_index ];
-			Mat levelCloud0;
+			const cv::Mat& levelImage0 = pyramidImage0[ level_index ];
+			const cv::Mat& levelDepth0 = pyramidDepth0[ level_index ];
+			cv::Mat levelCloud0;
 			cvtDepth2Cloud( pyramidDepth0[ level_index ], levelCloud0, levelCameraMatrix );
 
-			const Mat& levelImage1 = pyramidImage1[ level_index ];
-			const Mat& levelDepth1 = pyramidDepth1[ level_index ];
-			const Mat& level_dI_dx1 = pyramid_dI_dx1[ level_index ];
-			const Mat& level_dI_dy1 = pyramid_dI_dy1[ level_index ];
+			const cv::Mat& levelImage1 = pyramidImage1[ level_index ];
+			const cv::Mat& levelDepth1 = pyramidDepth1[ level_index ];
+			const cv::Mat& level_dI_dx1 = pyramid_dI_dx1[ level_index ];
+			const cv::Mat& level_dI_dy1 = pyramid_dI_dy1[ level_index ];
 
 			CV_Assert( level_dI_dx1.type() == CV_16S );
 			CV_Assert( level_dI_dy1.type() == CV_16S );
@@ -3594,12 +3612,12 @@ bool
 			const double fy = levelCameraMatrix.at<double>(1,1);
 			const double determinantThreshold = 1e-6;
 
-			Mat corresps( levelImage0.size(), levelImage0.type() );
+			cv::Mat corresps( levelImage0.size(), levelImage0.type() );
 
 			for( int iter = 0; iter < (*iterCountsPtr)[ level_index ]; iter ++ ) {
 				bool odo_good = true;
 
-				int correspsCount = computeCorresp( levelCameraMatrix, levelCameraMatrix.inv(), resultRt.inv(DECOMP_SVD),
+				int correspsCount = computeCorresp( levelCameraMatrix, levelCameraMatrix.inv(), resultRt.inv(cv::DECOMP_SVD),
 					levelDepth0, levelDepth1, pyramidTexturedMask1[ level_index ], maxDepthDiff,
 					corresps );
 				if( correspsCount == 0 ) {
@@ -3738,7 +3756,7 @@ bool
 
 	++global_time_;
 	return (true);
-}
+}//rgbdodometry
 
 bool
 	pcl::gpu::KinfuTracker::intersect( int bounds[ 6 ] )

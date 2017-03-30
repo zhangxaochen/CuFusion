@@ -85,7 +85,7 @@ pcl::gpu::TsdfVolume::setTsdfTruncDist (float distance)
   float cy = size_(1) / resolution_(1);
   float cz = size_(2) / resolution_(2);
 
-  tranc_dist_ = std::max (distance, 2.1f * std::max (cx, std::max (cy, cz)));  
+  tranc_dist_ = std::max (distance, 1.111f * std::max (cx, std::max (cy, cz)));  
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

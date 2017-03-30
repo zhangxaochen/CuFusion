@@ -981,7 +981,9 @@ struct KinFuLSApp
 		transformation_inverse_ = pose.matrix().inverse();
 
 		kinfu_->setInitialCameraPose (pose);
-		kinfu_->volume().setTsdfTruncDist (0.030f / 3.0f * volume_size(0)/*meters*/);
+		//kinfu_->volume().setTsdfTruncDist (0.030f / 3.0f * volume_size(0)/*meters*/);
+        //zc: ¶¨ËÀ 3cm    @2017-3-17 00:25:42
+		kinfu_->volume().setTsdfTruncDist (0.030f /*meters*/);
 		kinfu_->setIcpCorespFilteringParams (0.1f/*meters*/, sin ( pcl::deg2rad(20.f) ));
 		kinfu_->setDepthTruncationForICP(2.5f/*meters*/);
 		//kinfu_->setDepthTruncationForIntegrate(2.5f/*meters*/);
@@ -2838,6 +2840,11 @@ int
 	pc::parse_argument ( argc, argv, "--shift_z", shift_z );
 
 	KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start, trunc_dist, shift_x, shift_y, shift_z);
+
+    //zc:   @2017-3-23 15:45:57
+    double tsdf_trunc_dist = 0.03;
+    pc::parse_argument(argc, argv, "-trunc_dist", tsdf_trunc_dist);
+    app.kinfu_->volume().setTsdfTruncDist(tsdf_trunc_dist);
 
 	if ( pc::parse_argument( argc, argv, "--camera", camera_file ) > 0 ) {
 		app.toggleCameraParam( camera_file );

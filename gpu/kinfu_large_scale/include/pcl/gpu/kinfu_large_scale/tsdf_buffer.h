@@ -81,7 +81,11 @@ namespace pcl
             origin_GRID_global.x = 0.f; origin_GRID_global.y = 0.f; origin_GRID_global.z = 0.f;
             origin_metric.x = 0.f; origin_metric.y = 0.f; origin_metric.z = 0.f;
             volume_size.x = 3.f; volume_size.y = 3.f; volume_size.z = 3.f;
-            voxels_size.x = 512; voxels_size.y = 512; voxels_size.z = 512;
+            //voxels_size.x = 512; voxels_size.y = 512; voxels_size.z = 512;
+            //zc: 限制在 1.5m--256分辨率  @2017-3-17 00:35:45
+            //不管用, 不是这里; 是 VOLUME_X
+            const int VRES = 256;
+            voxels_size.x = VRES; voxels_size.y = VRES; voxels_size.z = VRES;
           }          
 
         };

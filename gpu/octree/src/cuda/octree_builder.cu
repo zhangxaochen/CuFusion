@@ -46,6 +46,8 @@
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
 #include <thrust/reduce.h>
+//zc: qianyi-zhou 这个编不过, 手动小改动 //2016-11-19 15:08:08
+#include <thrust/device_ptr.h>
 
 using namespace pcl::gpu;
 using namespace thrust;
