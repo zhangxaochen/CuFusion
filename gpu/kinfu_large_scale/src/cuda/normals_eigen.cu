@@ -127,7 +127,52 @@ namespace pcl
       nmap.ptr (v + rows)[u] = n.y;
       nmap.ptr (v + 2 * rows)[u] = n.z;
     }
-  }
+
+    __global__ void
+    computeNormalsContourcueKernel(const PtrStepSz<ushort> src,const PtrStepSz<float> grandient_x,const PtrStepSz<float> grandient_y, PtrStep<float> dst,float fx, float fy, float cx, float cy)
+    {
+        int x = blockIdx.x * blockDim.x + threadIdx.x;
+        int y = blockIdx.y * blockDim.y + threadIdx.y;
+        int row=src.rows,col=src.cols;
+        if (x<col && y<row)
+        {
+            float dx=0,dy=0,dz=-1;
+            //ÏÈ¼ÆËãÄæ¾ØÕó
+            float depth = src.ptr(y)[x];
+            float du = grandient_x.ptr(y)[x],dv=grandient_y.ptr(y)[x];
+            float m00 = 1.0/fx*(depth+(x-cx)*du),
+                m01 = 1.0/fx*(x-cx)*dv,
+                m10 = 1.0/fy*(y-cy)*du,
+                m11 = 1.0/fy*(depth+(y-cy)*dv);
+            float det = m00*m11-m01*m10;
+            //printf("%f \n",det);
+            if(abs(det) < 1e-5)
+            {
+                const float qnan = numeric_limits<float>::quiet_NaN();
+                dx = dy = dz = qnan;
+            }
+            else
+            {
+                float m00_inv = m11/det,
+                    m01_inv = -m01/det,
+                    m10_inv = -m10/det,
+                    m11_inv = m00/det;
+                dx = du*m00_inv+dv*m10_inv;
+                dy = du*m01_inv+dv*m11_inv;
+                //normalize
+                float norm=sqrt(dx*dx+dy*dy+dz*dz);
+                dx = dx/norm;
+                dy = dy/norm;
+                dz = dz/norm;
+            }
+            dst.ptr(y)[x]=dx;
+            dst.ptr(y+row)[x]=dy;
+            dst.ptr(y+2*row)[x]=dz;
+            /*printf("%f %f %f \n",dx,dy,dz);*/
+        }
+    }//computeNormalsContourcueKernel
+
+  }//namespace device
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -149,3 +194,15 @@ pcl::device::computeNormalsEigen (const MapArr& vmap, MapArr& nmap)
   cudaSafeCall (cudaDeviceSynchronize ());
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void pcl::device::computeNormalsContourcue(const Intr& intr, const DepthMap& depth,const MapArr& grandient_x, const MapArr& grandient_y, MapArr& nmap)
+{
+    nmap.create(depth.rows()*3,depth.cols());
+    dim3 block (32, 8);
+    dim3 grid (divUp (depth.cols (), block.x), divUp (depth.rows (), block.y));
+
+    float fx=intr.fx,fy=intr.fy,cx=intr.cx,cy=intr.cy;
+    computeNormalsContourcueKernel<<<grid,block>>>(depth, grandient_x, grandient_y, nmap, fx,fy,cx,cy);
+
+    cudaSafeCall ( cudaGetLastError () );
+}

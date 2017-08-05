@@ -329,7 +329,8 @@ pcl::device::raycast (const Intr& intr, const Mat33& Rcurr, const float3& tcurr,
   rc.Rcurr = Rcurr;
   rc.tcurr = tcurr;
 
-  rc.time_step = tranc_dist * 0.8f;
+  //rc.time_step = tranc_dist * 0.8f;
+  rc.time_step = tranc_dist * 0.1f; //zc:
 
   rc.volume_size = volume_size;
 

@@ -44,6 +44,14 @@
 
 #include <pcl/gpu/kinfu_large_scale/tsdf_buffer.h>
 
+namespace zc{
+//     //zc
+//     //typedef unsigned char uchar;
+//     typedef unsigned char _uchar;
+//     typedef DeviceArray2D<_uchar> MaskMap;
+
+}
+
 namespace pcl
 {
   namespace device
@@ -54,6 +62,10 @@ namespace pcl
     typedef DeviceArray2D<float> MapArr;
     typedef DeviceArray2D<ushort> DepthMap;
     typedef float4 PointType;
+    //zc
+    //typedef unsigned char uchar;
+    typedef unsigned char _uchar;
+    typedef DeviceArray2D<_uchar> MaskMap;
 
     //Tsdf fixed point divisor (if old format is enabled)
     //const int DIVISOR = 2047;     // SHRT_MAX;
@@ -151,6 +163,14 @@ namespace pcl
     void 
     computeNormalsEigen (const MapArr& vmap, MapArr& nmap);
 
+	    /** \brief compute nmap, bdr 方案
+      * \param[in] depth map, cv16u
+      * \param[in] sobel grandient x of depth map
+      * \param[in] sobel grandient y of depth map
+      * \param[out] computed normal map
+      */
+    void computeNormalsContourcue(const Intr& intr, const DepthMap& depth, const MapArr& grandient_x, const MapArr& grandient_y, MapArr& nmap);
+
     /** \brief Performs affine tranform of vertex and normal maps
       * \param[in] vmap_src source vertex map
       * \param[in] nmap_src source vertex map
@@ -225,6 +245,11 @@ namespace pcl
                       const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, 
                       DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host);
 
+    void 
+    estimateCombined_nmap (const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr, 
+                      const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, 
+                      DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host);
+
 	void 
     estimateCombinedPrevSpace (const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr, 
                       const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres, 
@@ -268,6 +293,14 @@ namespace pcl
     PCL_EXPORTS void
     initVolume(PtrStep<short2> array);
 
+    //zc: pcTSDF 的 flag 初始化
+    PCL_EXPORTS void
+    initFlagVolume(PtrStep<bool> volume);
+
+    PCL_EXPORTS void
+    initVrayPrevVolume(PtrStep<char4> volume);
+
+
     //first version
     /** \brief Performs Tsfg volume uptation (extra obsolete now)
       * \param[in] depth_raw Kinect depth image
@@ -296,8 +329,19 @@ namespace pcl
       */
     PCL_EXPORTS void 
     integrateTsdfVolume (const PtrStepSz<ushort>& depth, const Intr& intr, const float3& volume_size, 
-                         const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, const pcl::gpu::tsdf_buffer* buffer, DeviceArray2D<float>& depthScaled);
+                         //const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, const pcl::gpu::tsdf_buffer* buffer, DeviceArray2D<float>& depthScaled);
+                         const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, const pcl::gpu::tsdf_buffer* buffer, DeviceArray2D<float>& depthScaled, int3 vxlDbg = int3()); //zc: 调试
     
+    //v11, 尝试融合 v9.4 + v10, 且
+    //@param[in] surfNormVolume 取代 vrayPrevVolume, 即语义变为: 不用 vray判定是否 "转过头", 而用法向夹角判定; 由 nmap_g 控制
+    PCL_EXPORTS void 
+    integrateTsdfVolume_v11 (const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
+                         const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, 
+                         PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, DeviceArray2D<unsigned char> incidAngleMask, const MapArr& nmap_curr_g, 
+                         const MapArr &nmap_model_g, //v11.6: 非 isNewFace 时候, 存 model 法向, 因其比 curr 稳定 @2017-3-14 23:32:12
+                         const MapArr &weight_map, //v11.4
+                         DeviceArray2D<float>& depthScaled, int3 vxlDbg);
+
     /** \brief Function that clears the TSDF values. The clearing takes place from the origin (in indices) to an offset in X,Y,Z values accordingly
       * \param[in] volume Pointer to TSDF volume in GPU
       * \param[in] buffer Pointer to the buffer struct that contains information about memory addresses of the tsdf volume memory block, which are used for the cyclic buffer.

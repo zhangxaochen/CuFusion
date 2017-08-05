@@ -94,6 +94,64 @@ typedef pcl::ScopeTime ScopeTimeT;
 #include "../src/internal.h"
 #include <pcl/gpu/kinfu_large_scale/screenshot_manager.h>
 
+#include <AHCPlaneFitter.hpp> //peac代码: http://www.merl.com/demos/point-plane-slam
+#include "zcAhcUtility.h"
+//#include <pcl/kdtree/kdtree_flann.h>
+
+#include "testAhc.h"
+
+pcl::console::TicToc tt0, tt1, tt2, tt3; //一些备用计时器
+
+//zc: 离散图像序列处理, 避免 oni 跳帧
+int fid_;
+bool png_source_;
+string pngDir_;
+vector<string> pngFnames_;
+int pngSid_ = -1, 
+	pngEid_ = -1; //命令行参数, 设定起始终止帧序号, 调试用 2016-11-28 21:40:30
+bool isRealPng_, isZchiPng_;
+
+bool isReadOn_;   //之前一直没用, 现在启用, 做空格暂停控制键 2016-3-26 15:46:37
+int png_fps_ = 1000;
+bool hasRtCsv_; //是否（在 pngDir_）存在 {R, t} csv 描述文件
+bool csv_rt_hint_; //是否用 csv {R, t} 做初值？（不一定用）
+bool show_gdepth_; //show-generated-depth. 是否显示当前时刻 (模型, 视角) 对应的深度图
+bool debug_level1_; //是否download并显示一些中间调试窗口？运行时效率相关
+bool debug_level2_; //if true, imwrite 中间结果到文件, 且 debug_level1_=true (包含关系)
+bool imud_; //是否 csv_rt_hint_ 存的是 IMUD-fusion 所需的 Rt, 其特点: 只有 rmat 有用, t=(0,0,0)
+
+//已知立方体三邻边长度, 命令行参数 -cusz //2017-1-2 11:57:19
+vector<float> cuSideLenVec_;
+bool isUseCube_; //若 cuSideLenVec_.size() >0, 则 true
+Eigen::Affine3f camPoseUseCu_; //用立方体定位方式得到的相机姿态
+bool isLastFoundCrnr_; //上一帧有没有看到顶角
+//bool isCuInitialized_ = false; //若第一次定位到立方体: 1, 设定 cu2gPose_
+
+void dbgAhcPeac_app( const RGBDImage *rgbdObj, PlaneFitter *pf){
+	cv::Mat dbgSegMat(rgbdObj->height(), rgbdObj->width(), CV_8UC3); //分割结果可视化
+	vector<vector<int>> idxss;
+
+	pf->minSupport = 1000;
+	pf->run(rgbdObj, &idxss, &dbgSegMat);
+	annotateLabelMat(pf->membershipImg, &dbgSegMat);
+	const char *winNameAhc = "dbgAhc@dbgAhcPeac_app";
+	imshow(winNameAhc, dbgSegMat);
+}//dbgAhcPeac_app
+
+//ahc/peac 窗口鼠标双击选点 //2017-2-20 18:04:55
+void peacMouseCallBack(int event, int x, int y, int flags, void *param) {
+	//if (event == cv::EVENT_LBUTTONDOWN) {
+	//    single_click();
+	//}
+	cv::Point *pt = (cv::Point*)param;
+	if (event == cv::EVENT_LBUTTONDBLCLK) {
+		printf("@peacMouseCallBack: event, (x, y), flags:-- %d, (%d, %d), %d\n", event, x, y, flags);
+
+		pt->x = x;
+		pt->y = y;
+	}
+}//peacMouseCallBack
+
 //---------------------------------------------------------------------------
 // Macros
 //---------------------------------------------------------------------------
@@ -506,14 +564,18 @@ struct RGBDTrajectory {
 
 struct CameraParam {
 public:
+	bool isFileLoaded; //zc
 	double fx_, fy_, cx_, cy_, ICP_trunc_, integration_trunc_;
 
 	CameraParam() : fx_( 525.0 ), fy_( 525.0 ), cx_( 319.5 ), cy_( 239.5 ), ICP_trunc_( 2.5 ), integration_trunc_( 2.5 )  {
+		isFileLoaded = false;
 	}
 
 	void loadFromFile( std::string filename ) {
 		FILE * f = fopen( filename.c_str(), "r" );
 		if ( f != NULL ) {
+			isFileLoaded = true;
+
 			char buffer[1024];
 			while ( fgets( buffer, 1024, f ) != NULL ) {
 				if ( strlen( buffer ) > 0 && buffer[ 0 ] != '#' ) {
@@ -949,6 +1011,7 @@ struct KinFuLSApp
 		registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_( 480, 640, CV_8UC3, cv::Scalar( 255, 255, 255 )),
 		use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false),
 		kintinuous_( false ), rgbd_odometry_( false ), slac_( false ), bdr_odometry_( false )
+		,cu_odometry_(false)
 	{    
 		//Init Kinfu Tracker
 		Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -1002,6 +1065,12 @@ struct KinFuLSApp
 		image_view_.viewerNMap_.registerKeyboardCallback (keyboard_callback, (void*)this);
 
 		scene_cloud_view_.toggleCube(volume_size);
+
+		//zc: https://stackoverflow.com/questions/27101646/how-to-pick-two-points-from-viewer-in-pcl
+		//scene_cloud_view_.cloud_viewer_->registerPointPickingCallback(pointPickingCallback, (void*)scene_cloud_view_.cloud_viewer_.get()); //当 pointPickingCallback 是 static member 时
+		scene_cloud_view_.cloud_viewer_.registerPointPickingCallback(&KinFuLSApp::pointPickingCallback, *this, (void*)&scene_cloud_view_.cloud_viewer_); //当 pointPickingCallback 是 static member 时
+
+
 		frame_counter_ = 0;
 		enable_texture_extraction_ = false;
 
@@ -1020,6 +1089,34 @@ struct KinFuLSApp
 		if (evaluation_ptr_)
 			evaluation_ptr_->saveAllPoses(*kinfu_);
 	}
+
+	//zc: 给 SceneCloudView-cloud_viewer_ 增加选点回调函数; 放在这里是因为 KinFuApp 可获取到 volume_size //2017-2-13 06:12:09
+	//static void //一种可行
+	void //非 static 也有能成功回调的接口
+	pointPickingCallback(const pcl::visualization::PointPickingEvent& event, void* cookie){
+			if (event.getPointIndex () == -1) 
+				return;
+
+			PointXYZ pt_picked;
+			event.getPoint(pt_picked.x, pt_picked.y, pt_picked.z);
+			cout << pt_picked << endl;
+			Vector3f cell_size = this->kinfu_->volume().getVoxelSize();
+
+			pcl::visualization::PCLVisualizer *v_visualizer = (pcl::visualization::PCLVisualizer*)(cookie);
+
+			const string pt_picked_str = "PickedPoint";
+			v_visualizer->removeShape(pt_picked_str);
+
+			v_visualizer->addSphere(pt_picked, cell_size.x()/2, 1,0,1, pt_picked_str);
+
+			this->kinfu_->vxlDbg_[0] = int(pt_picked.x / cell_size.x());
+			this->kinfu_->vxlDbg_[1] = int(pt_picked.y / cell_size.y());
+			this->kinfu_->vxlDbg_[2] = int(pt_picked.z / cell_size.z());
+			cout << "this->kinfu_->vxlDbg_[0/1/2]: "
+				<< this->kinfu_->vxlDbg_[0] << ","
+				<< this->kinfu_->vxlDbg_[1] << ","
+				<< this->kinfu_->vxlDbg_[2] << "," << endl;
+	}//pointPickingCallback
 
 	void
 		initCurrentFrameView ()
@@ -1061,6 +1158,9 @@ struct KinFuLSApp
 	{
 		bdr_odometry_ = true;
 	}
+
+	//zc
+	void toggleCuOdometry(){ cu_odometry_ = true; }
 
 	void toggleKdtreeOdometry()
 	{
@@ -1288,9 +1388,11 @@ struct KinFuLSApp
 		if (!match_file.empty())
 			evaluation_ptr_->setMatchFile(match_file);
 
-		kinfu_->setDepthIntrinsics (evaluation_ptr_->fx, evaluation_ptr_->fy, evaluation_ptr_->cx, evaluation_ptr_->cy);
-		image_view_.raycaster_ptr_ = RayCaster::Ptr( new RayCaster(kinfu_->rows (), kinfu_->cols (),
-			evaluation_ptr_->fx, evaluation_ptr_->fy, evaluation_ptr_->cx, evaluation_ptr_->cy) );
+		if(!camera_.isFileLoaded){ //改成仅在没用到 --camera 时才用 eval 写死的内参
+			kinfu_->setDepthIntrinsics (evaluation_ptr_->fx, evaluation_ptr_->fy, evaluation_ptr_->cx, evaluation_ptr_->cy);
+			image_view_.raycaster_ptr_ = RayCaster::Ptr( new RayCaster(kinfu_->rows (), kinfu_->cols (),
+				evaluation_ptr_->fx, evaluation_ptr_->fy, evaluation_ptr_->cx, evaluation_ptr_->cy) );
+		}
 	}
 
 	void drawTrajectory()
@@ -1786,7 +1888,178 @@ struct KinFuLSApp
 					if ( has_image == false && kinfu_->getGlobalTime() > 1 ) {
 						ten_has_data_fail_then_we_call_it_a_day_ = 100;
 					}
-				} else if ( kdtree_odometry_ ) {
+				} 
+				else if (cu_odometry_){ //长方体定位
+					//planeFitter_.run 写在 kinfu.cpp 出错, 原因未知, 放弃 @2017-4-2 13:58:23
+					//kinfu_->dbgAhcPeac(depth_device_, &image_view_.colors_device_); //×
+					//kinfu_->dbgAhcPeac2(depCloud); //×
+					//kinfu_->dbgAhcPeac3(depCloud, &planeFitter_); //×
+					//kinfu_->dbgAhcPeac4(&rgbdObj, &planeFitter_); //×
+					//::dbgAhcPeac_app(&rgbdObj, &planeFitter_); //√
+					//kinfu_->dbgAhcPeac5(&rgbdObj, &planeFitter_); //×
+					//kinfu_->dbgAhcPeac6(&rgbdObj, &planeFitter_, dbgAhcPeac_app); //√
+					//dbgAhcPeac_kinfu(&rgbdObj, &planeFitter_); //×
+					//dbgAhcPeac_testAhc(&rgbdObj, &planeFitter_); //×
+
+					//zc: cuOdo 放到最前面, 这样当用 cam2g 求解 kinfu_->cube_g_.cuVerts8_ 时, 用的是已求出的当前帧(i)姿态, 而非(i-1) 姿态
+					//2017-4-22 21:36:41
+					//tt0.tic(); //40~60ms
+					has_image = kinfu_->cuOdometry(depth_device_, &image_view_.colors_device_);
+					//printf("kinfu_->cuOdometry: "); tt0.toc_print();
+
+					if(!kinfu_->isCuInitialized_){ //若全局 cu 没有初始化、定位
+						//1, 平面分割,拟合:
+						PlaneFitter planeFitter_;
+
+						cv::Mat dm_raw(depth_device_.rows(), depth_device_.cols(), CV_16UC1); //milli-m, raw
+						int c;
+						depth_device_.download(dm_raw.data, depth_device_.colsBytes());
+
+						float fx = camera_.fx_, fy = camera_.fy_,
+							cx = camera_.cx_, cy = camera_.cy_;
+						pcl::device::Intr intr(fx, fy, cx, cy, camera_.integration_trunc_);
+						CloudType::Ptr depCloud = cvMat2PointCloud(dm_raw, intr);
+						RGBDImage rgbdObj(*depCloud);
+
+						cv::Mat dbgSegMat(depCloud->height, depCloud->width, CV_8UC3); //分割结果可视化
+						vector<vector<int>> idxss;
+
+						planeFitter_.minSupport = 000;
+						planeFitter_.run(&rgbdObj, &idxss, &dbgSegMat);
+						annotateLabelMat(planeFitter_.membershipImg, &dbgSegMat);
+						const char *winNameAhc = "ahc-dbg@kinfLS_app";
+						//imshow(winNameAhc, dbgSegMat);
+						cv::namedWindow(winNameAhc); //因为要 setMouseCallback, 所以必须先有窗口
+						cv::Point pxSelect(-1,-1); //目前自动定位立方体方案的初始化过程不完善, 改用手动/鼠标选定第一个顶角方式 //2017-2-20 17:42:45
+						cv::setMouseCallback(winNameAhc, peacMouseCallBack, &pxSelect);
+
+
+						vector<PlaneSeg> plvec; //存放各个平面参数
+						plvec = zcRefinePlsegParam(rgbdObj, idxss); //决定是否 refine 平面参数
+						vector<vector<double>> cubeCandiPoses; //内vec必有size=12=(t3+R9), 是cube在相机坐标系的姿态, 且规定row-major; 外vec表示多个候选顶角的姿态描述
+						//2, 正交三邻面查找:
+						zcFindOrtho3tup(plvec, planeFitter_.membershipImg, fx, fy, cx, cy, cubeCandiPoses, dbgSegMat);
+
+						imshow(winNameAhc, dbgSegMat); //改放这里 @2017-4-19 11:32:30
+						cv::waitKey(0);
+
+						size_t crnrCnt = cubeCandiPoses.size();
+						bool isFoundCrnr = (crnrCnt != 0);
+						size_t crnrIdx = 0; //鼠标选中的下标
+
+						//遍历找到的顶角, 看鼠标选中了哪一个: //2017-2-20 17:45:36
+						double minPxDist = 1e5; //鼠标双击坐标与【候选顶角】像素坐标距离，的平方, 用于标记更近的【候选点序号】
+						for(size_t i=0; i<crnrCnt; i++){
+							Vector3d pti(cubeCandiPoses[i].data()); //候选顶角3D坐标
+							cv::Point pxi = getPxFrom3d(pti, fx, fy, cx, cy);
+							double dist = cv::norm(pxSelect - pxi);
+							if(dist < minPxDist){
+								minPxDist = dist;
+								crnrIdx = i;
+							}
+						}
+
+						//3, 仅当找到四顶点, 才算定位到立方体
+						tt0.tic();
+						vector<double> cu4pts; //meters, 因为↓传入的 cuSideLenVec_ 已是量纲米
+						bool isFoundCu4pts = false;
+						if(isFoundCrnr)
+							isFoundCu4pts = getCu4Pts(cubeCandiPoses[crnrIdx], cuSideLenVec_, dm_raw, planeFitter_.membershipImg, fx, fy, cx, cy, cu4pts);
+						//找到 crnr 未必 isFoundCu4pts, 因为可能显示不全
+						printf("getCu4Pts: "); tt0.toc_print();
+
+						if(isFoundCu4pts){
+							//调试观察:
+							for(size_t i=0; i<4; i++){
+								Vector3d pti(cu4pts.data() + i*3);
+								cv::Point pxi = getPxFrom3d(pti, fx, fy, cx, cy);
+								cv::circle(dbgSegMat, pxi, 2, 255, 1); //蓝小圆圈
+								cv::circle(dbgSegMat, pxi, 12, cv::Scalar(0,255,0), 2); //绿大圆圈,
+							}
+
+							kinfu_->cubeCandiPoses_ = cubeCandiPoses;
+							kinfu_->crnrIdx_ = crnrIdx;
+							//kinfu_->isFirstFoundCube_ = true;
+
+							//8顶点, 固化编号: 0,123,456,7
+							//各面顶点分组: 0142/3675, 0253/1476, 0361/2574;
+							//最初4个:
+							vector<Vector3d> cuVerts8_c;
+							for(size_t i=0; i<4; i++){
+								Vector3d pti(cu4pts.data() + i*3);
+								cuVerts8_c.push_back(pti);
+							}
+							//再3个:
+							//for(size_t i=1; i<4; i++)
+							cuVerts8_c.push_back(cuVerts8_c[1] + cuVerts8_c[2] - cuVerts8_c[0]);
+							cuVerts8_c.push_back(cuVerts8_c[2] + cuVerts8_c[3] - cuVerts8_c[0]);
+							cuVerts8_c.push_back(cuVerts8_c[3] + cuVerts8_c[1] - cuVerts8_c[0]);
+							//最后最远一个:
+							//cuVerts8_c.push_back(cuVerts8_c[4] + cuVerts8_c[5] + cuVerts8_c[6] - 2 * cuVerts8_c[0]); //-2倍, 非3倍 //×!!!!
+							cuVerts8_c.push_back(cuVerts8_c[1] + cuVerts8_c[2] + cuVerts8_c[3] - 2 * cuVerts8_c[0]);
+
+							Eigen::Affine3f cam2g = kinfu_->getCameraPose();
+							//转到世界坐标系, 填充 cube_g_:
+							//8顶点:
+							for(size_t i=0; i<8; i++){
+								Vector3d cuVerti_g = cam2g.cast<double>() * cuVerts8_c[i];
+								kinfu_->cube_g_.cuVerts8_.push_back(cuVerti_g);
+							}
+
+							//6个面: //各面顶点分组: 0142/3675, 0253/1476, 0361/2574;
+							int faceVertIdxs[] = {0,1,4,2, 3,6,7,5, 0,2,5,3, 1,4,7,6, 0,3,6,1, 2,5,7,4};
+							for(size_t i=0; i<6; i++){
+								//Facet facet_i;
+								//facet_i.vertIds_.insert(facet_i.vertIds_.end(), faceVertIdxs+4*i, faceVertIdxs+4*(i+1));
+								//cube_g_.facetVec_.push_back(facet_i);
+								vector<int> vertIds(faceVertIdxs+4*i, faceVertIdxs+4*(i+1) );
+								kinfu_->cube_g_.addFacet(vertIds);
+							}
+							//12棱边:
+							int lineVertIds[] = {0,1, 1,4, 4,2, 2,0, 
+													3,6, 6,7, 7,5, 5,3, 
+													0,3, 1,6, 4,7, 2,5};
+							pcl::PointCloud<PointXYZ>::Ptr edgeCloud(new pcl::PointCloud<PointXYZ>);
+							edgeCloud->reserve(3000);
+
+							for(size_t i=0; i<12; i++){
+								vector<int> edgeIds(lineVertIds+2*i, lineVertIds+2*(i+1) ); 
+								kinfu_->cube_g_.addEdgeId(edgeIds);
+
+								Vector3d begPt = kinfu_->cube_g_.cuVerts8_[lineVertIds[2*i] ];
+								Vector3d endPt = kinfu_->cube_g_.cuVerts8_[lineVertIds[2*i+1] ];
+								Vector3d edgeVec = endPt - begPt;
+								Vector3d edgeVecNormed = edgeVec.normalized();
+								double edgeVecNorm = edgeVec.norm();
+								Vector3d pos = begPt;
+
+								const float STEP = 0.001; //1MM
+								float len = 0;
+								while(len < edgeVecNorm){
+									PointXYZ pt;
+									pt.x = pos[0];
+									pt.y = pos[1];
+									pt.z = pos[2];
+
+									edgeCloud->push_back(pt);
+
+									len += STEP;
+									pos += len * edgeVecNormed;
+								}
+							}
+							PCL_WARN("edgeCloud->size:= %d\n", edgeCloud->size());
+							//kinfu_->cuEdgeTree_.setInputCloud(edgeCloud); //放到 kinfu.cpp 内
+							kinfu_->cuContCloud_ = edgeCloud;
+
+							kinfu_->isCuInitialized_ = true;
+						}//if-(isFoundCu4pts)
+
+						imshow(winNameAhc, dbgSegMat);
+
+					}//if-(!isCuInitialized_)
+
+				}
+				else if ( kdtree_odometry_ ) {
 					has_image = kinfu_->kdtreeodometry( depth_device_, &image_view_.colors_device_ );
 				} else {
 					//run kinfu algorithm
@@ -2270,6 +2543,8 @@ struct KinFuLSApp
 			std::cout << "grabber doesn't provide pcl::PointCloud<pcl::PointXYZRGBA> callback !\n";
 		}
 
+		if(!this->evaluation_ptr_){
+//#if 0   //为了使用 -eval, 暂时屏蔽此 while 逻辑, 改写代码
 		boost::signals2::connection c = 
 			pcd_source_? capture_.registerCallback (func3) : need_colors ? ( triggered_capture ? capture_.registerCallback (func1t) : capture_.registerCallback (func1) ) : ( triggered_capture ? capture_.registerCallback (func2t) : capture_.registerCallback (func2) );
 
@@ -2366,7 +2641,70 @@ struct KinFuLSApp
 			cout << "Total " << frame_counter_ << " frames processed." << endl;
 		}
 		c.disconnect();
-	}
+		}
+		else{ //this->evaluation_ptr_ != NULL
+			PCL_WARN("evaluation_ptr_--(fx,fy,cx,cy):= (%.1f,%.1f,%.1f,%.1f)\n", evaluation_ptr_->fx, evaluation_ptr_->fy, evaluation_ptr_->cx, evaluation_ptr_->cy);
+			//↑--代码已改: 当 --camera 时, 并不用 eval 类内写死的 525,525,319.5,239.5 (又在 longRange.param)	@2017-3-30 21:36:58
+
+			int key = -1; //键盘控制
+			int currentIndex = 0; //eval 用
+			while (evaluation_ptr_->grab (currentIndex, depth_)) { 
+				if(currentIndex < pngSid_){
+					currentIndex ++;
+					continue;
+				}
+				if(currentIndex > pngEid_)
+					break;
+
+				printf("---------------currentIndex:= %d\n", currentIndex);
+
+				execute(depth_, rgb24_, true); 
+				scene_cloud_view_.cloud_viewer_.spinOnce (3); 
+				currentIndex += 1; 
+
+				imshow("dummy-win0", cv::Mat::zeros(333, 333, CV_8UC1));
+				key = cv::waitKey(png_fps_ > 0 && isReadOn_ ? int(1e3 / png_fps_) : 0);
+				//int key = cv::waitKey(110);
+				//printf("key:= %d\n", key);
+
+				if(key == 27) //Esc
+					break;
+				else if(key == ' '){ //这里 waitKey 不灵敏导致切换有问题?
+					isReadOn_ = !isReadOn_;
+					printf("isReadOn_ = !isReadOn_;\n");
+				}
+				else if(key == 's'){ //
+					isReadOn_ = false;
+					printf("isReadOn_ = false;\n");
+				}
+				else if(key == 't'){
+					//@2017-5-8 19:56:28
+					kinfu_->genSynData_ = true;
+				}
+
+				if(currentIndex >= evaluation_ptr_->getStreamSize() - 5){
+					isReadOn_ = false;
+					printf("isReadOn_ = false;\n~~~~~~~~~最后几帧\n");
+				}
+				//isFirstFoundCube_ = false; //这里总设置 false, 没毛病
+
+			}//while-eval
+
+			printf("evaluation_ptr_->grab DONE...\n");
+
+			//cv::waitKey(0); //等手动存 mesh 之类, 不行
+			//再次 esc 才退出程序:
+			imshow("dummy-win", cv::Mat::zeros(333, 333, CV_8UC1));
+			while(1){
+				scene_cloud_view_.cloud_viewer_.spinOnce (3); 
+				key = cv::waitKey(3);
+				if(key == 27){
+					printf("exiting-startMainLoop......\n");
+					break;
+				}
+			}
+		}//if-(!this->evaluation_ptr_)
+	}//startMainLoop
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	void
@@ -2374,19 +2712,28 @@ struct KinFuLSApp
 	{      
 		const SceneCloudView& view = scene_cloud_view_;
 
-		if(view.point_colors_ptr_->points.empty()) // no colors
+		// Points to export are either in cloud_ptr_ or combined_ptr_.
+		// If none have points, we have nothing to export.
+		if (view.cloud_ptr_->points.empty () && view.combined_ptr_->points.empty ())
 		{
-			if (view.valid_combined_)
-				writeCloudFile (format, view.combined_ptr_);
-			else
-				writeCloudFile (format, view.cloud_ptr_);
+			cout << "Not writing cloud: Cloud is empty" << endl;
 		}
 		else
-		{        
-			if (view.valid_combined_)
-				writeCloudFile (format, merge<PointXYZRGBNormal>(*view.combined_ptr_, *view.point_colors_ptr_));
+		{
+			if(view.point_colors_ptr_->points.empty()) // no colors
+			{
+				if (view.valid_combined_)
+					writeCloudFile (format, view.combined_ptr_);
+				else
+					writeCloudFile (format, view.cloud_ptr_);
+			}
 			else
-				writeCloudFile (format, merge<PointXYZRGB>(*view.cloud_ptr_, *view.point_colors_ptr_));
+			{        
+				if (view.valid_combined_)
+					writeCloudFile (format, merge<PointXYZRGBNormal>(*view.combined_ptr_, *view.point_colors_ptr_));
+				else
+					writeCloudFile (format, merge<PointXYZRGB>(*view.cloud_ptr_, *view.point_colors_ptr_));
+			}
 		}
 	}
 
@@ -2531,6 +2878,9 @@ struct KinFuLSApp
 	bool slac_;
 	bool bdr_odometry_;
 	bool kdtree_odometry_;
+
+	//zc: cuboid 长方体定位
+	bool cu_odometry_;
 
 	CameraParam camera_;
 
@@ -2796,6 +3146,12 @@ int
 		{
 			//init data source latter
 			pc::parse_argument (argc, argv, "-match_file", match_file);
+
+			//zc:
+			pc::parse_argument(argc, argv, "-fps", png_fps_);
+			//↓--TUM 默认放大 5(说是5000) 存储便于观察: http://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#color_images_and_depth_maps
+			//但是我一些旧数据是原始 ushort, 故加载旧数据时, 用 -dscale 1
+			//pc::parse_argument(argc, argv, "-dscale", )
 		}
 		else
 		{
@@ -2841,10 +3197,37 @@ int
 
 	KinFuLSApp app (*capture, volume_size, shift_distance, snapshot_rate, use_device, fragment_rate, fragment_start, trunc_dist, shift_x, shift_y, shift_z);
 
-    //zc:   @2017-3-23 15:45:57
-    double tsdf_trunc_dist = 0.03;
-    pc::parse_argument(argc, argv, "-trunc_dist", tsdf_trunc_dist);
-    app.kinfu_->volume().setTsdfTruncDist(tsdf_trunc_dist);
+	//zc:   @2017-3-23 15:45:57
+	double tsdf_trunc_dist = 0.03;
+	pc::parse_argument(argc, argv, "-trunc_dist", tsdf_trunc_dist);
+	app.kinfu_->volume().setTsdfTruncDist(tsdf_trunc_dist);
+
+	//关于: 对后端 fusion 策略改进
+	app.kinfu_->tsdf_version_ = 2.0; //2:= tsdf.kf.orig 原融合算法
+	pc::parse_argument(argc, argv, "-tsdfVer", app.kinfu_->tsdf_version_);
+
+	//对应策略 v4-pcTsdf23Cont
+	app.kinfu_->tsdfErodeRad_ = 3;
+	pc::parse_argument(argc, argv, "-tsdfErodeRad", app.kinfu_->tsdfErodeRad_);
+
+	//zc: <int,int,int>的 vec3, 表示体素坐标, 用于调试 @tsdf23_v8 //2017-2-13 13:55:44
+	app.kinfu_->vxlDbg_ = vector<int>(3, 0);
+	pc::parse_x_arguments(argc, argv, "-vxlDbg", app.kinfu_->vxlDbg_);
+	{//初始就绘制小圆球, 做调试观察用 //2017-2-17 10:10:05
+        PCL_WARN("vxlDbg_: [%d,%d,%d]\n", app.kinfu_->vxlDbg_[0], app.kinfu_->vxlDbg_[1], app.kinfu_->vxlDbg_[2]);
+
+		PointXYZ vxl2pt;
+		vector<int> &vxlDbg = app.kinfu_->vxlDbg_;
+		Vector3f cellsz = app.kinfu_->volume().getVoxelSize();
+		vxl2pt.x = (vxlDbg[0] + 0.5f) * cellsz.x();
+		vxl2pt.y = (vxlDbg[1] + 0.5f) * cellsz.y();
+		vxl2pt.z = (vxlDbg[2] + 0.5f) * cellsz.z();
+
+		app.scene_cloud_view_.cloud_viewer_.addSphere(vxl2pt, cellsz.x()/2, 0,1,0, "vxlDbgPoint");
+	}
+
+	//控制 kinfu.cpp 中的一些调试窗口开关 //2017-3-3 01:09:38
+	app.kinfu_->dbgKf_ = pc::find_switch(argc, argv, "-dbgKf");
 
 	if ( pc::parse_argument( argc, argv, "--camera", camera_file ) > 0 ) {
 		app.toggleCameraParam( camera_file );
@@ -2857,6 +3240,20 @@ int
 
 	if (pc::parse_argument (argc, argv, "-eval", eval_folder) > 0)
 		app.toggleEvaluationMode(eval_folder, match_file);
+
+	//zc: 放在 -eval 检查之后	@2017-4-19 14:29:49
+	if (pc::parse_argument (argc, argv, "-sid", pngSid_) > 0 //start-id
+		|| pc::parse_argument (argc, argv, "-eid", pngEid_) > 0) //end-id, 必须与 sid 成对
+	{
+		if(pngSid_ < 0) pngSid_ = 0;
+		if(pngEid_ < 0) pngEid_ = app.evaluation_ptr_->getStreamSize() - 1; //默认范围: [0, size-1]
+		printf("--SELECT png id range: [%d, %d]\n", pngSid_, pngEid_);
+	}
+	else{
+		pngSid_ = 0;
+		pngEid_ = app.evaluation_ptr_->getStreamSize() - 1;
+	}
+
 
 	if (pc::find_switch (argc, argv, "--current-cloud") || pc::find_switch (argc, argv, "-cc"))
 		app.initCurrentFrameView ();
@@ -2938,6 +3335,40 @@ int
 		pc::parse_argument( argc, argv, "--bdr_amplifier", amp );
 		app.toggleBdrAmplifier( amp );
 	}
+
+	//zc: 长方体三边尺寸做参数, 毫米尺度
+	pc::parse_x_arguments(argc, argv, "-cusz", cuSideLenVec_);
+	if(cuSideLenVec_.size() == 3){//仅仅 >0 还不够, 必须==3
+		PCL_WARN("cube-side-lengths: [%.2f, %.2f, %.2f]\n", cuSideLenVec_[0], cuSideLenVec_[1], cuSideLenVec_[2]);
+		
+		//转成米:
+		for(size_t i=0; i<cuSideLenVec_.size(); i++)
+			cuSideLenVec_[i] *= MM2M;
+
+		app.kinfu_->cuSideLenVec_ = cuSideLenVec_;
+		app.toggleCuOdometry();
+
+		//zc: --bdr_amplifier 之前只在 -bdr 上生效, 现在 -cusz 也要用 @2017-7-19 10:32:22
+		float amp = 4.0;
+		pc::parse_argument( argc, argv, "--bdr_amplifier", amp );
+		app.toggleBdrAmplifier( amp );
+
+		//@2017-6-3 18:56:05
+		app.kinfu_->with_nmap_ = pc::find_switch(argc, argv, "-nmap");
+		app.kinfu_->term_123_ = pc::find_switch(argc, argv, "-123");
+		app.kinfu_->term_12_ = pc::find_switch(argc, argv, "-12");
+		app.kinfu_->term_23_ = pc::find_switch(argc, argv, "-23");
+		app.kinfu_->term_13_ = pc::find_switch(argc, argv, "-13");
+		app.kinfu_->term_1_ = pc::find_switch(argc, argv, "-1");
+		app.kinfu_->term_2_ = pc::find_switch(argc, argv, "-2");
+		app.kinfu_->term_3_ = pc::find_switch(argc, argv, "-3");
+
+		app.kinfu_->e2c_dist_ = 0.05;
+		pc::parse_argument(argc, argv, "-e2cDist", app.kinfu_->e2c_dist_);
+	}
+
+	app.kinfu_->incidAngleThresh_ = 75; //默认值, 按 pcc 的经验值  @2017-3-8 20:47:22
+	pc::parse_argument(argc, argv, "-incidTh", app.kinfu_->incidAngleThresh_);
 
 	if ( pc::find_switch( argc, argv, "--kdtree_odometry" ) ) {
 		app.toggleKdtreeOdometry();

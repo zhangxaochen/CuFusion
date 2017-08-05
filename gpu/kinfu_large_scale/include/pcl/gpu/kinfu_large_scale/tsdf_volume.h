@@ -193,6 +193,21 @@ namespace pcl
 
       /** \brief tsdf truncation distance */
       float tranc_dist_;
+
+public: //zc:
+	//用作 pcTSDF 的 flag, 启用单独变量, 不改写原 volume为 short3 //2017-1-27 23:29:13
+	//false=纯预测, true=确实看见过, 即 seen-flag
+	DeviceArray2D<bool> flagVolume_; //增加消耗 256MB 显存, (getting mesh 耗费约 120MB 显存, 目前已到 1850MB 左右的极限)
+
+	//tsdf-v10 中, 用于存储"混合均值滤波" 的[第二中心]
+	DeviceArray2D<int> volume2nd_;
+
+	//zc: 用作 tsdf-v8, 对每个晶格, 存储其上一次 视线=(晶格-视点) 向量
+	DeviceArray2D<int> vrayPrevVolume_;
+
+	//tsdf-v11, 启用 vray+ surfNorm 双判定, 
+	DeviceArray2D<int> surfNormPrev_;
+
     };
   }
 }

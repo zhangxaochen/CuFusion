@@ -58,6 +58,12 @@ pcl::gpu::TsdfVolume::TsdfVolume(const Vector3i& resolution) : resolution_(resol
 
   volume_.create (volume_y * volume_z, volume_x);
   
+  //zc:
+  volume2nd_.create(volume_y * volume_z, volume_x);
+  flagVolume_.create(volume_y * volume_z, volume_x);
+  vrayPrevVolume_.create(volume_y * volume_z, volume_x);
+  surfNormPrev_.create(volume_y * volume_z, volume_x);
+
   const Vector3f default_volume_size = Vector3f::Constant (3.f); //meters
   const float    default_tranc_dist  = 0.03f; //meters
 
@@ -134,6 +140,12 @@ void
 pcl::gpu::TsdfVolume::reset()
 {
   device::initVolume(volume_);
+
+  device::initFlagVolume(flagVolume_);
+  device::initVrayPrevVolume(vrayPrevVolume_);
+  device::initVrayPrevVolume(volume2nd_);
+  device::initVrayPrevVolume(surfNormPrev_);
+
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

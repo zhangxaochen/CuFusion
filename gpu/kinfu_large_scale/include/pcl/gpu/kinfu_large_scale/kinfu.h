@@ -54,6 +54,7 @@
 
 #include <pcl/io/ply_io.h>
 
+
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -61,6 +62,42 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/contrib/contrib.hpp>
 
+#include <AHCPlaneFitter.hpp> //peac代码: http://www.merl.com/demos/point-plane-slam
+#include "zcAhcUtility.h"
+//#include <pcl/kdtree/kdtree_flann.h> //zc: 别放这里: error C2872: 'flann' : ambiguous symbol ...could be 'flann' ...or 'cv::flann'
+
+//////////////////////////////
+typedef pcl::PointXYZ PtType;
+typedef pcl::PointCloud<PtType> CloudType;
+PCL_EXPORTS CloudType::Ptr cvMat2PointCloud(const cv::Mat &dmat, const pcl::device::Intr &intr);
+
+//平面拟合, 提取分割
+//以下拷贝自 plane_fitter.cpp
+// pcl::PointCloud interface for our ahc::PlaneFitter
+template<class PointT>
+struct OrganizedImage3D {
+	const pcl::PointCloud<PointT>& cloud;
+	//NOTE: pcl::PointCloud from OpenNI uses meter as unit,
+	//while ahc::PlaneFitter assumes mm as unit!!!
+	const double unitScaleFactor;
+
+	OrganizedImage3D(const pcl::PointCloud<PointT>& c) : cloud(c), unitScaleFactor(1000) {}
+	int width() const { return cloud.width; }
+	int height() const { return cloud.height; }
+	bool get(const int row, const int col, double& x, double& y, double& z) const {
+		const PointT& pt=cloud.at(col,row);
+		x=pt.x; y=pt.y; z=pt.z;
+		return pcl_isnan(z)==0; //return false if current depth is NaN
+	}
+};
+//typedef OrganizedImage3D<pcl::PointXYZRGBA> RGBDImage;
+typedef OrganizedImage3D<PtType> RGBDImage;
+typedef ahc::PlaneFitter<RGBDImage> PlaneFitter;
+
+PCL_EXPORTS void dbgAhcPeac_kinfu( const RGBDImage *rgbdObj, PlaneFitter *pf);
+
+
+//////////////////////////////
 namespace pcl
 {
   namespace gpu
@@ -583,6 +620,22 @@ namespace pcl
 		bool slac (const DepthMap& depth_raw, const DepthMap& depth, const View * pcolor = NULL);
 
 		bool bdrodometry( const DepthMap & depth, const View * pcolor = NULL );
+		
+		//zc:
+		bool cuOdometry( const DepthMap &depth, const View *pcolor = NULL);
+
+		//全不行... @2017-4-2 14:30:29
+		void dbgAhcPeac( const DepthMap &depth_raw, const View *pcolor = NULL);
+		void dbgAhcPeac2( const CloudType::Ptr depCloud);
+		void dbgAhcPeac3( const CloudType::Ptr depCloud, PlaneFitter *pf);
+		void dbgAhcPeac4( const RGBDImage *rgbdObj, PlaneFitter *pf);
+		void dbgAhcPeac5( const RGBDImage *rgbdObj, PlaneFitter *pf);
+
+		template<typename Func>
+		void dbgAhcPeac6( const RGBDImage *rgbdObj, PlaneFitter *pf, Func f){
+			f(rgbdObj, pf);
+		}
+		
 		bool kdtreeodometry( const DepthMap & depth, const View * pcolor = NULL );
 		cv::Mat bdrodometry_interpmax( cv::Mat depth );
 		cv::Mat bdrodometry_getOcclusionBoundary( cv::Mat depth, float dist_threshold = 0.05f );
@@ -701,6 +754,63 @@ namespace pcl
 
 		float amplifier_;
 
+		//zc: 已知立方体三邻边长度, 命令行参数 -cusz //2017-1-2 11:57:19
+		vector<float> cuSideLenVec_; //meters
+		bool isUseCube_; //若 cuSideLenVec_.size() >0, 则 true
+		Eigen::Affine3f camPoseUseCu_; //用立方体定位方式得到的相机姿态
+		bool isLastFoundCrnr_; //上一帧有没有看到顶角
+
+		vector<vector<double>> cubeCandiPoses_; //内vec必有size=12=(t3+R9), 是cube在相机坐标系的姿态; 外vec表示多个候选顶角的姿态描述
+		size_t crnrIdx_; //因自动定位立方体不够好, 所以 kinfu_app 中鼠标选点, 初始化时手动指定【用哪个顶角】
+
+		float e2c_dist_;
+		bool with_nmap_; //@耿老师 要求加 nmap 惩罚项优化 R, 代码放在 -cusz 控制中, 命令行 "-nmap"
+
+		//用于控制对比多惩罚项时, 看哪个项起实际作用
+		bool term_123_;
+		bool term_12_;
+		bool term_13_;
+		bool term_23_;
+		bool term_1_;
+		bool term_2_;
+		bool term_3_;
+
+		//tsdf 融合策略, 详见: 《pcl, kinfu, tsdfVolume 笔记》; 《三维重建中体素融合方案改进结果（寒假201702）.docx》；《三维重建结果与vivid 3D 扫描仪groundtruth真值对比测试.docx》(小节3)
+		//用 float 而不用 int 是因为要区分很多子版本, 
+		float tsdf_version_;
+		bool isTsdfVer(float verNum){ return abs(tsdf_version_ - verNum) < 1e-6; }
+
+		bool dbgKf_;
+
+		//有时候,某帧迭代配准会严重漂移, 需要step-in跟进调试观察; 如m7/05-f126失败
+		int regCuStepId_;
+
+		vector<int> logIdVec_;
+
+		//@brief 关于: 对后端 fusion 策略改进
+		float tsdfErodeRad_;
+
+		//想要调试观察的体素 vxl
+		vector<int> vxlDbg_;
+
+		//用于 tsdf-v9, v11, 大入射角 mask的角度阈值, 之前 pcc 设定为 75°
+		float incidAngleThresh_;
+
+		//立方体定位算法相关     //2017-1-1 21:03:02
+		bool isFirstFoundCube_;// = true; //若第一次定位到立方体: 1, 设定 cu2gPose_
+		bool isFoundCu4pts_; //=false; //if-false, 持续平面拟合,立方体定位; if-true, 初始化全局 cu, 且停止平面拟合 @2017-4-22 21:29:14
+		bool isCuInitialized_;// = false; //若第一次定位到立方体: 1, 设定 cu2gPose_
+
+		Eigen::Affine3f cu2gPose_; //cube pose, cu->global, 全局唯一
+		Cube cube_g_;
+		//pcl::KdTreeFLANN<PointXYZ> cuEdgeTree_;
+		pcl::PointCloud<PointXYZ>::Ptr cuContCloud_; //global, 所有棱边, 无论是否可见
+		pcl::PointCloud<pcl::Normal>::Ptr cuContCloudNormal_; //global, 与 cuEdgeCloud_ 逐点对应, 但是在不可见位置, cont 法向其实错了, (因为映射到像素 uv 查找的), 只是不在乎
+
+		//耿老师要求生成合成数据, 无噪声, 立方体坐标系为世界坐标系 @2017-5-8 20:00:52
+		bool genSynData_;
+
+
       private:
 
 		DeviceArray2D<unsigned short> bdr_temp_depth_;
@@ -718,6 +828,20 @@ namespace pcl
 
 		Eigen::Matrix<float, 6, 6, Eigen::RowMajor> AAA_;
 		Eigen::Matrix<float, 6, 1> bbb_;
+
+		//zc: for cu-odo
+		//frame2model
+		Eigen::Matrix<float, 6, 6, Eigen::RowMajor> A_f2mod_;
+		Eigen::Matrix<float, 6, 1> b_f2mod_;
+
+		//frame2marker (3d cuboid as fiducial marker)
+		Eigen::Matrix<float, 6, 6, Eigen::RowMajor> A_f2mkr_;
+		Eigen::Matrix<float, 6, 1> b_f2mkr_;
+
+		//edge2contour (cuboid's occluding contour)
+		Eigen::Matrix<float, 6, 6, Eigen::RowMajor> A_e2c_;
+		Eigen::Matrix<float, 6, 1> b_e2c_;
+
 
 		bool extract_world_;
 
@@ -793,6 +917,28 @@ namespace pcl
         std::vector<MapArr> vmaps_curr_;
         /** \brief Normal maps pyramid for current frame in current coordinate space. */
         std::vector<MapArr> nmaps_curr_;
+
+        //zc: cu 可见区域的*全局* vmap、nmap
+        std::vector<DepthMap> depths_cu_;
+        std::vector<MapArr> vmaps_cu_g_prev_;
+        std::vector<MapArr> nmaps_cu_g_prev_;
+        //以下都仅是为了避免局部变量导致控制台调试输出 "[CUDA] Allocating memory..."
+        MapArr vmap_model_, nmap_model_;
+        MapArr vmap_g_model_, nmap_g_model_;
+        DepthMap dmapModel_, dmapModel_inp_;
+        pcl::device::MaskMap largeIncidMask_model_; //大入射角mask, vmap_g_model_ 的
+        pcl::device::MaskMap largeIncidMask_curr_; //大入射角mask, dmap-curr 的
+        pcl::device::MaskMap largeIncidMask_total_;
+        MapArr nmap_filt_, nmap_filt_g_;
+        DeviceArray2D<float> edgeDistMap_device_;
+        MapArr wmap_; //weight-map, 按: 1, 入射角cos; 2, D(u); 3, 到边缘距离 来加权
+
+        //bdr方案求解nmap 用到
+        DepthMap synCuDmap_device_;
+        MapArr gx_device_, gy_device_;
+
+        DeviceArray2D<float> gbuf_f2mkr_;
+        DeviceArray<float> sumbuf_f2mkr_;
 
         /** \brief Array of buffers with ICP correspondences for each pyramid level. */
         std::vector<CorespMap> coresps_;

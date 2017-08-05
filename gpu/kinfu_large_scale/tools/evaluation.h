@@ -41,6 +41,7 @@
 #include <pcl/gpu/containers/kernel_containers.h>
 #include <pcl/gpu/kinfu_large_scale/kinfu.h>
 
+//CloudType::Ptr cvMat2PointCloud(const cv::Mat &dmat, const pcl::device::Intr &intr);
 
 /** \brief  class for  RGB-D SLAM Dataset and Benchmark
   * \author Anatoly Baskeheev, Itseez Ltd, (myname.mysurname@mycompany.com)
@@ -55,6 +56,11 @@ public:
 
   /** \brief Sets file with matches between depth and rgb */
   void setMatchFile(const std::string& file);
+
+  //zc: 返回 evalFolder/depth.txt 或者 asso..txt 文件数; 调用放在 setMatchFile 之后
+  int getStreamSize(){
+    return accociations_.empty() ? depth_stamps_and_filenames_.size() : accociations_.size();
+  }
 
   /** \brief Reads rgb frame from the folder   
     * \param stamp index of frame to read (stamps are not implemented)

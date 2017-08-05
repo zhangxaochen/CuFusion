@@ -65,6 +65,55 @@ void Evaluation::saveAllPoses(const pcl::gpu::KinfuTracker& kinfu, int frame_num
 
 using namespace cv;
 
+#include <AHCPlaneFitter.hpp> //peac代码: http://www.merl.com/demos/point-plane-slam
+#include "zcAhcUtility.h"
+
+//typedef OrganizedImage3D<pcl::PointXYZRGBA> RGBDImage;
+typedef OrganizedImage3D<PtType> RGBDImage;
+typedef ahc::PlaneFitter<RGBDImage> PlaneFitter;
+PlaneFitter planeFitter_;
+
+//////////////////////////////
+// CloudType::Ptr cvMat2PointCloud(const cv::Mat &dmat, const pcl::device::Intr &intr){
+// 	CV_Assert(dmat.type() == CV_16UC1);
+// 
+// 	int imWidth = dmat.cols,
+// 		imHeight = dmat.rows;
+// 
+// 	//待返回的点云:
+// 	CloudType::Ptr pCloud(new CloudType);
+// 	pCloud->points.reserve(imWidth * imHeight); //注意: 非 resize, 后面必须用 push_back, 而非 "[]"
+// 
+// 	float fx_inv = 1 / intr.fx,
+// 		fy_inv = 1 / intr.fy;
+// 	const float mm2m = 0.001;
+// 	const float qnan = numeric_limits<float>::quiet_NaN ();
+// 
+// 	ushort *pDat = (ushort*)dmat.data;
+// 	for(int i = 0; i < imHeight; i++){
+// 		for(int j = 0; j < imWidth; j++){
+// 			PtType pt;
+// 			ushort z = *pDat;
+// 			if(0 == z){ //零深度值在 cloud 中应算作 nan! 否则语义错误!
+// 				pt.x = pt.y = pt.z = qnan;
+// 			}
+// 			else{
+// 				pt.z = z * mm2m; //转换到米(m)尺度
+// 				pt.x = pt.z * (j - intr.cx) * fx_inv;
+// 				pt.y = pt.z * (i - intr.cy) * fy_inv;
+// 			}
+// 			pCloud->push_back(pt);
+// 
+// 			++pDat;
+// 		}
+// 	}
+// 
+// 	pCloud->width = imWidth; //表示有序点云, 必须放在最后, 因为 push_back 会冲毁设定
+// 	pCloud->height = imHeight;
+// 
+// 	return pCloud;
+// }//cvMat2PointCloud
+
 struct Evaluation::Impl
 {
    Mat depth_buffer;
@@ -188,11 +237,27 @@ bool Evaluation::grab (double stamp, PtrStepSz<const unsigned short>& depth)
   // Datasets are with factor 5000 (pixel to m) 
   // http://cvpr.in.tum.de/data/datasets/rgbd-dataset/file_formats#color_images_and_depth_maps
     
-  d_img.convertTo(impl_->depth_buffer, d_img.type(), 0.2);
+  //d_img.convertTo(impl_->depth_buffer, d_img.type(), 0.2);
+  d_img.convertTo(impl_->depth_buffer, d_img.type(), 1); //zc
   depth.data = impl_->depth_buffer.ptr<ushort>();
   depth.cols = impl_->depth_buffer.cols;
   depth.rows = impl_->depth_buffer.rows;
   depth.step = impl_->depth_buffer.cols*sizeof(ushort); // 1280 = 640*2
+
+#if 0	//测试 ahc-peac bug:	@2017-4-1 09:59:24
+  pcl::device::Intr intr(529.22, 528.98, 313.77, 254.10, 5.0);
+  CloudType::Ptr depCloud = cvMat2PointCloud(d_img, intr);
+
+  RGBDImage rgbdObj(*depCloud);
+  cv::Mat dbgSegMat(depCloud->height, depCloud->width, CV_8UC3); //分割结果可视化
+  vector<vector<int>> idxss;
+
+  planeFitter_.minSupport = 000;
+  planeFitter_.run(&rgbdObj, &idxss, &dbgSegMat);
+  annotateLabelMat(planeFitter_.membershipImg, &dbgSegMat);
+  const char *winNameAhc = "ahc-dbg";
+  imshow(winNameAhc, dbgSegMat);
+#endif
 
   if (visualization_)
   {			
@@ -232,7 +297,8 @@ bool Evaluation::grab (double stamp, PtrStepSz<const unsigned short>& depth, Ptr
   // Datasets are with factor 5000 (pixel to m) 
   // http://cvpr.in.tum.de/data/datasets/rgbd-dataset/file_formats#color_images_and_depth_maps
      
-  d_img.convertTo(impl_->depth_buffer, d_img.type(), 0.2);
+  //d_img.convertTo(impl_->depth_buffer, d_img.type(), 0.2);
+  d_img.convertTo(impl_->depth_buffer, d_img.type(), 1); //zc
   depth.data = impl_->depth_buffer.ptr<ushort>();
   depth.cols = impl_->depth_buffer.cols;
   depth.rows = impl_->depth_buffer.rows;
@@ -265,6 +331,9 @@ void Evaluation::saveAllPoses(const pcl::gpu::KinfuTracker& kinfu, int frame_num
   
   ofstream path_file_stream(logfile.c_str());
   path_file_stream.setf(ios::fixed,ios::floatfield);
+
+  //zc: 顺便生成旧式的 csv: txyz+qwxyz; 仿照 camera_pose.h     @2017-7-18 14:40:40
+  ofstream csv_pose("kinfu_poses.csv");
   
   for(int i = 0; i < frame_number; ++i)
   {
@@ -277,6 +346,11 @@ void Evaluation::saveAllPoses(const pcl::gpu::KinfuTracker& kinfu, int frame_num
     path_file_stream << stamp << " ";
     path_file_stream << t[0] << " " << t[1] << " " << t[2] << " ";
     path_file_stream << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+
+    csv_pose << t[0] << "," << t[1] << "," << t[2]
+              << "," << q.w () << "," << q.x ()
+              << "," << q.y ()<< ","  << q.z () << std::endl;
+
   }
 }
 

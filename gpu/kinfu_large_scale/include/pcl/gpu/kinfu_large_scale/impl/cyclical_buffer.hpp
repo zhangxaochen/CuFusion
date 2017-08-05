@@ -205,7 +205,14 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
 	  PCL_DEBUG ( "Size is : %x\n", size );
   }
   pcl::device::clearTSDFSlice (volume->data (), &buffer_, offset_x, offset_y, offset_z);
-  pcl::device::clearColorSlice (color->data (), &buffer_, offset_x, offset_y, offset_z);
+  //zc:
+  if(color){
+      pcl::device::clearColorSlice (color->data (), &buffer_, offset_x, offset_y, offset_z);
+      PCL_WARN("@CyclicalBuffer.performShift--clearColorSlice color volume VALID\n");
+  }
+  else{
+      PCL_WARN("@CyclicalBuffer.performShift--clearColorSlice: color volume INVALID---------------\n");
+  }
 
   if ( extract_world ) {
 	  // insert current slice in the world if it contains any points
@@ -215,9 +222,16 @@ pcl::gpu::CyclicalBuffer::performShift (const pcl::gpu::TsdfVolume::Ptr volume, 
 	  }
   }
 
-  // shift buffer addresses
-  shiftOrigin (volume, color, offset_x, offset_y, offset_z);
-  
+  //zc:
+  if(color){
+      // shift buffer addresses
+      shiftOrigin (volume, color, offset_x, offset_y, offset_z);
+      PCL_WARN("@CyclicalBuffer.performShift--shiftOrigin: color volume VALID\n");
+  }
+  else{
+      PCL_WARN("@CyclicalBuffer.performShift--shiftOrigin: color volume INVALID---------------\n");
+  }
+
   if ( extract_world ) {
 	  // push existing data in the TSDF buffer
 	  if (previously_existing_slice->points.size () != 0 ) {
