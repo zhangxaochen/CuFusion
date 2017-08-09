@@ -19,7 +19,16 @@ If you find the **code** or [**CU3D dataset**](https://drive.google.com/open?id=
 # How to build #
 We've tested our code on Windows 10, with Visual Studio 2010 (Though other configurations may work)
 To build this repo from source, you should follow the [instructions from PCL](https://github.com/PointCloudLibrary/pcl#compiling), e.g., [Compiling PCL from source on Windows](http://www.pointclouds.org/documentation/tutorials/compiling_pcl_windows.php).
-If you've already built/installed PCL, you need to build the [pcl_gpu_kinfu_large_scale](https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale) library and [pcl_kinfu_largeScale](https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale/tools) executable to run our algorithm.
+If you've already built/installed PCL, you need to build the [pcl_gpu_kinfu_large_scale] library and [pcl_kinfu_largeScale] executable to run our algorithm.
+
+Additional prerequisites:
+- [PEAC]: our fork of [the work of Chen Feng](http://simbaforrest.github.io/blog/2015/10/16/peac.html). Clone our repo and add the source code manually to [pcl_kinfu_largeScale] and [pcl_gpu_kinfu_large_scale] to avoid compilation errors.
+- OpenCV: for image processing; we tested our code with version 2.4.x;
+- Cuda
+
+[peac]: https://github.com/zhangxaochen/peac
+[pcl_kinfu_largeScale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale/tools
+[pcl_gpu_kinfu_large_scale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale
 
 # How to use #
 ##1. Our algorithm
