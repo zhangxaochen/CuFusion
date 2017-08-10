@@ -31,7 +31,7 @@ Additional prerequisites:
 [pcl_gpu_kinfu_large_scale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale
 
 # How to use #
-##1. Our algorithm
+## 1. Our algorithm
 To test our algorithm, run `pcl_kinfu_largeScale_release.exe` in command line:
 
 ```
