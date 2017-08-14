@@ -2052,6 +2052,37 @@ struct KinFuLSApp
 							kinfu_->cuContCloud_ = edgeCloud;
 
 							kinfu_->isCuInitialized_ = true;
+
+							//zc: 求解用于分割基座、扫描物体的平面参数, @2017-8-13 17:18:53
+							//暂定朝上 (cam-coo Y负方向)
+							//注意: 此平面求解转到 g-coo
+							Vector3d pt0(cu4pts.data());
+							for(size_t i=1; i<4; i++){
+								Vector3d pti(cu4pts.data() + i*3);
+
+								//假设相机水平, 斜俯视, 123 号只有一个点在 0号点下方
+								if(pt0.y() < pti.y()){ //此时还在相机坐标系下
+									//计算 ABCD 务必在全局坐标系下
+									Affine3d cam2gd = cam2g.cast<double>();
+									Vector3d pt0g = cam2gd * pt0;
+									Vector3d pti_g = cam2gd * pti;
+
+									Vector3d nvec_g = pt0g - pti_g; //0-i 反着做差, 量纲=米
+									nvec_g.normalize();
+
+									double D = -(nvec_g.dot(pt0g) + kinfu_->plFiltShiftMM_ * MM2M);
+									kinfu_->planeFiltParam_ << nvec_g.x(), nvec_g.y(), nvec_g.z(), D;
+									//调试观察:
+									cout << "kinfu_->planeFiltParam_: " << kinfu_->planeFiltParam_ << endl;
+									cout << "(pt0-pti).dot(pt0): " << (pt0-pti).dot(pt0) << endl;
+									cv::Point px0 = getPxFrom3d(pt0, fx, fy, cx, cy);
+									cv::Point pxnvec = getPxFrom3d(pt0+cam2gd.rotation().transpose()*nvec_g*5e-2, fx, fy, cx, cy);
+									cv::line(dbgSegMat, px0, pxnvec, 255, 2);
+
+									break;
+								}
+							}
+
 						}//if-(isFoundCu4pts)
 
 						imshow(winNameAhc, dbgSegMat);
@@ -3365,6 +3396,14 @@ int
 
 		app.kinfu_->e2c_dist_ = 0.05;
 		pc::parse_argument(argc, argv, "-e2cDist", app.kinfu_->e2c_dist_);
+
+		//对重建指定平面进行微调, 量纲毫米	@2017-8-14 02:44:48
+		app.kinfu_->isPlFilt_ = false;
+		app.kinfu_->plFiltShiftMM_ = 0;
+		if(pc::parse_argument(argc, argv, "-plfilt", app.kinfu_->plFiltShiftMM_) > 0)
+			app.kinfu_->isPlFilt_ = true;
+		cout<<"-plfilt: " <<pc::parse_argument (argc, argv, "-plfilt", app.kinfu_->plFiltShiftMM_)<<endl;
+
 	}
 
 	app.kinfu_->incidAngleThresh_ = 75; //默认值, 按 pcc 的经验值  @2017-3-8 20:47:22

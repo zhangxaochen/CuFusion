@@ -1977,6 +1977,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 	//zc:
 	cv::Mat dcurrFiltHost(depth_raw.rows(), depth_raw.cols(), CV_16UC1);
+	DepthMap depthPlFilt;
 	{
 	ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all"); //release 下 ~12ms
 	device::bilateralFilter (depth_raw, depths_curr_[0]);
@@ -2047,7 +2048,34 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 		float3 device_volume_size = device_cast<const float3>(tsdf_volume_->getSize());
 
-		device::integrateTsdfVolume(depth_raw, intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
+#if 0	//放弃, 因为 fid==0 时, 尚未初始化 planeFiltParam_
+		if(isPlFilt_){
+			//fid==0 时, 也要构造 depthPlFilt; 拷贝自后面
+			Eigen::Affine3f cam2g = this->getCameraPose(); //移植到 kinfuLS 之后, 可能存在 shift 导致出错的风险, 暂不处理 @2017-4-5 11:29:23
+			Eigen::Affine3d cam2gd = cam2g.cast<double>();
+
+			Eigen::Vector4f planeFiltParam_c;
+			Eigen::Vector3d nvec, nvec_c;
+			nvec << planeFiltParam_.x(), planeFiltParam_.y(), planeFiltParam_.z(); //此时还是 g-coo
+			nvec_c = cam2gd.rotation().transpose() * nvec;
+			double D_c = planeFiltParam_.w() + nvec.dot(cam2gd.translation());
+			planeFiltParam_c << nvec_c.x(), nvec_c.y(), nvec_c.z(), D_c;
+
+			float4 &device_plparam = device_cast<float4>(planeFiltParam_c);
+			printf("device_plparam.xyzw: %f, %f, %f, %f\n", device_plparam.x, device_plparam.y, device_plparam.z, device_plparam.w);
+
+			device::planeFilter(depth_raw, intr, device_plparam, depthPlFilt);
+		}//if-(isPlFilt_)
+
+		//device::integrateTsdfVolume(depth_raw, 
+		device::integrateTsdfVolume(isPlFilt_ ? depthPlFilt : depth_raw, 
+			intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
+#else
+		if(!isPlFilt_){
+		device::integrateTsdfVolume(depth_raw, 
+			intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
+		}
+#endif
 
 		for (int i = 0; i < LEVELS; ++i)
 			device::tranformMaps (vmaps_curr_[i], nmaps_curr_[i], device_initial_cam_rot, device_initial_cam_trans, vmaps_g_prev_[i], nmaps_g_prev_[i]);
@@ -2525,7 +2553,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				result = A_f2mod_.llt().solve(b_f2mod_).cast<float>();
 				//Eigen::Matrix<float, 6, 1> result = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(b);
 			}
-			else{
+			else{ //if-(this->isCuInitialized_)
 				//配准目标2: frame2marker (3d cuboid fiducial marker)
 				A_f2mkr_.setZero(); //因为 estimateCombined 是赋值, 不是 "+=" 所以其实不必; 此处仅做保险
 				b_f2mkr_.setZero();
@@ -2662,11 +2690,30 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	tvecs_.push_back (tcurr);
 
 	if(this->isCuInitialized_){
-		//zc: 拷贝自上面 *cubeCamBA* 代码段 @2017-6-20 09:37:37
+		//zc: 调试, 拷贝自上面 *cubeCamBA* 代码段 @2017-6-20 09:37:37
 		Eigen::Affine3f cam2g = this->getCameraPose(); //移植到 kinfuLS 之后, 可能存在 shift 导致出错的风险, 暂不处理 @2017-4-5 11:29:23
-		Cube cubeCamAA(cube_g_, cam2g.cast<double>().inverse());
+		Eigen::Affine3d cam2gd = cam2g.cast<double>();
+		Cube cubeCamAA(cube_g_, cam2gd.inverse());
 		cubeCamAA.drawContour(m8uc3, fx_, fy_, cx_, cy_, cv::Scalar(0,0,255)); //红色轮廓图
 		cv::imshow("m8uc3", m8uc3);
+
+		Eigen::Vector4f planeFiltParam_c;
+		Eigen::Vector3d nvec, nvec_c;
+		nvec << planeFiltParam_.x(), planeFiltParam_.y(), planeFiltParam_.z(); //此时还是 g-coo
+		nvec_c = cam2gd.rotation().transpose() * nvec;
+		double D_c = planeFiltParam_.w() + nvec.dot(cam2gd.translation());
+		planeFiltParam_c << nvec_c.x(), nvec_c.y(), nvec_c.z(), D_c;
+
+		float4 &device_plparam = device_cast<float4>(planeFiltParam_c);
+		printf("device_plparam.xyzw: %f, %f, %f, %f\n", device_plparam.x, device_plparam.y, device_plparam.z, device_plparam.w);
+
+		device::planeFilter(depth_raw, intr, device_plparam, depthPlFilt);
+		cv::Mat depthPlFiltHost(depth_raw.rows(), depth_raw.cols(), CV_16UC1),
+			depthPlFiltHost8u;
+		depthPlFilt.download(depthPlFiltHost.data, depthPlFilt.colsBytes());
+		depthPlFiltHost.convertTo(depthPlFiltHost8u, CV_8UC1, UCHAR_MAX/3e3);
+		imshow("depthPlFiltHost8u", depthPlFiltHost8u);
+
 	}
 
 	///////////////////////////////////////////////////////////////////////////////////////////
@@ -2817,7 +2864,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				imshow("wmapHost8u", wmapHost8u);
 			}
 
-			integrateTsdfVolume_v11(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(),
+			integrateTsdfVolume_v11(isPlFilt_ ? depthPlFilt : depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(),
 				tsdf_volume_->volume2nd_, tsdf_volume_->flagVolume_, tsdf_volume_->surfNormPrev_, tsdf_volume_->vrayPrevVolume_, largeIncidMask_total_,
 				/*nmap_total_g, */ 
 				//nmap_g_model_, //到底用哪个? 不好弄
@@ -2830,7 +2877,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
 
 		}//if-isTsdfVer(11)
-	}
+	}//if-(integrate)
 
 	///////////////////////////////////////////////////////////////////////////////////////////
 	// Ray casting //改调到最前面, 仿 bdrOdometry 规矩

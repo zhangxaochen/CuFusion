@@ -134,6 +134,15 @@ namespace pcl
     void 
     bilateralFilter (const DepthMap& src, DepthMap& dst);
     
+    //zc:
+    //@brief 按平面参数, 去除平面下方(法向量异侧)的点, 填0
+    //@param[in] src soruce map
+    //@param[in] intr camera intrinsics
+    //@param[in] plParam 平面参数, xyzw 对应 ABCD
+    //@param[out] dst output map
+    void 
+    planeFilter(const DepthMap &src, Intr& intr, float4 plParam, DepthMap &dst);
+
 	/** \brief Computes depth pyramid
       * \param[in] src source
       * \param[out] dst destination

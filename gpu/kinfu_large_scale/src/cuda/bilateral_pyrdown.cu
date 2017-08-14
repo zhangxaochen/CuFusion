@@ -89,6 +89,35 @@ namespace pcl
 
     //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     __global__ void
+    planeFilterKernel (const PtrStepSz<ushort> src, 
+                     PtrStep<ushort> dst, 
+                     Intr intr,
+                     float4 plParam)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x >= src.cols || y >= src.rows)
+        return;
+
+      int depth = src.ptr (y)[x];
+      if(depth == 0)
+          return;
+
+      float3 pt; //mm
+      pt.x = (x - intr.cx) / intr.fx * depth;
+      pt.y = (y - intr.cy) / intr.fy * depth;
+      pt.z = depth;
+
+      float v = pt.x * plParam.x + pt.y * plParam.y + pt.z * plParam.z + plParam.w * 1000.; //转到毫米尺度
+      if(v > 0)
+          dst.ptr(y)[x] = depth;
+      else
+          dst.ptr(y)[x] = 0;
+    }//planeFilterKernel
+
+    //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    __global__ void
     pyrDownKernel (const PtrStepSz<ushort> src, PtrStepSz<ushort> dst, float sigma_color)
     {
       int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -146,6 +175,20 @@ pcl::device::bilateralFilter (const DepthMap& src, DepthMap& dst)
 
   cudaSafeCall ( cudaGetLastError () );
 };
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void
+pcl::device::planeFilter(const DepthMap &src, Intr& intr, float4 plParam, DepthMap &dst){
+  dst.create (src.rows (), src.cols ());
+
+  dim3 block (32, 8);
+  dim3 grid (divUp (src.cols (), block.x), divUp (src.rows (), block.y));
+  //bilateralKernel<<<grid, block>>>(src, dst, 0.5f / (sigma_space * sigma_space), 0.5f / (sigma_color * sigma_color));
+  planeFilterKernel<<<grid, block>>>(src, dst, intr, plParam);
+
+  cudaSafeCall ( cudaGetLastError () );
+}//planeFilter
+
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void

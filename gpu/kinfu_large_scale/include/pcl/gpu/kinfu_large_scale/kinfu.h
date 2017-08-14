@@ -810,6 +810,11 @@ namespace pcl
 		//耿老师要求生成合成数据, 无噪声, 立方体坐标系为世界坐标系 @2017-5-8 20:00:52
 		bool genSynData_;
 
+		//以某平面(ABCD四参数, 量纲米)为分割 filter, 法向量同侧的保留 @2017-8-13 19:10:58
+		//耿老师要求: 立方体上平面作为分割界面, 仅融合上面的
+		bool isPlFilt_; //命令行参数
+		float plFiltShiftMM_; //参考面上下平移控制, 其实没用在 kinfu.cpp, 备用
+		Eigen::Vector4f planeFiltParam_; //世界坐标系下的
 
       private:
 
