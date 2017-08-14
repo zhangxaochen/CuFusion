@@ -7,7 +7,9 @@ This is the initial version of our algorithm with trial dirty code and redundant
 # Dataset #
 We introduce a dataset called **[CU3D]**, for the validation of our algorithm. 
 
-The dataset contains 3 noiseless synthetic sequences with both the ground-truth (GT) camera trajectories and GT mesh scene models, and 6 noisy real-world scanning sequences with ONLY the GT mesh models of the scanned objectives.
+The dataset contains 3 noiseless synthetic sequences with both the ground-truth (GT) camera trajectories and GT mesh scene models, and 6 noisy real-world scanning sequences with ONLY the GT mesh models of the scanned objectives. 
+
+The synthetic data are generated with camera intrinsic $K_s$ ([synDep525.param]), while the real-world data are with intrinsic $K_r$ ([myKinectV1.param]).
 
 **Note:** Different from the [**TUM RGB-D dataset**](https://vision.in.tum.de/data/datasets/rgbd-dataset/file_formats#color_images_and_depth_maps), where the depth images are scaled by a factor of 5000, currently our depth values are stored in the PNG files in millimeters, namely, with a scale factor of 1000. We may remake the data to conform to the style of the TUM dataset later.
 
@@ -31,6 +33,8 @@ Additional prerequisites:
 [peac]: https://github.com/zhangxaochen/peac
 [pcl_kinfu_largeScale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale/tools
 [pcl_gpu_kinfu_large_scale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale
+[synDep525.param]: https://drive.google.com/open?id=0B4vahSr3aGadbXB2S2kzS3lJUVk
+[myKinectV1.param]: https://drive.google.com/open?id=0B4vahSr3aGadNGplM05pN3FqSGs
 
 # How to use #
 ## 1. Our algorithm
