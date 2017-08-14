@@ -1,11 +1,11 @@
-
+Ôªø
 # CuFusion #
-This repo is a fork of [StanfordPCL(Qianyi Zhou's PCL Fork)](https://github.com/qianyizh/StanfordPCL "qianyizh/StanfordPCL") containing the code implementation of our work [**CuFusion**](https://www.preprints.org/manuscript/201708.0022/v1), a novel approach for  accurate real-time depth camera tracking and volumetric scene reconstruction with a known cuboid reference object.
+This repo is a fork of [StanfordPCL(Qianyi Zhou's PCL Fork)](https://github.com/qianyizh/StanfordPCL "qianyizh/StanfordPCL") containing the code implementation of our work [CuFusion], a novel approach for  accurate real-time depth camera tracking and volumetric scene reconstruction with a known cuboid reference object.
 
 This is the initial version of our algorithm with trial dirty code and redundant comments.
 
 # Dataset #
-We introduce a dataset called [**CU3D**](https://drive.google.com/open?id=0B4vahSr3aGadN0ozUmE3dVNSXzA), for the validation of our algorithm. 
+We introduce a dataset called **[CU3D]**, for the validation of our algorithm. 
 
 The dataset contains 3 noiseless synthetic sequences with both the ground-truth (GT) camera trajectories and GT mesh scene models, and 6 noisy real-world scanning sequences with ONLY the GT mesh models of the scanned objectives.
 
@@ -13,8 +13,8 @@ The dataset contains 3 noiseless synthetic sequences with both the ground-truth 
 
 # Related Publications #
 
-If you find the **code** or [**CU3D dataset**](https://drive.google.com/open?id=0B4vahSr3aGadN0ozUmE3dVNSXzA) valuable for your research please cite this work:
-> ZHANG, C.; Hu, Y. [CuFusion: Accurate Real©\time Camera Tracking and Volumetric Scene Reconstruction with a Cuboid](https://www.preprints.org/manuscript/201708.0022/v1). Preprints 2017, 2017080022 (doi: 10.20944/preprints201708.0022.v1).
+If you find this **code** or [CU3D] dataset valuable for your research please cite this work:
+> Zhang, C.; Hu, Y. CuFusion: Accurate Real‚Äêtime Camera Tracking and Volumetric Scene Reconstruction with a Cuboid. Preprints 2017, 2017080022 (doi: 10.20944/preprints201708.0022.v1).
 
 # How to build #
 We've tested our code on Windows 10, with Visual Studio 2010 (Though other configurations may work)
@@ -26,6 +26,8 @@ Additional prerequisites:
 - OpenCV: for image processing; we tested our code with version 2.4.x;
 - Cuda
 
+[CuFusion]: https://www.preprints.org/manuscript/201708.0022/v1
+[cu3d]: https://drive.google.com/open?id=0B4vahSr3aGadN0ozUmE3dVNSXzA
 [peac]: https://github.com/zhangxaochen/peac
 [pcl_kinfu_largeScale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale/tools
 [pcl_gpu_kinfu_large_scale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale
@@ -65,8 +67,8 @@ To test this algorithm, we need to convert the image sequences to  `*.klg` files
 
 
 # References
-1. Newcombe, R. A.; Izadi, S.; Hilliges, O.; Molyneaux, D.; Kim, D.; Davison, A. J.; Kohli, P.; Shotton, J.; 				Hodges, S.; Fitzgibbon, A. KinectFusion: Real-time Dense Surface Mapping and Tracking. In Proceedings of the 2011 10th IEEE International Symposium on Mixed and Augmented Reality; ISMAR °Ø11; IEEE Computer Society: Washington, DC, USA, 2011; pp. 127®C136.
-2. Zhou, Q.-Y.; Koltun, V. Depth camera tracking with contour cues. In 2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR); 2015; pp. 632®C638.
+1. Newcombe, R. A.; Izadi, S.; Hilliges, O.; Molyneaux, D.; Kim, D.; Davison, A. J.; Kohli, P.; Shotton, J.; 				Hodges, S.; Fitzgibbon, A. KinectFusion: Real-time Dense Surface Mapping and Tracking. In Proceedings of the 2011 10th IEEE International Symposium on Mixed and Augmented Reality; ISMAR ‚Äô11; IEEE Computer Society: Washington, DC, USA, 2011; pp. 127‚Äì136.
+2. Zhou, Q.-Y.; Koltun, V. Depth camera tracking with contour cues. In 2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR); 2015; pp. 632‚Äì638.
 3. Whelan, T.; Leutenegger, S.; Moreno, R. S.; Glocker, B.; Davison, A. ElasticFusion: Dense SLAM Without A Pose Graph. In Proceedings of Robotics: Science and Systems; Rome, Italy, 2015.
 
 
