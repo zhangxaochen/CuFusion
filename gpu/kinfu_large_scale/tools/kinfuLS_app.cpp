@@ -102,6 +102,9 @@ typedef pcl::ScopeTime ScopeTimeT;
 
 pcl::console::TicToc tt0, tt1, tt2, tt3; //一些备用计时器
 
+const string pt_picked_str = "PickedPoint";
+const string plane_slice_str = "plane_slice_str";
+
 //zc: 离散图像序列处理, 避免 oni 跳帧
 int fid_;
 bool png_source_;
@@ -109,7 +112,12 @@ string pngDir_;
 vector<string> pngFnames_;
 int pngSid_ = -1, 
 	pngEid_ = -1; //命令行参数, 设定起始终止帧序号, 调试用 2016-11-28 21:40:30
+int pngPauseId_ = -1; //-eval 时, 走到某帧之前, 暂停, 等待人工调试
+//bool isPngPause_ = false;
+
 bool isRealPng_, isZchiPng_;
+
+int everyXframes_ = 1; //采样间隔, 默认=1, 即连续采样 @2017-11-21 10:06:36
 
 bool isReadOn_;   //之前一直没用, 现在启用, 做空格暂停控制键 2016-3-26 15:46:37
 int png_fps_ = 1000;
@@ -744,7 +752,7 @@ struct ImageView
 
 	void
 		showTraj( const cv::Mat & traj, int frame_id, string basedir ) {
-			viewerTraj_.showRGBImage ( (unsigned char *) traj.data, traj.cols, traj.rows, "short_image" );
+			viewerTraj_.showRGBImage ( (unsigned char *) traj.data, traj.cols, traj.rows);//, "short_image" );
 			if ( frame_id != -1 && basedir.compare( "image/" ) == 0 ) {
 				char filename[ 1024 ];
 				sprintf( filename, "%straj/%06d.png", basedir.c_str(), frame_id );
@@ -1008,10 +1016,11 @@ struct KinFuLSApp
 
 	KinFuLSApp(pcl::Grabber& source, float vsz, float shiftDistance, int snapshotRate, bool useDevice, int fragmentRate, int fragmentStart, float trunc_dist, float sx, float sy, float sz) 
 		: exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
+		slice2d_(false), print_nbr_(false), //zc
 		registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_( 480, 640, CV_8UC3, cv::Scalar( 255, 255, 255 )),
 		use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false),
 		kintinuous_( false ), rgbd_odometry_( false ), slac_( false ), bdr_odometry_( false )
-		,cu_odometry_(false)
+		,cu_odometry_(false), kdtree_odometry_(false)
 	{    
 		//Init Kinfu Tracker
 		Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -1044,9 +1053,9 @@ struct KinFuLSApp
 		transformation_inverse_ = pose.matrix().inverse();
 
 		kinfu_->setInitialCameraPose (pose);
-		//kinfu_->volume().setTsdfTruncDist (0.030f / 3.0f * volume_size(0)/*meters*/);
-        //zc: 定死 3cm    @2017-3-17 00:25:42
-		kinfu_->volume().setTsdfTruncDist (0.030f /*meters*/);
+		kinfu_->volume().setTsdfTruncDist (0.030f / 3.0f * volume_size(0)/*meters*/);
+		//zc: 定死 3cm    @2017-3-17 00:25:42
+		//kinfu_->volume().setTsdfTruncDist (0.030f /*meters*/);
 		kinfu_->setIcpCorespFilteringParams (0.1f/*meters*/, sin ( pcl::deg2rad(20.f) ));
 		kinfu_->setDepthTruncationForICP(2.5f/*meters*/);
 		//kinfu_->setDepthTruncationForIntegrate(2.5f/*meters*/);
@@ -1104,18 +1113,34 @@ struct KinFuLSApp
 
 			pcl::visualization::PCLVisualizer *v_visualizer = (pcl::visualization::PCLVisualizer*)(cookie);
 
-			const string pt_picked_str = "PickedPoint";
 			v_visualizer->removeShape(pt_picked_str);
 
 			v_visualizer->addSphere(pt_picked, cell_size.x()/2, 1,0,1, pt_picked_str);
 
-			this->kinfu_->vxlDbg_[0] = int(pt_picked.x / cell_size.x());
-			this->kinfu_->vxlDbg_[1] = int(pt_picked.y / cell_size.y());
-			this->kinfu_->vxlDbg_[2] = int(pt_picked.z / cell_size.z());
+			vector<int> &vxlDbg = this->kinfu_->vxlDbg_;
+
+			vxlDbg[0] = int(pt_picked.x / cell_size.x());
+			vxlDbg[1] = int(pt_picked.y / cell_size.y());
+			vxlDbg[2] = int(pt_picked.z / cell_size.z());
 			cout << "this->kinfu_->vxlDbg_[0/1/2]: "
-				<< this->kinfu_->vxlDbg_[0] << ","
-				<< this->kinfu_->vxlDbg_[1] << ","
-				<< this->kinfu_->vxlDbg_[2] << "," << endl;
+				<< vxlDbg[0] << ","
+				<< vxlDbg[1] << ","
+				<< vxlDbg[2] << "," << endl;
+
+			//调试面重绘: @2018-2-1 15:48:12
+			v_visualizer->removeShape(plane_slice_str);
+
+			const int fix_axis = vxlDbg[3];
+			pcl::ModelCoefficients plane_coeff;
+			plane_coeff.values.resize(4, 0); //默认填零
+			plane_coeff.values[fix_axis] = 1; //垂直于某坐标轴, 则填1
+			plane_coeff.values[3] = -pt_picked.data[fix_axis];
+
+			v_visualizer->addPlane(plane_coeff, plane_slice_str);
+
+			printf("pt_picked.xyz: (%f, %f, %f), plane_coeff: (%f, %f, %f, %f)\n", pt_picked.x, pt_picked.y, pt_picked.z, 
+				plane_coeff.values[0], plane_coeff.values[1], plane_coeff.values[2], plane_coeff.values[3]);
+
 	}//pointPickingCallback
 
 	void
@@ -1758,6 +1783,9 @@ struct KinFuLSApp
 
 		if (has_data)
 		{
+			//ScopeTimeT time("if-has_data");
+			tt3.tic();
+
 			//if ( frame_id_ == 601 ) {
 			//	char * buf;
 			//	buf = new char[ 512 * 512 * 512 * sizeof( int ) ];
@@ -1768,7 +1796,13 @@ struct KinFuLSApp
 			//	delete []buf;
 			//}
 
+			printf("depth_device_. c/r/step: %d, %d, %d\n", depth_device_.cols(), depth_device_.rows(), depth_device_.step());
 			depth_device_.upload (depth.data, depth.step, depth.rows, depth.cols);
+			printf("depth_device_-after. c/r/step: %d, %d, %d\n", depth_device_.cols(), depth_device_.rows(), depth_device_.step());
+			
+			printf("execute.rgb24. c/r, data: (%d, %d), %d\n", rgb24.cols, rgb24.rows, rgb24.data);
+			printf("colors_device_. c/r/step: %d, %d, %d\n", image_view_.colors_device_.cols(), image_view_.colors_device_.rows(), image_view_.colors_device_.step());
+
 			if (integrate_colors_)
 				image_view_.colors_device_.upload (rgb24.data, rgb24.step, rgb24.rows, rgb24.cols);
 
@@ -1884,7 +1918,9 @@ struct KinFuLSApp
 					depth_device_raw_.upload (depth_raw_.data, depth_raw_.step, depth_raw_.rows, depth_raw_.cols);
 					has_image = kinfu_->slac(depth_device_raw_, depth_device_, &image_view_.colors_device_);
 				} else if ( bdr_odometry_ ) {
+					tt0.tic(); //40~60ms
 					has_image = kinfu_->bdrodometry( depth_device_, &image_view_.colors_device_ );
+					printf("kinfu_->bdrodometry: "); tt0.toc_print();
 					if ( has_image == false && kinfu_->getGlobalTime() > 1 ) {
 						ten_has_data_fail_then_we_call_it_a_day_ = 100;
 					}
@@ -1903,11 +1939,14 @@ struct KinFuLSApp
 
 					//zc: cuOdo 放到最前面, 这样当用 cam2g 求解 kinfu_->cube_g_.cuVerts8_ 时, 用的是已求出的当前帧(i)姿态, 而非(i-1) 姿态
 					//2017-4-22 21:36:41
-					//tt0.tic(); //40~60ms
+					tt0.tic(); //40~60ms
+					//|-> 目前版本, ~100~130ms, 是 f2mod+f2mkr+e2c (后两个只在 level_index==0 才做) @2017-10-7 16:43:04
 					has_image = kinfu_->cuOdometry(depth_device_, &image_view_.colors_device_);
-					//printf("kinfu_->cuOdometry: "); tt0.toc_print();
+					printf("kinfu_->cuOdometry: "); tt0.toc_print();
 
 					if(!kinfu_->isCuInitialized_){ //若全局 cu 没有初始化、定位
+						ScopeTimeT time("NOT kinfu_->isCuInitialized_");
+
 						//1, 平面分割,拟合:
 						PlaneFitter planeFitter_;
 
@@ -2033,7 +2072,7 @@ struct KinFuLSApp
 								double edgeVecNorm = edgeVec.norm();
 								Vector3d pos = begPt;
 
-								const float STEP = 0.001; //1MM
+								const float STEP = 0.003; //1MM
 								float len = 0;
 								while(len < edgeVecNorm){
 									PointXYZ pt;
@@ -2050,8 +2089,8 @@ struct KinFuLSApp
 							PCL_WARN("edgeCloud->size:= %d\n", edgeCloud->size());
 							//kinfu_->cuEdgeTree_.setInputCloud(edgeCloud); //放到 kinfu.cpp 内
 							kinfu_->cuContCloud_ = edgeCloud;
-
 							kinfu_->isCuInitialized_ = true;
+							kinfu_->volume().create_init_cu_volume();
 
 							//zc: 求解用于分割基座、扫描物体的平面参数, @2017-8-13 17:18:53
 							//暂定朝上 (cam-coo Y负方向)
@@ -2105,12 +2144,19 @@ struct KinFuLSApp
 				}
 			}
 
+			if(kinfu_->dbgKf_ >= 1){
+			tt2.tic();
 			image_view_.showDepth (depth_);
-
+			printf("image_view_.showDepth: "); tt2.toc_print(); //5~30ms, 不稳定, why?
+			tt2.tic();
 			// update traj_
 			drawTrajectory();
+			printf("drawTrajectory: "); tt2.toc_print(); //0~1ms, 绘制其实很快
+			tt2.tic();
 			image_view_.showTraj (traj_, kinfu_image_ ? frame_id_ : -1, kinfu_image_dir_);
 			//image_view_.showGeneratedDepth(kinfu_, kinfu_->getCameraPose());
+			printf("image_view_.showTraj: "); tt2.toc_print(); //3~70ms, why?
+			}
 
 			if ( record_log_ ) {
 				if ( use_schedule_ ) {
@@ -2177,7 +2223,8 @@ struct KinFuLSApp
 					}
 				}
 			}
-		}
+			printf("if-has_data: "); tt3.toc_print();
+		}//if-(has_data)
 
 		/*
 		if ( frame_id_ == 960 ) {
@@ -2264,6 +2311,7 @@ struct KinFuLSApp
 			file_index_++;
 		}
 
+		//tt3.tic();
 		if (scan_)
 		{
 			scan_ = false;
@@ -2279,22 +2327,82 @@ struct KinFuLSApp
 				cout << "Converting volume to TSDF cloud ... " << flush;
 				tsdf_volume_.convertToTsdfCloud (tsdf_cloud_ptr_);
 				cout << "done [" << tsdf_cloud_ptr_->size () << " points]" << endl << endl;        
+
+				//zc: @2018-1-26 18:54:49
+				//cv::Mat sliceDbgMat32f;
+				//tsdf_volume_.slice2D(kinfu_->vxlDbg_[0], kinfu_->vxlDbg_[1], kinfu_->vxlDbg_[2],
+				//	1, sliceDbgMat32f);
+
+				//cv::Mat sliceDbgMatCmap;
+				//cv::applyColorMap(sliceDbgMat32f, sliceDbgMatCmap, cv::COLORMAP_RAINBOW);
+				//cv::imshow("sliceDbgMatCmap", sliceDbgMatCmap);
 			}
 			else
 				cout << "[!] tsdf volume download is disabled" << endl << endl;
 		}
+		//printf("if-scan_: "); tt3.toc_print(); //0~1ms
 
+		if(scan_volume_ && slice2d_){
+			//zc: @2018-1-26 18:54:49
+			cout << "Downloading TSDF volume from device ... " << flush;
+			kinfu_->volume().downloadTsdfAndWeighs (tsdf_volume_.volumeWriteable (), tsdf_volume_.weightsWriteable ());
+			tsdf_volume_.setHeader (Eigen::Vector3i (pcl::device::VOLUME_X, pcl::device::VOLUME_Y, pcl::device::VOLUME_Z), kinfu_->volume().getSize ());
+			cout << "done [" << tsdf_volume_.size () << " voxels]" << endl << endl;
+
+			const int fix_axis = kinfu_->vxlDbg_[3];
+			cv::Mat sliceGlobal32f,
+					sliceLocal32f;
+			sliceGlobal32f = tsdf_volume_.slice2D(kinfu_->vxlDbg_[0], kinfu_->vxlDbg_[1], kinfu_->vxlDbg_[2],
+				fix_axis, sliceLocal32f);
+
+			cv::Mat sliceGlobal8u,
+					sliceLocal8u;
+			sliceLocal32f.convertTo(sliceLocal8u, CV_8U, UCHAR_MAX*0.5, UCHAR_MAX*0.5); //数值映射: [-1,1]->[0,255], 因为 applyColorMap-COLORMAP_RAINBOW 对 float 居然成灰白色
+			sliceGlobal32f.convertTo(sliceGlobal8u, CV_8U, UCHAR_MAX*0.5, UCHAR_MAX*0.5);
+
+			cv::Mat sliceGlobalCmap,
+					sliceLocalCmap;
+			//cv::applyColorMap(sliceDbgMat32f, sliceDbgMatCmap, cv::COLORMAP_RAINBOW);
+			cv::applyColorMap(sliceLocal8u, sliceLocalCmap, cv::COLORMAP_RAINBOW);
+			cv::applyColorMap(sliceGlobal8u, sliceGlobalCmap, cv::COLORMAP_RAINBOW);
+			cv::imshow("sliceLocalCmap", sliceLocalCmap);
+			cv::imshow("sliceGlobal8u", sliceGlobal8u);
+
+			if(print_nbr_){
+				int x2d, y2d;
+				if(0 == fix_axis){
+					x2d = kinfu_->vxlDbg_[2]; //z做img的X轴
+					y2d = kinfu_->vxlDbg_[1];
+				}
+				else if(1 == fix_axis){
+					x2d = kinfu_->vxlDbg_[0]; //x做img的X轴
+					y2d = kinfu_->vxlDbg_[2];
+				}
+				else if(2 == fix_axis){
+					x2d = kinfu_->vxlDbg_[0];
+					y2d = kinfu_->vxlDbg_[1];
+				}
+
+				cv::Rect nbrRoi(x2d-2, y2d-2, 5,5);
+				cout << sliceGlobal32f(nbrRoi) << endl;
+			}
+		}
+
+		//tt3.tic();
 		if (scan_mesh_)
 		{
 			scan_mesh_ = false;
 			scene_cloud_view_.showMesh(*kinfu_, integrate_colors_);
 		}
+		//printf("if-scan_mesh_: "); tt3.toc_print(); //0~2ms
 
+		//tt3.tic();
 		if (has_image)
 		{
 			Eigen::Affine3f viewer_pose = getViewerPose(scene_cloud_view_.cloud_viewer_);
 			image_view_.showScene (*kinfu_, rgb24, registration_, kinfu_image_ ? frame_id_ : -1, independent_camera_ ? &viewer_pose : 0, kinfu_image_dir_);
 		}
+		//printf("if-has_image: "); tt3.toc_print(); //30ms, why? 因为: raycast改慢了 @2017-10-8 09:48:54
 
 		if (current_frame_cloud_view_)
 			current_frame_cloud_view_->show (*kinfu_);
@@ -2574,7 +2682,7 @@ struct KinFuLSApp
 			std::cout << "grabber doesn't provide pcl::PointCloud<pcl::PointXYZRGBA> callback !\n";
 		}
 
-		if(!this->evaluation_ptr_){
+		if(this->evaluation_ptr_ == NULL){
 //#if 0   //为了使用 -eval, 暂时屏蔽此 while 逻辑, 改写代码
 		boost::signals2::connection c = 
 			pcd_source_? capture_.registerCallback (func3) : need_colors ? ( triggered_capture ? capture_.registerCallback (func1t) : capture_.registerCallback (func1) ) : ( triggered_capture ? capture_.registerCallback (func2t) : capture_.registerCallback (func2) );
@@ -2612,7 +2720,9 @@ struct KinFuLSApp
 				}
 
 				try { 
+					tt1.tic();
 					this->execute (depth_, rgb24_, has_data); 
+					printf("KinFuLSApp.execute: "); tt1.toc_print();
 
 					//cout << frame_id_ << " : " << framed_transformation_.frame_ << endl;
 					//boost::this_thread::sleep (boost::posix_time::millisec (300));
@@ -2680,6 +2790,7 @@ struct KinFuLSApp
 			int key = -1; //键盘控制
 			int currentIndex = 0; //eval 用
 			while (evaluation_ptr_->grab (currentIndex, depth_)) { 
+			//while (evaluation_ptr_->grab (currentIndex, depth_, rgb24_)) { //加上 rgb, 试图 -r -ic
 				if(currentIndex < pngSid_){
 					currentIndex ++;
 					continue;
@@ -2689,12 +2800,34 @@ struct KinFuLSApp
 
 				printf("---------------currentIndex:= %d\n", currentIndex);
 
-				execute(depth_, rgb24_, true); 
+				//--mask xy窗口包围盒分割, 拷贝自上面 @2017-10-10 16:52:53
+				if ( use_mask_ ) {
+					//unsigned short * depth_buffer = &source_depth_data_[0];
+					unsigned short * depth_buffer = const_cast<unsigned short *>(depth_.data); //const-ptr, 这里 dirty hack
+					
+					for (unsigned yIdx = 0; yIdx < depth_.rows; ++yIdx){
+						for (unsigned xIdx = 0; xIdx < depth_.cols; ++xIdx, ++depth_buffer){
+							if ( xIdx < mask_[ 0 ] || xIdx > mask_[ 1 ] || yIdx < mask_[ 2 ] || yIdx > mask_[ 3 ] ) {
+								*depth_buffer = 0;
+							}
+						}
+					}
+				}
+
+				tt1.tic();
+				printf("rgb24_. c/r, data: (%d, %d), %d\n", rgb24_.cols, rgb24_.rows, rgb24_.data);
+				this->execute(depth_, rgb24_, true); 
+				printf("KinFuLSApp.execute: "); tt1.toc_print();
 				scene_cloud_view_.cloud_viewer_.spinOnce (3); 
-				currentIndex += 1; 
+				//currentIndex += 1; 
+				currentIndex += everyXframes_; 
 
 				imshow("dummy-win0", cv::Mat::zeros(333, 333, CV_8UC1));
-				key = cv::waitKey(png_fps_ > 0 && isReadOn_ ? int(1e3 / png_fps_) : 0);
+				//if(currentIndex >= pngPauseId_)
+				//	cv::waitKey(0);
+					//isPngPause_ = true; //zc: DEPRECATED~
+
+				key = cv::waitKey(currentIndex != pngPauseId_ && png_fps_ > 0 && isReadOn_ ? int(1e3 / png_fps_) : 0);
 				//int key = cv::waitKey(110);
 				//printf("key:= %d\n", key);
 
@@ -2711,6 +2844,15 @@ struct KinFuLSApp
 				else if(key == 't'){
 					//@2017-5-8 19:56:28
 					kinfu_->genSynData_ = true;
+				}
+				else if(key == 'd'){
+					//开启2D切片观察 tsdf 调试窗口 @2018-1-26 18:56:53
+					slice2d_ = !slice2d_;
+					printf("slice2d_ = !slice2d_; --> %s\n", slice2d_ ? "TTT" : "FFF");
+				}
+				else if(key == 'n'){
+					print_nbr_ = !print_nbr_;
+					printf("print_nbr_ = !print_nbr_; --> %s\n", print_nbr_ ? "TTT" : "FFF");
 				}
 
 				if(currentIndex >= evaluation_ptr_->getStreamSize() - 5){
@@ -2806,6 +2948,8 @@ struct KinFuLSApp
 	bool scan_;
 	bool scan_mesh_;
 	bool scan_volume_;
+	bool slice2d_; //zc: 2D切片, 调试观察 tsdf @2018-1-26 18:58:35
+	bool print_nbr_; //输出-vxlDbg调试点/面5x5邻域2D矩阵 (float)
 	//bool save_and_shift_;
 	int file_index_;
 	Eigen::Matrix4f transformation_;
@@ -3242,10 +3386,11 @@ int
 	pc::parse_argument(argc, argv, "-tsdfErodeRad", app.kinfu_->tsdfErodeRad_);
 
 	//zc: <int,int,int>的 vec3, 表示体素坐标, 用于调试 @tsdf23_v8 //2017-2-13 13:55:44
-	app.kinfu_->vxlDbg_ = vector<int>(3, 0);
+    //app.kinfu_->vxlDbg_ = vector<int>(3, 0);
+	app.kinfu_->vxlDbg_ = vector<int>(4, 0); //slice2D 之后, 用 vxlDbg_[3] 存 "012", 表示 fix_axis
 	pc::parse_x_arguments(argc, argv, "-vxlDbg", app.kinfu_->vxlDbg_);
 	{//初始就绘制小圆球, 做调试观察用 //2017-2-17 10:10:05
-        PCL_WARN("vxlDbg_: [%d,%d,%d]\n", app.kinfu_->vxlDbg_[0], app.kinfu_->vxlDbg_[1], app.kinfu_->vxlDbg_[2]);
+        PCL_WARN("vxlDbg_: [%d,%d,%d], slice2D-fix_axis: %d\n", app.kinfu_->vxlDbg_[0], app.kinfu_->vxlDbg_[1], app.kinfu_->vxlDbg_[2], app.kinfu_->vxlDbg_[3]);
 
 		PointXYZ vxl2pt;
 		vector<int> &vxlDbg = app.kinfu_->vxlDbg_;
@@ -3255,36 +3400,57 @@ int
 		vxl2pt.z = (vxlDbg[2] + 0.5f) * cellsz.z();
 
 		app.scene_cloud_view_.cloud_viewer_.addSphere(vxl2pt, cellsz.x()/2, 0,1,0, "vxlDbgPoint");
+
+		const int fix_axis = vxlDbg[3];
+		pcl::ModelCoefficients plane_coeff;
+		plane_coeff.values.resize(4, 0); //默认填零
+		plane_coeff.values[fix_axis] = 1; //垂直于某坐标轴, 则填1
+		//plane_coeff.values[3] = vxlDbg[fix_axis]; //错！
+		//plane_coeff.values[3] = -(vxlDbg[fix_axis] + 0.5f ) * cellsz[fix_axis]; //注意负号 //对, 只是长了点
+		plane_coeff.values[3] = -vxl2pt.data[fix_axis];
+		app.scene_cloud_view_.cloud_viewer_.addPlane(plane_coeff, plane_slice_str);
+
+		printf("vxl2pt.xyz: (%f, %f, %f), plane_coeff: (%f, %f, %f, %f)\n", vxl2pt.x, vxl2pt.y, vxl2pt.z, 
+			plane_coeff.values[0], plane_coeff.values[1], plane_coeff.values[2], plane_coeff.values[3]);
+
 	}
 
 	//控制 kinfu.cpp 中的一些调试窗口开关 //2017-3-3 01:09:38
-	app.kinfu_->dbgKf_ = pc::find_switch(argc, argv, "-dbgKf");
+	//app.kinfu_->dbgKf_ = pc::find_switch(argc, argv, "-dbgKf");
+	//bool 改 int: @2017-11-30 10:41:48
+	app.kinfu_->dbgKf_ = 0;
+	pc::parse_argument(argc, argv, "-dbgKf", app.kinfu_->dbgKf_);
 
 	if ( pc::parse_argument( argc, argv, "--camera", camera_file ) > 0 ) {
 		app.toggleCameraParam( camera_file );
 	}
 
-	int seek_start = 0;
+	//int seek_start = 0;
+	int seek_start = -1;
 	if ( pc::parse_argument (argc, argv, "--seek_start", seek_start) ) {
 		app.seek_start_ = seek_start;
 	}
 
-	if (pc::parse_argument (argc, argv, "-eval", eval_folder) > 0)
+	if (pc::parse_argument (argc, argv, "-eval", eval_folder) > 0){
 		app.toggleEvaluationMode(eval_folder, match_file);
 
-	//zc: 放在 -eval 检查之后	@2017-4-19 14:29:49
-	if (pc::parse_argument (argc, argv, "-sid", pngSid_) > 0 //start-id
-		|| pc::parse_argument (argc, argv, "-eid", pngEid_) > 0) //end-id, 必须与 sid 成对
-	{
-		if(pngSid_ < 0) pngSid_ = 0;
-		if(pngEid_ < 0) pngEid_ = app.evaluation_ptr_->getStreamSize() - 1; //默认范围: [0, size-1]
-		printf("--SELECT png id range: [%d, %d]\n", pngSid_, pngEid_);
-	}
-	else{
-		pngSid_ = 0;
-		pngEid_ = app.evaluation_ptr_->getStreamSize() - 1;
-	}
+		//zc: 放在 -eval 检查之后	@2017-4-19 14:29:49
+		if (pc::parse_argument (argc, argv, "-sid", pngSid_) > 0 //start-id
+			|| pc::parse_argument (argc, argv, "-eid", pngEid_) > 0) //end-id, 必须与 sid 成对
+		{
+			if(pngSid_ < 0) pngSid_ = 0;
+			if(pngEid_ < 0) pngEid_ = app.evaluation_ptr_->getStreamSize() - 1; //默认范围: [0, size-1]
+			printf("--SELECT png id range: [%d, %d]\n", pngSid_, pngEid_);
+		}
+		else{
+			pngSid_ = 0;
+			pngEid_ = app.evaluation_ptr_->getStreamSize() - 1;
+		}
 
+		pc::parse_argument(argc, argv, "-everyX", everyXframes_);
+		pc::parse_argument(argc, argv, "-pauseId", pngPauseId_);
+
+	}
 
 	if (pc::find_switch (argc, argv, "--current-cloud") || pc::find_switch (argc, argv, "-cc"))
 		app.initCurrentFrameView ();
@@ -3296,6 +3462,8 @@ int
 		if (pcd_input) {
 			app.pcd_source_   = true;
 			app.registration_ = true; // since pcd provides registered rgbd
+		} else if(pc::find_switch(argc, argv, "-eval")){ //zc: -eval 时, 也直接 reg=true
+			app.registration_ = true;
 		} else {
 			app.initRegistration();
 		}
@@ -3380,9 +3548,15 @@ int
 		app.toggleCuOdometry();
 
 		//zc: --bdr_amplifier 之前只在 -bdr 上生效, 现在 -cusz 也要用 @2017-7-19 10:32:22
-		float amp = 4.0;
-		pc::parse_argument( argc, argv, "--bdr_amplifier", amp );
-		app.toggleBdrAmplifier( amp );
+		//float amp = 4.0;
+		//pc::parse_argument( argc, argv, "--bdr_amplifier", amp );
+		//app.toggleBdrAmplifier( amp );
+
+		//zc: 改成 -cuAmp 控制, 双参数, 分别控制 f2mkr, e2c @2017-11-30 14:52:26
+		app.kinfu_->w_f2mkr_ = 1.0f;
+		app.kinfu_->e2c_weight_ = 4.0f;
+		pc::parse_2x_arguments(argc, argv, "-cuAmp", 
+			app.kinfu_->w_f2mkr_, app.kinfu_->e2c_weight_);
 
 		//@2017-6-3 18:56:05
 		app.kinfu_->with_nmap_ = pc::find_switch(argc, argv, "-nmap");

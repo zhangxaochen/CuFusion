@@ -166,7 +166,7 @@ pcl::device::generateDepth (const Mat33& R_inv, const float3& t, const MapArr& v
   
   generateDepthKernel<<<grid, block>>>(R_inv.data[2], t, vmap, dst);
   cudaSafeCall (cudaGetLastError ());
-  cudaSafeCall (cudaDeviceSynchronize ());  
+  //cudaSafeCall (cudaDeviceSynchronize ());  //zc: Ã²ËÆ·Ç³£Âý, 10ms
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////

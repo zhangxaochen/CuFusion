@@ -59,6 +59,18 @@
 #include <pcl/console/time.h> //zc: tictoc
 #include "contour_cue_impl.h"
 
+//for g2o   //不能放 @kinfu.h; //拷贝自之前 pcl/gpu/.../kinfu.cpp; @2017-11-13 10:51:02
+#include <g2o/core/sparse_optimizer.h>
+#include <g2o/core/block_solver.h>
+#include <g2o/core/robust_kernel.h>
+#include <g2o/core/robust_kernel_impl.h>
+#include <g2o/core/optimization_algorithm_levenberg.h>
+
+#include <g2o/solvers/cholmod/linear_solver_cholmod.h>
+#include <g2o/types/slam3d/vertex_se3.h>
+#include <g2o/types/slam3d/edge_se3.h>
+
+
 pcl::console::TicToc tt0, tt1, tt2, tt3; //一些备用计时器
 static int callCnt_ = 0;
 
@@ -66,6 +78,54 @@ PlaneFitter planeFitter_;
 
 pcl::KdTreeFLANN<pcl::PointXYZ> cuEdgeKdtree_;
 bool cuTreeInited_ = false;
+
+//图优化
+g2o::SparseOptimizer g2oOptmizer_;
+
+/**
+ * @brief CameraPoseWriter writes all camera poses computed by
+ * the KinfuTracker to a file on disk.
+ * 拷贝自 @camera_pose.h
+ */
+class CameraPoseWriter //: public CameraPoseProcessor
+{
+  std::string output_filename_;
+  std::ofstream out_stream_;
+  public:
+    /**
+       * @param output_filename name of file to write
+       */
+    CameraPoseWriter (std::string output_filename) :
+      output_filename_ (output_filename)
+    {
+      out_stream_.open (output_filename_.c_str () );
+    }
+
+    ~CameraPoseWriter ()
+    {
+      if (out_stream_.is_open ())
+      {
+        out_stream_.close ();
+        std::cout << "wrote camera poses to file " << output_filename_ << std::endl;
+      }
+    }
+
+    void
+    processPose (const Eigen::Affine3f &pose)
+    {
+      if (out_stream_.good ())
+      {
+        // convert 3x4 affine transformation to quaternion and write to file
+        Eigen::Quaternionf q (pose.rotation ());
+        Eigen::Vector3f t (pose.translation ());
+        // write translation , quaternion in a row
+        out_stream_ << t[0] << "," << t[1] << "," << t[2]
+                    << "," << q.w () << "," << q.x ()
+                    << "," << q.y ()<< ","  << q.z () << std::endl;
+      }
+    }
+
+};//CameraPoseWriter
 
 //////////////////////////////
 CloudType::Ptr cvMat2PointCloud(const cv::Mat &dmat, const pcl::device::Intr &intr){
@@ -557,6 +617,18 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	cuContCloudNormal_ = PointCloud<Normal>::Ptr(new PointCloud<Normal>());
 
 	genSynData_ = false;
+
+	//图优化控制量
+	isLastFoundCrnr_ = false;
+
+	//zc: 图优化配置预设
+	// 使用Cholmod中的线性方程求解器
+	g2o::BlockSolver_6_3::LinearSolverType* linearSolver = new  g2o::LinearSolverCholmod<g2o::BlockSolver_6_3::PoseMatrixType> ();
+	g2o::BlockSolver_6_3 *block_solver = new g2o::BlockSolver_6_3(linearSolver);
+	g2o::OptimizationAlgorithmLevenberg *algo = new g2o::OptimizationAlgorithmLevenberg(block_solver);
+	g2oOptmizer_.setAlgorithm(algo);
+	g2oOptmizer_.setVerbose(true);
+
 }//KinfuTracker-ctor
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -701,7 +773,9 @@ void
 	//zc:
 	vmaps_cu_g_prev_.resize(LEVELS); //立方体 v/nmap-vec 初始化, 但不必 .create
 	nmaps_cu_g_prev_.resize(LEVELS);
-	
+	dmapModel_.create(rows, cols);
+	diffDmap_.create(rows, cols);
+
 	vmap_g_model_.create(rows * 3, cols);
 	nmap_g_model_.create(rows * 3, cols);
 
@@ -1936,7 +2010,7 @@ bool
 pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolor /*= NULL*/){
 	//printf("---------------callCnt:= %d\n", callCnt_);
 	callCnt_++;
-	ScopeTime time( "Kinfu Tracker All" );
+	//ScopeTime time( "Kinfu Tracker All" );
 	device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
 
 #if 0	//ahc 放到 kinfu_app 里了, 这里分割有错, 搞不定 @2017-4-3 20:42:51
@@ -2155,9 +2229,16 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
 
 	if(this->isCuInitialized_){
-		ScopeTime time("this->isCuInitialized_");
+		//本段核心: zcRenderCubeDmap 生成synCuDmap_device_, 生成 vmaps_cu_g_prev_, nmap...; 其余是调试观察+杂项测试
+		ScopeTime time("this->isCuInitialized_-zcRenderCubeDmap");
 
 		Eigen::Affine3f cam2g = this->getCameraPose(); //移植到 kinfuLS 之后, 可能存在 shift 导致出错的风险, 暂不处理 @2017-4-5 11:29:23
+
+		//test @2017-11-12 21:27:22
+		//tt2.tic();
+		//bool isTrihedronVisible = cube_g_.isTrihedronVisible(cam2g.cast<double>(), fx_, fy_, cx_, cy_, dbgKf_ >= 1);
+		//printf("@@@@@@@@@@@@@@@@@@@isTrihedronVisible: %s; took: ", isTrihedronVisible ? "TRUE" : "FALSE");
+		//tt2.toc_print(); //1ms, 效率可以
 
 		//tt.tic(); //~160ms, 可能是 Cube.drawContour 耗时间? 并不是
 		//虚拟立方体配准前, 【BA】-- BeforeAlignment
@@ -2170,6 +2251,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		//dmatRaw_.convertTo(dmat8uc1, CV_8UC1, UCHAR_MAX/2e3);
 		//cv::cvtColor(m8u, dmat8uc3, cv::COLOR_GRAY2BGR);
 		//cubeCamBA.drawContour(dmat8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
+		if(dbgKf_ >= 1)
 		cubeCamBA.drawContour(m8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
 
 		//tt0.tic(); //仅仅 zcRenderCubeDmap: ~130ms; 改用水平射线法后, 4~13ms
@@ -2179,7 +2261,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		cv::Mat synCu8u;
 		synCuDmapBA.convertTo(synCu8u, CV_8U, UCHAR_MAX/2e3);
 
-		if(genSynData_){
+		if(genSynData_){ //键盘 't' 控制
 			//先确定 cu->g 矩阵 T_(g,cu), 其实该放在全局, 或说单例模式; 暂时不管
 			//记得先前添加 8顶点顺序: 0,123,456,7
 			Vector3f cuOrig = cube_g_.cuVerts8_[0].cast<float>();
@@ -2266,10 +2348,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				//自产自销, 本程序生成, 再回代本程序, 目的对比 ICP 精度
 				char fnBuf[80] = {0};
 				//无噪声的
-				sprintf(fnBuf, "synCu16u-%03d.png", callCnt_);
+				sprintf(fnBuf, "synCu16u-%04d.png", callCnt_);
 				cv::imwrite(fnBuf, synCuDmapBA);
 				//有噪声的
-				sprintf(fnBuf, "synCu16u-noisy-%03d.png", callCnt_);
+				sprintf(fnBuf, "synCu16u-noisy-%04d.png", callCnt_);
 				cv::Mat noiseMat(synCuDmapBA.size(), synCuDmapBA.type());
 				randn(noiseMat, 0, 1.5);
 
@@ -2334,8 +2416,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			genSynData_ = false; //重置false, 及每次按键仅当次生效
 		}//if-genSynData_
 
+		if(dbgKf_ >= 1){
 		cubeCamBA.drawContour(synCu8u, fx_, fy_, cx_, cy_, 255);
 		imshow("synCu8u", synCu8u);
+		}
 
 		synCuDmap_device_.upload(synCuDmapBA.data, synCuDmapBA.cols * synCuDmapBA.elemSize(), synCuDmapBA.rows, synCuDmapBA.cols);
 		
@@ -2351,7 +2435,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 #endif
 		device::tranformMaps(vmaps_cu_g_prev_[0], nmaps_cu_g_prev_[0], device_Rprev, device_tprev, vmaps_cu_g_prev_[0], nmaps_cu_g_prev_[0]);
 
-		if(dbgKf_){
+		if(dbgKf_ >= 1){
 			View nmap_cu_rgb; //这个 nmap 渲染是在相机坐标系下, 见 generateNormal 代码
 			nmap_cu_rgb.create(gx.rows, gx.cols);
 			device::generateNormal(device_Rprev_inv, device_tprev, vmaps_cu_g_prev_[0], nmaps_cu_g_prev_[0], nmap_cu_rgb);
@@ -2369,7 +2453,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			resizeNMap(nmaps_cu_g_prev_[i-1], nmaps_cu_g_prev_[i]);
 		}
 
-		//kdtree:
+		//kdtree: 用 cuTreeInited_ 控制, 仅构造一次 tree
 		if(!cuTreeInited_ && this->cuContCloud_->size() > 0){
 			cuEdgeKdtree_.setInputCloud(this->cuContCloud_);
 
@@ -2409,7 +2493,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 	// Ray casting //icp 之前先做了, 仿 bdrOdometry 规矩, 与原来 kinfu 不同 @2017-4-5 17:10:59
 	{
-	//ScopeTime time("ray-cast-all");                
+	ScopeTime time("ray-cast-all");                
 	raycast (intr, device_Rprev, device_tprev, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
 	for (int i = 1; i < LEVELS; ++i)
 	{
@@ -2535,7 +2619,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 //#endif
 			}//if-(with_nmap_ && this->isCuInitialized_)
 
-			if(!this->isCuInitialized_){
+			if(!this->isCuInitialized_)
+				//|| level_index > 0) //改设定, 仅当最底层金字塔才做 A_f2mkr_, A_e2c_, 试图提升效率; 结果: 60ms->40ms @2017-10-7 16:09:03
+				//↑-不行, owl, fid<200 会飘
+			{
 			//if(1){
 				if(level_index == 0 && iter == 0)
 					PCL_WARN("this->isCuInitialized_--FALSE, using kf.orig\n");
@@ -2554,6 +2641,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				//Eigen::Matrix<float, 6, 1> result = A.jacobiSvd(ComputeThinU | ComputeThinV).solve(b);
 			}
 			else{ //if-(this->isCuInitialized_)
+				//ScopeTime time("icp-A_f2mkr_-A_e2c_"); //不要在循环内
+
+				{
+				//ScopeTime time("icp-A_f2mkr_");
 				//配准目标2: frame2marker (3d cuboid fiducial marker)
 				A_f2mkr_.setZero(); //因为 estimateCombined 是赋值, 不是 "+=" 所以其实不必; 此处仅做保险
 				b_f2mkr_.setZero();
@@ -2561,7 +2652,11 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					//vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_f2mkr_, sumbuf_f2mkr_, A_f2mkr_.data(), b_f2mkr_.data()); //没用
 					vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
 					//vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
+				}//ScopeTime
 
+				int ll = 0; //匹配点计数器
+				{
+				//ScopeTime time("icp-A_e2c_");
 				//配准目标3: edge2cont; 这里不受金字塔影响, 始终 640*480
 				pcl::PointCloud<pcl::PointXYZ>::Ptr maskedpts_g(new pcl::PointCloud<pcl::PointXYZ>);
 				Eigen::Affine3f cam2g;
@@ -2574,7 +2669,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				
 				A_e2c_.setZero(); //因为 "+=", 所以必须!!!
 				b_e2c_.setZero();
-				int ll = 0; //匹配点计数器
+				//int ll = 0; //匹配点计数器 //移到 ScopeTime 外
 				for(int k = 0; k < maskedpts_g->size(); k++){
 					cuEdgeKdtree_.nearestKSearch(maskedpts_g->points[k], 1, pointIdxNKNSearch, pointNKNSquaredDistance);
 
@@ -2616,6 +2711,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 						ll++;
 					}//dist < distTh
 				}//for-each-edge-point
+				}//ScopeTime
 
 				//double det_f2mod = A_f2mod_.determinant(),
 				double det_f2mkr = A_f2mkr_.determinant(),
@@ -2631,16 +2727,20 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 				//const float amplifier_e2c = 10; //以下改借用 -bdr_amp :: amplifier_
 				//三项组合 (默认):
-				result = (A_f2mod_ + A_f2mkr_ + amplifier_ * A_e2c_).llt().solve(b_f2mod_ + b_f2mkr_ + amplifier_ * b_e2c_).cast<float>();
+				result = (A_f2mod_ + w_f2mkr_ * A_f2mkr_ + e2c_weight_ * A_e2c_).llt()
+					.solve(b_f2mod_ + w_f2mkr_ * b_f2mkr_ + e2c_weight_ * b_e2c_).cast<float>();
 				if(term_123_)
 					;
 				//两项组合: 
 				else if(term_12_) //f2mod+f2mkr
-					result = (A_f2mod_ + A_f2mkr_ /*+ amplifier_ * A_e2c_*/).llt().solve(b_f2mod_ + b_f2mkr_ /*+ amplifier_ * b_e2c_*/).cast<float>();
+					result = (A_f2mod_ + w_f2mkr_ * A_f2mkr_)
+					.llt().solve(b_f2mod_ + w_f2mkr_ * b_f2mkr_).cast<float>();
 				else if(term_13_)
-					result = (A_f2mod_ /*+ A_f2mkr_*/ + amplifier_ * A_e2c_).llt().solve(b_f2mod_ /*+ b_f2mkr_*/ + amplifier_ * b_e2c_).cast<float>();
+					result = (A_f2mod_ + e2c_weight_ * A_e2c_)
+					.llt().solve(b_f2mod_ + e2c_weight_ * b_e2c_).cast<float>();
 				else if(term_23_)
-					result = (/*A_f2mod_ +*/ A_f2mkr_ + amplifier_ * A_e2c_).llt().solve(/*b_f2mod_ +*/ b_f2mkr_ + amplifier_ * b_e2c_).cast<float>();
+					result = (w_f2mkr_ * A_f2mkr_ + e2c_weight_ * A_e2c_)
+					.llt().solve(w_f2mkr_ * b_f2mkr_ + e2c_weight_ * b_e2c_).cast<float>();
 				//若仅用一项测试
 				else if(term_1_) //kf
 					result = A_f2mod_.llt().solve(b_f2mod_).cast<float>();
@@ -2690,12 +2790,22 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	tvecs_.push_back (tcurr);
 
 	if(this->isCuInitialized_){
+		ScopeTime time("this->isCuInitialized_-planeFilter");
+
 		//zc: 调试, 拷贝自上面 *cubeCamBA* 代码段 @2017-6-20 09:37:37
 		Eigen::Affine3f cam2g = this->getCameraPose(); //移植到 kinfuLS 之后, 可能存在 shift 导致出错的风险, 暂不处理 @2017-4-5 11:29:23
 		Eigen::Affine3d cam2gd = cam2g.cast<double>();
 		Cube cubeCamAA(cube_g_, cam2gd.inverse());
-		cubeCamAA.drawContour(m8uc3, fx_, fy_, cx_, cy_, cv::Scalar(0,0,255)); //红色轮廓图
-		cv::imshow("m8uc3", m8uc3);
+		if(dbgKf_ >= 1){
+			cubeCamAA.drawContour(m8uc3, fx_, fy_, cx_, cy_, cv::Scalar(0,0,255)); //红色轮廓图
+			cv::imshow("m8uc3", m8uc3);
+
+			if(dbgKf_ >= 2){
+				char fnBuf[80] = {0};
+				sprintf(fnBuf, "m8uc3-%04d.png", callCnt_);
+				cv::imwrite(fnBuf, m8uc3);
+			}
+		}
 
 		Eigen::Vector4f planeFiltParam_c;
 		Eigen::Vector3d nvec, nvec_c;
@@ -2705,16 +2815,175 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		planeFiltParam_c << nvec_c.x(), nvec_c.y(), nvec_c.z(), D_c;
 
 		float4 &device_plparam = device_cast<float4>(planeFiltParam_c);
-		printf("device_plparam.xyzw: %f, %f, %f, %f\n", device_plparam.x, device_plparam.y, device_plparam.z, device_plparam.w);
+		//printf("device_plparam.xyzw: %f, %f, %f, %f\n", device_plparam.x, device_plparam.y, device_plparam.z, device_plparam.w); //√
 
+		if(isPlFilt_){
 		device::planeFilter(depth_raw, intr, device_plparam, depthPlFilt);
 		cv::Mat depthPlFiltHost(depth_raw.rows(), depth_raw.cols(), CV_16UC1),
 			depthPlFiltHost8u;
 		depthPlFilt.download(depthPlFiltHost.data, depthPlFilt.colsBytes());
 		depthPlFiltHost.convertTo(depthPlFiltHost8u, CV_8UC1, UCHAR_MAX/3e3);
 		imshow("depthPlFiltHost8u", depthPlFiltHost8u);
+		}
 
-	}
+		//+++++++++++++++图优化相机轨迹, 后处理; 发生在所有配准之后, integrate 之前 @2017-11-13 00:53:03
+		static CameraPoseWriter graphOptPoseWriter("zcpose-ahc-g2o.csv");
+
+		static bool isGraphOptBegin = false;
+		static Affine3fVec camPoseVec2opt;
+		static Affine3fVec camDeltaVec; //这个是 icp 求得的增量们, 用作 edge.measurement
+
+		Affine3f cam2g_i = this->getCameraPose(), //==cam2g
+			cam2g_i_1 = this->getCameraPose(this->rmats_.size()-2);
+
+		//Matrix3f dR = Rprev.transpose() * Rcurr; //i→(i-1)
+		//Vector3f dt = Rprev.transpose() * (tcurr - tprev);
+		//camPoseDelta_.linear() = dR;
+		//camPoseDelta_.translation() = dt;
+		Affine3f camPoseDelta = cam2g_i_1.inverse() * cam2g_i; //Ci->C(i-1); aff 直接 inverse 可以？
+
+		//tt2.tic();
+		bool isFoundCuCrnr = cube_g_.isTrihedronVisible(cam2g.cast<double>(), fx_, fy_, cx_, cy_, dbgKf_ >= 1); //这个 cam2g 是当前帧配准求解之后的
+		//printf("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@isFoundCuCrnr: %s; took: ", isFoundCuCrnr ? "TRUE" : "FALSE"); tt2.toc_print(); //1ms, 效率可以
+
+		if(!isFoundCuCrnr){ //当前帧没
+			if(isLastFoundCrnr_){//上一帧有, 刚刚跟丢, 要初始化图优化构造
+				if(dbgKf_ >= 1)
+					printf("**************************************************P(T)-C(F); isGraphOptBegin=true\n");
+
+				isGraphOptBegin = true; //标记启动
+
+				g2oOptmizer_.clear(); //是否有副作用? 未验证 2017-1-5 02:09:55
+
+				camPoseVec2opt.clear();
+				camDeltaVec.clear();
+
+				camPoseVec2opt.push_back(cam2g_i_1); //[0]-记得需要fix
+			}
+
+			//不管上一帧有无
+			if(isGraphOptBegin){
+				camPoseVec2opt.push_back(cam2g_i);
+				camDeltaVec.push_back(camPoseDelta); //dT 这里才开始填充
+			}
+			else{//!isGraphOptBegin     //若没开始图优化; 普通ICP, 很可能是刚开始扫描的时段
+				//graphOptPoseWriter.processPose(cam2g_i); //写文件
+				//DO-NOTHING, 逻辑改为: curr=T,prevSaved=F 时, 前面的统一 save
+			}
+
+			isLastFoundCrnr_ = false; //用完
+		}
+		else{//if-isFoundCuCrnr //当前帧有
+			//static bool 控制, 第一次进入此逻辑时, 会把之前的 poses 序列预先全部存储 (这部分不做图优化)
+			//此逻辑也适合放在 *当前帧有, 上一帧没有* 段内, 暂不动
+			static bool isPrevPosesSaved = false;
+			if(dbgKf_ >= 1)
+				printf("**************************************************isPrevPosesSaved:= %s\n", isPrevPosesSaved ? "TTT" : "FALSE");
+
+			if(false == isPrevPosesSaved){ //不管上一帧有无 crnr, 因为此逻辑块仅执行一次
+				for(size_t i=0; i<rmats_.size(); i++){
+					Affine3f cam2g_i = this->getCameraPose(i); //local, 外面还有一个
+					graphOptPoseWriter.processPose(cam2g_i);
+				}
+
+				isPrevPosesSaved = true;
+			}
+
+			if(isLastFoundCrnr_){ //上一帧也有
+				if(dbgKf_ >= 1)
+					printf("**************************************************P(T)-C(T)\n");
+
+				//不push, 只更新 back: //改: DO-NOTHING
+				if(camPoseVec2opt.size() > 0)
+					camPoseVec2opt.back() = cam2g_i;
+				else
+					camPoseVec2opt.push_back(cam2g_i);
+
+				graphOptPoseWriter.processPose(cam2g_i); //写文件
+			}
+			else{ //if-!isLastFoundCrnr_ //当前帧有, 上一帧没有
+				if(dbgKf_ >= 1)
+					printf("**************************************************P(F)-C(T); isGraphOptBegin:= %s\n", isGraphOptBegin ? "TTT" : "FALSE");
+
+				if(!isGraphOptBegin){ //未启动 graphOpt, 原因举例比如: ①程序开始时没定位到立方体, 第一次定位时, 进入此段
+					//graphOptPoseWriter.processPose(cam2g_i); //写文件
+					//DO-NOTHING, 因为 isPrevPosesSaved 已经控制 save 过了
+				}
+				else{ //if-isGraphOptBegin //启动过 graphOpt, 说明无立方体空窗期结束, 触发当前段图优化+++++++++++++++
+					isGraphOptBegin = false;
+
+					//填充最后一个 vert, 记得需要fix
+					camPoseVec2opt.push_back(cam2g_i);
+					camDeltaVec.push_back(camPoseDelta);
+
+					//add-verts
+					size_t vertCnt = camPoseVec2opt.size();
+					for(size_t i=0; i<vertCnt; i++){
+						Affine3d &pose_i = camPoseVec2opt[i].cast<double>();
+
+						g2o::VertexSE3 *vi = new g2o::VertexSE3;
+						vi->setId(i);
+						if(i == 0 || i == vertCnt - 1) //首尾帧做固定点
+							vi->setFixed(true);
+						else
+							vi->setFixed(false); //中间帧, 显示设定 false, 不管 g2o 默认怎样
+
+						//vi->setEstimate(pose_i.matrix()); //报错C2664: 'g2o::BaseVertex<D,T>::setEstimate' : cannot convert parameter 1 from 'Eigen::Matrix<_Scalar,_Rows,_Cols>' to 'const Eigen::Transform<_Scalar,_Dim,_Mode> &'
+						vi->setEstimate(g2o::Isometry3D(pose_i.matrix()) );
+						g2oOptmizer_.addVertex(vi);
+					}
+
+					//add-edges
+					for(size_t i=1; i<vertCnt; i++){
+						//Affine3f &pose_i_1_from = camPoseVec2opt[i-1];
+						//Affine3f &pose_i_to = camPoseVec2opt[i];
+						Affine3d &dPose = camDeltaVec[i-1].cast<double>();
+
+						g2o::EdgeSE3 *edge = new g2o::EdgeSE3;
+						//edge->setVertex(0, pose_i_1_from); //胡扯
+						//edge->setVertex(1, pose_i_to);
+						edge->setVertex(0, g2oOptmizer_.vertex(i-1));
+						edge->setVertex(1, g2oOptmizer_.vertex(i));
+						//edge->setMeasurement(dPose.matrix()); //报错 C2664: 'g2o::EdgeSE3::setMeasurement' : cannot convert parameter 1 from 'Eigen::Matrix<_Scalar,_Rows,_Cols>' to 'const g2o::Isometry3D &'
+						edge->setMeasurement(g2o::Isometry3D(dPose.matrix()) ); 
+						//edge->setInformation(g2o::Isometry3D::Identity()); //报错C2664: cannot convert parameter 1 from 'const Eigen::Transform<_Scalar,_Dim,_Mode>' to 'const Eigen::Matrix<_Scalar,_Rows,_Cols,_Options> &'
+						typedef Eigen::Matrix<double, 6, 6> Matrix66;
+						Matrix66 info = Matrix66::Identity();
+						edge->setInformation(info);
+						edge->setRobustKernel(new g2o::RobustKernelHuber);
+
+						g2oOptmizer_.addEdge(edge);
+					}
+
+					static int g2oTimes = 0;
+
+					pcl::console::TicToc tt;
+					tt.tic();
+					g2oOptmizer_.initializeOptimization();
+					g2oOptmizer_.optimize(30);
+					printf("g2oOptmizer_.optimize, times:= %d, TOOK: ", g2oTimes); tt.toc_print();
+
+					char buf[4096];
+					sprintf(buf, "kf-cu-g2o_%d.g2o", (int)g2oTimes);
+
+					g2oOptmizer_.save(buf);
+					g2oTimes++;
+
+					for(size_t i=1; i<vertCnt; i++){ //i=1开始, [0] 已在 isLastFoundCrnr_ && isFoundCrnr 时写文件过了
+						g2o::VertexSE3 *vi = dynamic_cast<g2o::VertexSE3*>(g2oOptmizer_.vertex(i));
+						g2o::Affine3D pose_i;
+						pose_i = vi->estimate();
+
+						graphOptPoseWriter.processPose(pose_i.cast<float>()); //写文件
+					}
+				}//if-isGraphOptBegin
+			}//if-isLastFoundCrnr_-else
+
+			isLastFoundCrnr_ = true;
+
+		}//if-!isFoundCrnr-else
+
+	}//if-(this->isCuInitialized_)
 
 	///////////////////////////////////////////////////////////////////////////////////////////
 	// Integration check - We do not integrate volume if camera does not move.  
@@ -2734,6 +3003,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	float3& device_tcurr = device_cast<float3> (tcurr);
 	if (integrate)
 	{
+		ScopeTime time("if-integrate");
 		//定点调试观察某体素:
 		int3 vxlPos;
 		vxlPos.x = vxlDbg_[0];
@@ -2748,7 +3018,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		}
 		else if(isTsdfVer(11)){
 #define USE_BDR_NMAP_METHOD_ 0  //用 bdr 求解 nmap 方法, 否则, 用 PCA 求 nmap
-            //tsdf-v11.9: 改用 PCA 求 nmap
+			//tsdf-v11.9: 改用 PCA 求 nmap
 
 			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_);
 
@@ -2836,13 +3106,15 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			device::computeNormalsContourcue(intr(0), depths_curr_[0], gx_device_, gy_device_, nmap_bdr);
 			zc::contourCorrespCandidate(t_tmp, vmaps_curr_[0], nmap_bdr, this->incidAngleThresh_, largeIncidMask_total_); //不用 device_tcurr, 不用 nmap..._g
 #endif
+			if(dbgKf_ >= 1){
 			cv::Mat incidMskHost(largeIncidMask_total_.rows(), largeIncidMask_total_.cols(), CV_8UC1);
 			largeIncidMask_total_.download(incidMskHost.data, incidMskHost.cols * incidMskHost.elemSize());
 			imshow("incidMskHost", incidMskHost);
+			}
 
 			cv::Mat edgeDistMap;
 			cv::distanceTransform(md_mask==0, edgeDistMap, CV_DIST_L1, 3);
-			if(dbgKf_){
+			if(dbgKf_ >= 1){
 				cv::Mat edgeMatShow;
 				cv::normalize(edgeDistMap, edgeMatShow, 0, 1, cv::NORM_MINMAX);
 				imshow("edgeMatShow", edgeMatShow);
@@ -2855,7 +3127,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			//MapArr wmap_;
 			//zc::calcWmap(vmaps_curr_[0], nmap_filt, thickContMsk, wmap);
 			zc::calcWmap(vmaps_curr_[0], nmap_filt_, edgeDistMap_device_, fx_, wmap_); //for tsdf-v11.8
-			//if(dbgKf_)
+			if(dbgKf_ >= 1)
 			{
 				cv::Mat wmapHost(wmap_.rows(), wmap_.cols(), CV_32F);
 				wmap_.download(wmapHost.data, wmap_.colsBytes());
@@ -2864,19 +3136,234 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				imshow("wmapHost8u", wmapHost8u);
 			}
 
+			tt1.tic();
 			integrateTsdfVolume_v11(isPlFilt_ ? depthPlFilt : depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(),
-				tsdf_volume_->volume2nd_, tsdf_volume_->flagVolume_, tsdf_volume_->surfNormPrev_, tsdf_volume_->vrayPrevVolume_, largeIncidMask_total_,
+				tsdf_volume_->volume2nd_, tsdf_volume_->flagVolume_, tsdf_volume_->surfNormPrev_, tsdf_volume_->vrayPrevVolume_, 
+				largeIncidMask_total_,
+				//largeIncidMask_model_, //model 为啥放弃?:: 因为边缘也是不稳定区域, 希望与大入射角区域同等处理 @2017-12-3 19:35:27
+				//答: tv11 里, 暂时 total 好一点 (其实是 nmap_bdr 求解得到); 后续 tv12 存疑
 				/*nmap_total_g, */ 
 				//nmap_g_model_, //到底用哪个? 不好弄
 				nmap_filt_g_, 
 				nmap_g_model_, //v11.6
 				wmap_,
 				depthRawScaled_, vxlPos);
+			printf("integrateTsdfVolume_v11 "); tt1.toc_print(); //很快, 1ms
 
 			//zc: 单用 kf-odo, 但是 tv11.10, 在 roma 数据上 f1110 漂移, 改成 tv2 就没事, 原因不明, @2017-4-14 17:25:09
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
 
-		}//if-isTsdfVer(11)
+		}//elif-isTsdfVer(11)
+		else if(isTsdfVer(12)){
+			//v12 核心目的: 运动模糊在 fusion 阶段造成薄片结构损坏, 改进他 @2017-12-1 11:04:32
+			//部分照搬tsdfVer11; 
+
+			//1, fusion 前, 用新T & 旧tsdf, 投射半新 vmap_g_model_, nmap_g_model_
+			//存疑: 直接用旧的行不行? 因为 dT 很小	//试试!!!
+			if(dbgKf_ >= 1)
+				tt3.tic();
+
+			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_);
+
+			if(dbgKf_ >= 1){
+				//printf("isTsdfVer(12)-raycast: "); tt3.toc_print(); //0ms
+
+				tt3.tic();
+			}
+
+			device::generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_, dmapModel_);
+
+			if(dbgKf_ >= 1){
+				//printf("isTsdfVer(12)-generateDepth: "); tt3.toc_print(); //cudaSyn 8~12ms; 去掉syn后 0ms
+
+				tt3.tic();
+			}
+
+#if 0	//opencv CPU
+			cv::Mat dmapModel_host(dmapModel_.rows(), dmapModel_.cols(), CV_16UC1);
+			dmapModel_.download(dmapModel_host.data, dmapModel_.colsBytes());
+
+			cv::Mat dmapRaw_host(depth_raw.rows(), depth_raw.cols(), CV_16UC1);
+			depth_raw.download(dmapRaw_host.data, dmapRaw_host.step);
+
+			cv::Mat dmapModel_host_16s, dmapRaw_host_16s;
+			dmapModel_host.convertTo(dmapModel_host_16s, CV_16S);
+			dmapRaw_host.convertTo(dmapRaw_host_16s, CV_16S);
+			cv::Mat diffDmap16s = dmapRaw_host_16s - dmapModel_host_16s;
+
+			//cv::Mat invalidMask8u(dmapRaw_host.size(), CV_8U, cv::Scalar(255));
+			//invalidMask8u.setTo(0, dmapModel_host_16s==0);
+			//invalidMask8u.setTo(0, dmapRaw_host_16s==0);
+
+#elif 1	//GPU
+			diffDmaps(depth_raw, dmapModel_, diffDmap_);
+
+			//测试: uncertainty 描述子 @2017-12-8 11:01:16
+			//krnl 外先求 dR, dt:: i->(i-1)
+			//Matrix3frm Rcurr_inv = Rcurr.inverse ();
+			//Mat33&  device_Rcurr = device_cast<Mat33> (Rcurr);
+			//Mat33&  device_Rcurr_inv = device_cast<Mat33> (Rcurr_inv);
+			//float3& device_tcurr = device_cast<float3> (tcurr);
+
+			Matrix3frm dR_i_i1 = Rprev_inv * Rcurr;
+			Vector3f dT_i_i1 = Rprev_inv * (tcurr - tprev);
+			Mat33& device_dR_i_i1 = device_cast<Mat33>(dR_i_i1);
+			float3& device_dt_i_i1 = device_cast<float3>(dT_i_i1);
+
+			DeviceArray2D<float> uncertaintyMap;
+			test_depth_uncertainty(vmaps_curr_[0], nmaps_curr_[0], device_dR_i_i1, device_dt_i_i1, uncertaintyMap);
+			
+			//可视化
+			cv::Mat uncertMap32f(uncertaintyMap.rows(), uncertaintyMap.cols(), CV_32F);
+			uncertaintyMap.download(uncertMap32f.data, uncertMap32f.step);
+			
+			const float uncertThresh = 30; //e.g.:: 1. displacement 位移度量
+			uncertMap32f.setTo(-uncertThresh, uncertMap32f < -uncertThresh);
+			uncertMap32f.setTo(+uncertThresh, uncertMap32f > +uncertThresh);
+			
+			cv::Mat uncertMap8u;
+			uncertMap32f.convertTo(uncertMap8u, CV_8U, 128./uncertThresh, 128.);
+			cv::Mat uncertMapCmap;
+			cv::applyColorMap(uncertMap8u, uncertMapCmap, cv::COLORMAP_RAINBOW);
+			cv::imshow("uncertMapCmap", uncertMapCmap);
+#endif
+
+			if(dbgKf_ >= 1){
+				//printf("isTsdfVer(12)-diffDmapCmap: "); tt3.toc_print(); //0ms
+
+				cv::Mat diffDmap16s(diffDmap_.rows(), diffDmap_.cols(), CV_16S);
+				diffDmap_.download(diffDmap16s.data, diffDmap16s.step);
+				const short diffDepthThresh = //1000; //1m
+					15; //1cm
+				diffDmap16s.setTo(-diffDepthThresh, diffDmap16s < -diffDepthThresh);
+				diffDmap16s.setTo(diffDepthThresh, diffDmap16s > diffDepthThresh);
+
+				cv::Mat diffDmap8u;
+				//假设: diff范围 ±diffDepthThresh (mm), 
+				diffDmap16s.convertTo(diffDmap8u, CV_8U, 128./diffDepthThresh, 128.);
+				cv::Mat diffDmapColormap;
+				cv::applyColorMap(diffDmap8u, diffDmapColormap, cv::COLORMAP_RAINBOW);
+				cv::imshow("diffDmapColormap", diffDmapColormap);
+
+				if(dbgKf_ >= 2){
+					char fnBuf[80] = {0};
+					sprintf(fnBuf, "diffDmapCmap-%04d.png", callCnt_);
+					cv::imwrite(fnBuf, diffDmapColormap);
+				}
+
+
+				tt3.tic();
+			}
+
+			float3 t_tmp;
+			t_tmp.x=t_tmp.y=t_tmp.z=0;
+
+			zc::contourCorrespCandidate(device_tcurr, vmap_g_model_, nmap_g_model_, this->incidAngleThresh_, largeIncidMask_model_); //tv11里已放弃? @2017-12-3 19:31:47
+
+			nmap_filt_ = nmaps_curr_[0];
+			zc::transformVmap(nmap_filt_, device_Rcurr, t_tmp, nmap_filt_g_); //对 curr 就用 local, 不用 global, 
+
+			if(dbgKf_ >= 1){
+				//printf("isTsdfVer(12)-contourCorrespCandidate(largeIncidMask_model_)+transformVmap: "); tt3.toc_print(); //2ms
+
+				tt3.tic();
+			}
+
+			//bdr 获取 incidMask
+			cv::Mat dcurrFiltHost(depth_raw.rows(), depth_raw.cols(), CV_16UC1);
+			depths_curr_[0].download(dcurrFiltHost.data, depths_curr_[0].colsBytes()); //用滤波 dmap 替换 raw, 观察
+			cv::Mat gradu, gradv;
+			cv::Sobel(dcurrFiltHost,gradu,CV_32F,1,0,7,1.0/1280); //借用 gradu 变量
+			cv::Sobel(dcurrFiltHost,gradv,CV_32F,0,1,7,1.0/1280);
+			gx_device_.upload(gradu.data, gradu.cols * gradu.elemSize(), gradu.rows, gradu.cols);
+			gy_device_.upload(gradv.data, gradv.cols * gradv.elemSize(), gradv.rows, gradv.cols);
+			//MapArr nmap_filt_, nmap_filt_g_;
+			MapArr nmap_bdr;
+			device::computeNormalsContourcue(intr(0), depths_curr_[0], gx_device_, gy_device_, nmap_bdr);
+			if(dbgKf_ >= 1){
+				//printf("isTsdfVer(12)-computeNormalsContourcue: "); tt3.toc_print(); //8ms
+
+				tt3.tic();
+			}
+
+			zc::contourCorrespCandidate(t_tmp, vmaps_curr_[0], nmap_bdr, this->incidAngleThresh_, largeIncidMask_total_); //不用 device_tcurr, 不用 nmap..._g
+
+			if(dbgKf_ >= 1){
+				//printf("isTsdfVer(12)-contourCorrespCandidate(largeIncidMask_total_): "); tt3.toc_print(); //1ms
+
+				cv::Mat incidMskHost(largeIncidMask_total_.rows(), largeIncidMask_total_.cols(), CV_8UC1);
+				largeIncidMask_total_.download(incidMskHost.data, incidMskHost.cols * incidMskHost.elemSize());
+				imshow("incidMskHost", incidMskHost);
+
+				tt3.tic();
+			}
+
+			cv::Mat edgeDistMap;
+			cv::distanceTransform(md_mask==0, edgeDistMap, CV_DIST_L1, 3);
+			//DeviceArray2D<float> edgeDistMap_device_;
+			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
+			if(dbgKf_ >= 1){
+				//printf("isTsdfVer(12)-distanceTransform: "); tt3.toc_print(); //4ms, 有没有 GPU上的 DistTrans 代码?
+
+				cv::Mat edgeMatShow;
+				cv::normalize(edgeDistMap, edgeMatShow, 0, 1, cv::NORM_MINMAX);
+				imshow("edgeMatShow", edgeMatShow);
+
+				tt3.tic();
+			}
+
+			//weight-map, 按: 1, 入射角cos; 2, D(u); 3, 到边缘距离 来加权
+			//MapArr wmap_;
+			//zc::calcWmap(vmaps_curr_[0], nmap_filt, thickContMsk, wmap);
+			zc::calcWmap(vmaps_curr_[0], nmap_filt_, edgeDistMap_device_, fx_, wmap_); //for tsdf-v11.8
+			if(dbgKf_ >= 1)
+			{
+				//printf("isTsdfVer(12)-calcWmap: "); tt3.toc_print(); //0~1ms
+
+				cv::Mat wmapHost(wmap_.rows(), wmap_.cols(), CV_32F);
+				wmap_.download(wmapHost.data, wmap_.colsBytes());
+				cv::Mat wmapHost8u;
+				wmapHost.convertTo(wmapHost8u, CV_8UC1, UCHAR_MAX); //*255, 因为 wmap 本身 ~(0,1)
+				imshow("wmapHost8u", wmapHost8u);
+
+				tt3.tic();
+			}
+
+			//integrateTsdfVolume_v12
+			integrateTsdfVolume_v13
+				(isPlFilt_ ? depthPlFilt : depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(),
+				tsdf_volume_->volume2nd_, tsdf_volume_->flagVolume_, tsdf_volume_->surfNormPrev_, tsdf_volume_->vrayPrevVolume_, 
+				largeIncidMask_total_,
+				//largeIncidMask_model_, //model 为啥放弃?:: 因为边缘也是不稳定区域, 希望与大入射角区域同等处理 @2017-12-3 19:35:27
+				//答: tv11 里, 暂时 total 好一点 (其实是 nmap_bdr 求解得到); 后续 tv12 存疑
+				/*nmap_total_g, */ 
+				//nmap_g_model_, //到底用哪个? 不好弄
+				nmap_filt_g_, 
+				nmap_g_model_, //v11.6
+				wmap_,
+				dmapModel_,
+				diffDmap_,
+				depthRawScaled_, vxlPos);
+	
+			if(dbgKf_ >= 1){
+				//printf("integrateTsdfVolume_v12 "); tt3.toc_print(); //很快, 1ms
+			}
+		}//elif-isTsdfVer(12)
+		else if(isTsdfVer(13)){
+			integrateTsdfVolume_v13(isPlFilt_ ? depthPlFilt : depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(),
+				tsdf_volume_->volume2nd_, tsdf_volume_->flagVolume_, tsdf_volume_->surfNormPrev_, tsdf_volume_->vrayPrevVolume_, 
+				largeIncidMask_total_,
+				//largeIncidMask_model_, //model 为啥放弃?:: 因为边缘也是不稳定区域, 希望与大入射角区域同等处理 @2017-12-3 19:35:27
+				//答: tv11 里, 暂时 total 好一点 (其实是 nmap_bdr 求解得到); 后续 tv12 存疑
+				/*nmap_total_g, */ 
+				//nmap_g_model_, //到底用哪个? 不好弄
+				nmap_filt_g_, 
+				nmap_g_model_, //v11.6
+				wmap_,
+				dmapModel_,
+				diffDmap_,
+				depthRawScaled_, vxlPos);
+		}
 	}//if-(integrate)
 
 	///////////////////////////////////////////////////////////////////////////////////////////

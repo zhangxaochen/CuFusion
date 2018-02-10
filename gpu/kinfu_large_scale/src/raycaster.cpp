@@ -37,6 +37,7 @@
 
 #include <pcl/gpu/kinfu_large_scale/raycaster.h>
 #include <pcl/gpu/kinfu_large_scale/tsdf_volume.h>
+#include <pcl/console/time.h> //zc: tictoc
 #include "internal.h"
 
 using namespace pcl;
@@ -130,7 +131,10 @@ pcl::gpu::RayCaster::generateDepthImage(Depth& depth) const
   Matrix<float, 3, 3, RowMajor> R_inv = camera_pose_.linear().inverse();
   Vector3f t = camera_pose_.translation();
   
+  //pcl::console::TicToc tt111;
+  //tt111.tic();
   device::generateDepth(device_cast<Mat33>(R_inv), device_cast<const float3>(t), vertex_map_, depth);
+  //printf("RayCaster::generateDepthImage-generateDepth"); tt111.toc_print(); //8~13ms, ÎªÉ¶Âý?
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

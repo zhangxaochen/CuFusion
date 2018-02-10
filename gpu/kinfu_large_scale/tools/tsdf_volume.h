@@ -42,6 +42,10 @@
 #include <pcl/point_types.h>
 #include <pcl/console/print.h>
 
+#include <opencv2/core/core.hpp> //zc
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/opencv.hpp>
+
 
 #define DEFAULT_GRID_RES_X 512  // pcl::device::VOLUME_X ( and _Y, _Z)
 #define DEFAULT_GRID_RES_Y 512
@@ -224,6 +228,13 @@ namespace pcl
     /** \brief Converts volume to cloud of TSDF values*/
     void
     convertToTsdfCloud (pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud) const;
+
+    //@brief 做 2D slice 切片, 生成 cv::Mat 调试观察窗口 @2018-1-25 10:05:23
+    //@param[in] xcen,ycen,zcen 切片中心点, 
+    //@param[in] fix_axis=0/1/2(x/y/z), 想要固定的轴向, 例如固定x轴, 则切片平面为 yz轴
+    //@param[in/out] dbgMat, 以 (x,y,z)为中心, 邻域内 21x21 切片, 放大到 525x525 图像 (25倍)
+    //@return RESxRES 尺寸, 贯穿整个 vol 的切片图
+    cv::Mat slice2D(int xcen, int ycen, int zcen, int fix_axis, cv::OutputArray dbgMat = cv::noArray(), bool doDbg = false);
 
     /** \brief Converts the volume to a surface representation via a point cloud */
   //  void

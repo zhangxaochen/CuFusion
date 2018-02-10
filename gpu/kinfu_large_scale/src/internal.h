@@ -180,6 +180,28 @@ namespace pcl
       */
     void computeNormalsContourcue(const Intr& intr, const DepthMap& depth, const MapArr& grandient_x, const MapArr& grandient_y, MapArr& nmap);
 
+    //@brief 【DEPRECATED】求解 [R*(v1-v2)].z, 输出到 diffDmapOut, R 可以是 c2g,g2c,或单位阵 (根据v1,v2自己定); 深度为零的无效区域(qnan)不参与计算
+    //@param[in] vmap1, src1
+    //@param[in] vmap2, src2
+    //@param[out] diffDmapOut, short!有符号, 而非ushort, 用 SHRT_MIN 表达无效区域
+    PCL_EXPORTS void diffVmaps(const MapArr &vmap1, const MapArr &vmap2, const Mat33 &Rmat, DeviceArray2D<short> &diffDmapOut);
+
+    //@brief 【DEPRECATED】重载版, 去掉 Rmat 参数 (内置单位阵)
+    PCL_EXPORTS void diffVmaps(const MapArr &vmap1, const MapArr &vmap2, DeviceArray2D<short> &diffDmapOut);
+
+    //@brief 【DEPRECATED】GPU 上, diffDmapOut=dmap1-dmap2; dmap1/2 中, 零值区域不特殊处理
+    PCL_EXPORTS void diffDmaps(const DepthMap &dmap1, const DepthMap &dmap2, DeviceArray2D<short> &diffDmapOut);
+    PCL_EXPORTS void diffDmaps(const PtrStepSz<ushort> &dmap1, const PtrStepSz<ushort> &dmap2, DeviceArray2D<short> &diffDmapOut);
+
+    //@brief 跟 diffDmap 不同, 暂不相关, 是看每个 px 在相机坐标系 3D空间的位移量
+    //@param[in] 【DEPRECATED】dmap, 用于计算当前cam coo下, px 对应3D pt 坐标
+    //@param[in] vmap, 双边滤波后的dmap, 用内参 K 转成 cam coo 下的 3D pt
+    //@param[in] nmap, 在 cam coo 下; 位移量是否要投影到法向量上? 待定
+    //@param[in] (dRmat_i_i1, dTvec_i_i1), delta R & t, (i)->(i-1)
+    //@param[out] uncertaintyMap, 存标量, 如位移S(向量)的模, 或S在法向的投影的模
+    PCL_EXPORTS void test_depth_uncertainty(const MapArr &vmap, const MapArr &nmap, const Mat33 &dRmat_i_i1, const float3 & dTvec_i_i1, DeviceArray2D<float> &uncertaintyMap);
+
+
     /** \brief Performs affine tranform of vertex and normal maps
       * \param[in] vmap_src source vertex map
       * \param[in] nmap_src source vertex map
@@ -349,6 +371,29 @@ namespace pcl
                          PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, DeviceArray2D<unsigned char> incidAngleMask, const MapArr& nmap_curr_g, 
                          const MapArr &nmap_model_g, //v11.6: 非 isNewFace 时候, 存 model 法向, 因其比 curr 稳定 @2017-3-14 23:32:12
                          const MapArr &weight_map, //v11.4
+                         DeviceArray2D<float>& depthScaled, int3 vxlDbg);
+
+    //v12, 在 v11 基础上, 尝试对 motionBlur 建模, 消除其在 fusion 阶段对薄片结构的坏影响 @2017-12-3 21:05:23
+    PCL_EXPORTS void 
+    integrateTsdfVolume_v12 (const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
+                         const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, 
+                         PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, DeviceArray2D<unsigned char> incidAngleMask, const MapArr& nmap_curr_g, 
+                         const MapArr &nmap_model_g, //v11.6: 非 isNewFace 时候, 存 model 法向, 因其比 curr 稳定 @2017-3-14 23:32:12
+                         const MapArr &weight_map, //v11.4
+                         const PtrStepSz<ushort>& depth_model,
+                         DeviceArray2D<short>& diffDmap,
+                         DeviceArray2D<float>& depthScaled, int3 vxlDbg);
+
+    //v13, 纸箱子(box-small.oni) 发现, v11/v12 都不行, 光滑度比 kf-td05 差很多, 重新想策略  @2017-12-13 10:33:22
+    //暂时接口照搬 v11, 之后再改
+    PCL_EXPORTS void 
+    integrateTsdfVolume_v13 (const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
+                         const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, 
+                         PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, DeviceArray2D<unsigned char> incidAngleMask, const MapArr& nmap_curr_g, 
+                         const MapArr &nmap_model_g, //v11.6: 非 isNewFace 时候, 存 model 法向, 因其比 curr 稳定 @2017-3-14 23:32:12
+                         const MapArr &weight_map, //v11.4
+                         const PtrStepSz<ushort>& depth_model,
+                         DeviceArray2D<short>& diffDmap,
                          DeviceArray2D<float>& depthScaled, int3 vxlDbg);
 
     /** \brief Function that clears the TSDF values. The clearing takes place from the origin (in indices) to an offset in X,Y,Z values accordingly

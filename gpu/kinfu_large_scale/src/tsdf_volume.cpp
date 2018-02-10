@@ -57,13 +57,6 @@ pcl::gpu::TsdfVolume::TsdfVolume(const Vector3i& resolution) : resolution_(resol
   int volume_z = resolution_(2);
 
   volume_.create (volume_y * volume_z, volume_x);
-  
-  //zc:
-  volume2nd_.create(volume_y * volume_z, volume_x);
-  flagVolume_.create(volume_y * volume_z, volume_x);
-  vrayPrevVolume_.create(volume_y * volume_z, volume_x);
-  surfNormPrev_.create(volume_y * volume_z, volume_x);
-  //volumeUpper_.create(volume_y * volume_z, volume_x);
 
   const Vector3f default_volume_size = Vector3f::Constant (3.f); //meters
   const float    default_tranc_dist  = 0.03f; //meters
@@ -74,6 +67,24 @@ pcl::gpu::TsdfVolume::TsdfVolume(const Vector3i& resolution) : resolution_(resol
   reset();
 }
 
+void
+pcl::gpu::TsdfVolume::create_init_cu_volume(){
+	int volume_x = resolution_(0);
+	int volume_y = resolution_(1);
+	int volume_z = resolution_(2);
+
+	volume2nd_.create(volume_y * volume_z, volume_x);
+	flagVolume_.create(volume_y * volume_z, volume_x);
+	vrayPrevVolume_.create(volume_y * volume_z, volume_x);
+	surfNormPrev_.create(volume_y * volume_z, volume_x);
+	//volumeUpper_.create(volume_y * volume_z, volume_x);
+
+	device::initFlagVolume(flagVolume_);
+	device::initVrayPrevVolume(vrayPrevVolume_);
+	device::initVrayPrevVolume(volume2nd_);
+	device::initVrayPrevVolume(surfNormPrev_);
+	//device::initVolume(volumeUpper_);
+}
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void
@@ -141,13 +152,6 @@ void
 pcl::gpu::TsdfVolume::reset()
 {
   device::initVolume(volume_);
-
-  device::initFlagVolume(flagVolume_);
-  device::initVrayPrevVolume(vrayPrevVolume_);
-  device::initVrayPrevVolume(volume2nd_);
-  device::initVrayPrevVolume(surfNormPrev_);
-  //device::initVolume(volumeUpper_);
-
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

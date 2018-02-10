@@ -210,6 +210,8 @@ public: //zc:
 
 	//存储基座按水平面分割后的上方扫描物 //对应控制量 segPlaneParam_
 	//DeviceArray2D<int> volumeUpper_; //暂放弃
+
+	void create_init_cu_volume();
     };
   }
 }

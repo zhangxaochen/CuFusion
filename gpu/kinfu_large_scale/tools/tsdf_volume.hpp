@@ -189,6 +189,129 @@ pcl::TSDFVolume<VoxelT, WeightT>::convertToTsdfCloud (pcl::PointCloud<pcl::Point
   // cloud->height = 1;
 }
 
+template <typename VoxelT, typename WeightT> cv::Mat
+//pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int x, int y, int z, int fix_which){
+pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_axis, cv::OutputArray dbgMat /*= cv::noArray()*/, bool doDbg /*= false*/){
+    int sx = header_.resolution(0); //因为用到 private header_ 之类, 所以此函数才做成成员函数
+    int sy = header_.resolution(1);
+    int sz = header_.resolution(2);
+
+    const int nbr_n = 51; //邻域正方形边长, 一定做成基数
+    const int half_nbr_n = nbr_n / 2; //半径
+    const int scale_factor = 10;
+    const int len = nbr_n * scale_factor; //21*25, 21邻域, 放大25倍
+    //if(dbgMat.empty() || cv::Size(len, len) != dbgMat.size()){ //若未分配内存, 或者外部传入mat尺寸不符合, 都重置 zeros(len, len)
+    //    //dbgMat = cv::Mat::zeros(len, len, CV_32F); //error C2678: binary '=' : no operator found which takes a left-hand operand of type 'const cv::_OutputArray' (or there is no acceptable conversion)
+    //    dbgMat.create(len, len, CV_32F);
+    //}
+    //cv::Mat dbgMat_ = dbgMat.getMat();
+
+    const int step = 1; //沿用 convertToTsdfCloud 控制量, 不懂那里为什么 =2, 仅仅为了降采样吗?
+
+    cv::Mat res; //待返回值
+    int volume_idx = 0;
+    int nbr_zmin = zcen - half_nbr_n,
+        nbr_zmax = zcen + half_nbr_n,
+        nbr_ymin = ycen - half_nbr_n,
+        nbr_ymax = ycen + half_nbr_n,
+        nbr_xmin = xcen - half_nbr_n,
+        nbr_xmax = xcen + half_nbr_n;
+
+    cv::Mat dbgMatOrig = cv::Mat::zeros(nbr_n, nbr_n, CV_32F); //原尺寸的邻域窗口, dbgMat 是放大 scale_factor 之后的
+    //float *dbgMatOrigPtr = (float*)dbgMatOrig.data; //【放弃
+
+    //int nbr_idx = 0; //邻域填充索引下标, //错, 放弃
+    if(0 == fix_axis){ //固定 X轴, 切片 YZ平面
+        res = cv::Mat::zeros(sy, sz, CV_32F); //y 做 row, z 做 col; 因为相机坐标系 y 肉眼看总朝下
+
+        int x = xcen;
+        for (int z = 0; z < sz; z+=step){
+            for (int y = 0; y < sy; y+=step){
+                volume_idx = sx*sy*z + sx*y + x;
+
+                if (weights_->at(volume_idx) == 0)// || volume_->at(volume_idx) > 0.98 )
+                    continue;
+
+                float tsdf_val = volume_->at(volume_idx);
+                res.at<float>(y, z) = tsdf_val; //纵轴: Y轴
+
+                if(nbr_zmin <= z && z <= nbr_zmax  //不用考虑 vol 边界越界, 因为外层 for-for 已经确保
+                    && nbr_ymin <= y && y <= nbr_ymax)
+                {
+                    //dbgMat_.at<float>(y, z) = tsdf_val;
+                    //dbgMatOrigPtr[nbr_idx] = tsdf_val; //若锚点靠近边界, 此逻辑可能有错, 暂时假设锚点远离边界 @2018-1-26 16:07:55
+                    //nbr_idx++;
+
+                    dbgMatOrig.at<float>(y - nbr_ymin, z - nbr_zmin) = tsdf_val;
+                }
+            }//for-y
+        }//for-z
+    }
+    else if(1 == fix_axis){ //固定 Y轴, 切片 XZ平面
+        res = cv::Mat::zeros(sz, sx, CV_32F);
+
+        int y = ycen;
+        for (int z = 0; z < sz; z+=step){
+            for (int x = 0; x < sx; x+=step){
+                volume_idx = sx*sy*z + sx*y + x;
+
+                //if(z == nbr_zmin && x == nbr_xmin)
+                if(z == zcen && x == xcen)
+                    printf("xcen, ycen, zcen: %d, %d, %d; nbr_zmin, nbr_xmin: %d, %d; z, x: %d, %d, volume_idx: %d; w, tsdf_val: %d, %f\n", xcen, ycen, zcen, nbr_zmin, nbr_xmin, z, x, volume_idx, weights_->at(volume_idx), volume_->at(volume_idx));
+
+                if (weights_->at(volume_idx) == 0)// || volume_->at(volume_idx) > 0.98 )
+                    continue;
+
+                float tsdf_val = volume_->at(volume_idx);
+                res.at<float>(z, x) = tsdf_val; //纵轴: Z轴
+
+                if(nbr_zmin <= z && z <= nbr_zmax
+                    && nbr_xmin <= x && x <= nbr_xmax)
+                {
+                    //dbgMat_.at<float>(x, z) = tsdf_val;
+                    //dbgMatOrigPtr[nbr_idx] = tsdf_val;
+                    //printf("nbr_idx, x,z: %d, (%d, %d)\n", nbr_idx, x, z);
+                    //nbr_idx++;
+
+                    dbgMatOrig.at<float>(z - nbr_zmin, x - nbr_xmin) = tsdf_val;
+                    //printf("x - nbr_xmin, z - nbr_zmin: %d, %d\n", x - nbr_xmin, z - nbr_zmin);
+                }
+            }//for-x
+        }//for-z
+    }
+    else if(2 == fix_axis){ //固定 Z轴, 切片 XY平面
+        res = cv::Mat::zeros(sy, sx, CV_32F);
+
+        int z = zcen;
+        for(int y = 0; y < sy; y+=step){
+            for(int x = 0; x < sx; x+=step){
+                volume_idx = sx*sy*z + sx*y + x;
+
+                if (weights_->at(volume_idx) == 0)// || volume_->at(volume_idx) > 0.98 )
+                    continue;
+
+                float tsdf_val = volume_->at(volume_idx);
+                //res.at<float>(x, y) = tsdf_val;
+                res.at<float>(y, x) = tsdf_val;
+
+                if(nbr_ymin <= y && y <= nbr_ymax
+                    && nbr_xmin <= x && x <= nbr_xmax)
+                {
+                    //dbgMat_.at<float>(x, y) = tsdf_val;
+                    //dbgMatOrigPtr[nbr_idx] = tsdf_val;
+                    //nbr_idx++;
+
+                    dbgMatOrig.at<float>(y - nbr_ymin, x - nbr_xmin) = tsdf_val;
+                }
+            }//for-x
+        }//for-y
+    }
+
+    cv::resize(dbgMatOrig, dbgMat, cv::Size(0,0), scale_factor, scale_factor, cv::INTER_NEAREST);
+
+    return res;
+}//slice2D
+
 
 template <typename VoxelT, typename WeightT> template <typename PointT> void
 pcl::TSDFVolume<VoxelT, WeightT>::getVoxelCoord (const PointT &point, Eigen::Vector3i &coord) const

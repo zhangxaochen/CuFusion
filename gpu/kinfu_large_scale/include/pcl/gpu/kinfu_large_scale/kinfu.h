@@ -753,6 +753,9 @@ namespace pcl
 		}
 
 		float amplifier_;
+		//vector<float> cuOdoAmpVec_;
+		float w_f2mkr_;
+		float e2c_weight_;
 
 		//zc: 已知立方体三邻边长度, 命令行参数 -cusz //2017-1-2 11:57:19
 		vector<float> cuSideLenVec_; //meters
@@ -780,7 +783,8 @@ namespace pcl
 		float tsdf_version_;
 		bool isTsdfVer(float verNum){ return abs(tsdf_version_ - verNum) < 1e-6; }
 
-		bool dbgKf_;
+		//bool dbgKf_;
+		int dbgKf_;
 
 		//有时候,某帧迭代配准会严重漂移, 需要step-in跟进调试观察; 如m7/05-f126失败
 		int regCuStepId_;
@@ -931,6 +935,7 @@ namespace pcl
         MapArr vmap_model_, nmap_model_;
         MapArr vmap_g_model_, nmap_g_model_;
         DepthMap dmapModel_, dmapModel_inp_;
+        DeviceArray2D<short> diffDmap_; //zc: 用于处理 motionBlur   @2017-12-3 23:36:56
         pcl::device::MaskMap largeIncidMask_model_; //大入射角mask, vmap_g_model_ 的
         pcl::device::MaskMap largeIncidMask_curr_; //大入射角mask, dmap-curr 的
         pcl::device::MaskMap largeIncidMask_total_;
