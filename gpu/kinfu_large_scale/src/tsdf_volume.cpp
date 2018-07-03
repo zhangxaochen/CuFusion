@@ -85,6 +85,18 @@ pcl::gpu::TsdfVolume::create_init_cu_volume(){
 	device::initVrayPrevVolume(surfNormPrev_);
 	//device::initVolume(volumeUpper_);
 }
+
+void
+pcl::gpu::TsdfVolume::create_init_s2s_volume(){
+	int volume_x = resolution_(0);
+	int volume_y = resolution_(1);
+	int volume_z = resolution_(2);
+
+	volume2nd_.create(volume_y * volume_z, volume_x);
+
+	device::initVrayPrevVolume(volume2nd_);
+}//create_init_s2s_volume
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void
@@ -103,7 +115,8 @@ pcl::gpu::TsdfVolume::setTsdfTruncDist (float distance)
   float cy = size_(1) / resolution_(1);
   float cz = size_(2) / resolution_(2);
 
-  tranc_dist_ = std::max (distance, 1.111f * std::max (cx, std::max (cy, cz)));  
+  //tranc_dist_ = std::max (distance, 1.111f * std::max (cx, std::max (cy, cz)));  
+  tranc_dist_ = std::max (0.f, distance); //zc: 试试完全不设最小tdist 的话
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
