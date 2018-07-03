@@ -196,7 +196,7 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
     int sy = header_.resolution(1);
     int sz = header_.resolution(2);
 
-    const int nbr_n = 51; //邻域正方形边长, 一定做成基数
+    const int nbr_n = 51; //邻域正方形边长, 一定做成奇数
     const int half_nbr_n = nbr_n / 2; //半径
     const int scale_factor = 10;
     const int len = nbr_n * scale_factor; //21*25, 21邻域, 放大25倍
@@ -309,6 +309,24 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
 
     cv::resize(dbgMatOrig, dbgMat, cv::Size(0,0), scale_factor, scale_factor, cv::INTER_NEAREST);
 
+    //int x2d, y2d;
+    //if(0 == fix_axis){
+    //    x2d = zcen; //z做img的X轴
+    //    y2d = ycen;
+    //}
+    //else if(1 == fix_axis){
+    //    x2d = xcen; //x做img的X轴
+    //    y2d = zcen;
+    //}
+    //else if(2 == fix_axis){
+    //    x2d = xcen;
+    //    y2d = ycen;
+    //}
+
+    if(doDbg){
+        cv::Point dbgPt(half_nbr_n * scale_factor + scale_factor / 2, half_nbr_n * scale_factor + scale_factor / 2);
+        cv::circle(dbgMat.getMat(), dbgPt, scale_factor / 2, 255, 1);
+    }
     return res;
 }//slice2D
 

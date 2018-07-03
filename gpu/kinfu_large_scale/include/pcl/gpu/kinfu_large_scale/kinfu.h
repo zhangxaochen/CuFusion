@@ -624,6 +624,9 @@ namespace pcl
 		//zc:
 		bool cuOdometry( const DepthMap &depth, const View *pcolor = NULL);
 
+		//@brief impl of sdf2sdf @2018-5-24 17:42:59
+		bool s2sOdometry( const DepthMap &depth, const View *pcolor = NULL);
+
 		//全不行... @2017-4-2 14:30:29
 		void dbgAhcPeac( const DepthMap &depth_raw, const View *pcolor = NULL);
 		void dbgAhcPeac2( const CloudType::Ptr depCloud);
@@ -639,6 +642,13 @@ namespace pcl
 		bool kdtreeodometry( const DepthMap & depth, const View * pcolor = NULL );
 		cv::Mat bdrodometry_interpmax( cv::Mat depth );
 		cv::Mat bdrodometry_getOcclusionBoundary( cv::Mat depth, float dist_threshold = 0.05f );
+
+		//@brief 比 bdrodometry_getOcclusionBoundary 增加参数传出 edge_map_whole(所有边缘), 返回值一样
+		//@param[in] depth, in meters
+		//@param[in] edge_map_whole, 只要满足 |diff|>thresh, 就算 edge; 用于边缘不确定区域特殊处理 //【【必须 Mat& 传引用, 否则无法传出
+		//@param[in] dist_threshold, default 5cm
+		//@return ==bdrodometry_getOcclusionBoundary
+		cv::Mat edge_from_dmap(cv::Mat depth, cv::Mat &edge_map_whole, float dist_threshold = 0.05f );
 
         bool operator() (const DepthMap& depth, const View * pcolor = NULL, FramedTransformation * frame_ptr = NULL);
 
@@ -778,6 +788,19 @@ namespace pcl
 		bool term_2_;
 		bool term_3_;
 
+		void setTerm123(int which){
+			term_123_ = term_12_ = term_13_ = term_23_ = term_1_ = term_2_ = term_3_ = false;
+			switch (which){
+			case 1: term_123_ = true; break;
+			case 2: term_12_ = true; break;
+			case 3: term_13_ = true; break;
+			case 4: term_23_ = true; break;
+			case 5: term_1_ = true; break;
+			case 6: term_2_ = true; break;
+			case 7: term_3_ = true; break;
+			}
+		}//setTerm123
+
 		//tsdf 融合策略, 详见: 《pcl, kinfu, tsdfVolume 笔记》; 《三维重建中体素融合方案改进结果（寒假201702）.docx》；《三维重建结果与vivid 3D 扫描仪groundtruth真值对比测试.docx》(小节3)
 		//用 float 而不用 int 是因为要区分很多子版本, 
 		float tsdf_version_;
@@ -796,6 +819,8 @@ namespace pcl
 
 		//想要调试观察的体素 vxl
 		vector<int> vxlDbg_;
+		//待调试观察的像素 px
+		vector<int> pxDbg_;
 
 		//用于 tsdf-v9, v11, 大入射角 mask的角度阈值, 之前 pcc 设定为 75°
 		float incidAngleThresh_;
@@ -819,6 +844,8 @@ namespace pcl
 		bool isPlFilt_; //命令行参数
 		float plFiltShiftMM_; //参考面上下平移控制, 其实没用在 kinfu.cpp, 备用
 		Eigen::Vector4f planeFiltParam_; //世界坐标系下的
+
+		float s2s_eta_, s2s_beta_; //sdf2sdf params
 
       private:
 
@@ -851,6 +878,9 @@ namespace pcl
 		Eigen::Matrix<float, 6, 6, Eigen::RowMajor> A_e2c_;
 		Eigen::Matrix<float, 6, 1> b_e2c_;
 
+		typedef float float_type_s2s;
+		Eigen::Matrix<float_type_s2s, 6, 6, Eigen::RowMajor> A_s2s_; //
+		Eigen::Matrix<float_type_s2s, 6, 1> b_s2s_;
 
 		bool extract_world_;
 
@@ -936,6 +966,7 @@ namespace pcl
         MapArr vmap_g_model_, nmap_g_model_;
         DepthMap dmapModel_, dmapModel_inp_;
         DeviceArray2D<short> diffDmap_; //zc: 用于处理 motionBlur   @2017-12-3 23:36:56
+                                        //发现 v18 中, 处理全反射也能用!   @2018-3-9 14:55:36
         pcl::device::MaskMap largeIncidMask_model_; //大入射角mask, vmap_g_model_ 的
         pcl::device::MaskMap largeIncidMask_curr_; //大入射角mask, dmap-curr 的
         pcl::device::MaskMap largeIncidMask_total_;
@@ -960,6 +991,10 @@ namespace pcl
         DeviceArray2D<float> gbuf_;
         /** \brief Buffer to store MLS matrix. */
         DeviceArray<float> sumbuf_;
+
+        DeviceArray2D<float> gbuf_s2s_;
+        /** \brief Buffer to store MLS matrix. */
+        DeviceArray<float> sumbuf_s2s_;
 
 		/** \brief Temporary buffer for SLAC */
         DeviceArray<float> gbuf_slac_triangle_;

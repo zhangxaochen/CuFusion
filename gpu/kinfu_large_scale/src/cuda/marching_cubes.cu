@@ -93,6 +93,7 @@ namespace pcl
       __device__ __forceinline__ int
       computeCubeIndex (int x, int y, int z, float f[8]) const
       {
+#if 0   //orig
         int weight;
         readTsdf (x,     y,     z,     f[0], weight); if (weight == 0) return 0;
         readTsdf (x + 1, y,     z,     f[1], weight); if (weight == 0) return 0;
@@ -102,6 +103,46 @@ namespace pcl
         readTsdf (x + 1, y,     z + 1, f[5], weight); if (weight == 0) return 0;
         readTsdf (x + 1, y + 1, z + 1, f[6], weight); if (weight == 0) return 0;
         readTsdf (x,     y + 1, z + 1, f[7], weight); if (weight == 0) return 0;
+#elif 10   //zc: tsdf-v18.15 重新启用 w 的末位, 所以判定要改 "weight < 2" or "weight / 2 == 0"
+        int weight;
+        readTsdf (x,     y,     z,     f[0], weight); if (weight < 2) return 0;
+        readTsdf (x + 1, y,     z,     f[1], weight); if (weight < 2) return 0;
+        readTsdf (x + 1, y + 1, z,     f[2], weight); if (weight < 2) return 0;
+        readTsdf (x,     y + 1, z,     f[3], weight); if (weight < 2) return 0;
+        readTsdf (x,     y,     z + 1, f[4], weight); if (weight < 2) return 0;
+        readTsdf (x + 1, y,     z + 1, f[5], weight); if (weight < 2) return 0;
+        readTsdf (x + 1, y + 1, z + 1, f[6], weight); if (weight < 2) return 0;
+        readTsdf (x,     y + 1, z + 1, f[7], weight); if (weight < 2) return 0;
+#else   //zc: tsdf-v18.8:: 3D 中值滤波, @2018-3-15 03:19:39
+          const int nbr_sz = 8;
+          int w[nbr_sz] = {0};
+
+          const int dx[nbr_sz] = {0, +1, +1, 0, 0, +1, +1, 0};
+          const int dy[nbr_sz] = {0, 0, +1, +1, 0, 0, +1, +1};
+          const int dz[nbr_sz] = {0, 0, 0, 0, +1, +1, +1, +1};
+          for(int i=0; i<nbr_sz; i++){
+              readTsdf(x+dx[i], y+dy[i], z+dz[i], f[i], w[i]);
+              if(0 == w[i])
+                  return 0;
+          }
+
+          //简单判定是否有vox 的w 异常小, 对w[8] 做3D 中值滤波, 用到希尔排序
+          for(int gap=nbr_sz/2; gap>0; gap/=2){
+              for(int i=gap; i<nbr_sz; i++){
+                  //for(int j=i-gap; j>=0, w[j]>w[j+gap]; j-=gap) //错! 逗号错
+                  for(int j=i-gap; j>=0 && w[j]>w[j+gap]; j-=gap)
+                      swap(w[j], w[j+gap]);
+              }
+          }
+          //讨论: 什么时候当前2^3 小邻域算 "椒盐噪声"?
+          if(w[4] > 3 * w[0]) //中值>3*w[0], w[0] 算噪点
+          //if(w[4] > 30 * w[0]) //30*, 倍数越大, 此条件越无效
+          //if(w[4] > 3 * w[0] || w[4] < 10) //尝试: v18.9: 此处+v18.5(不要v18.7); 效果不错;
+                                            //v18.10: 此处+v18.7, 内外噪声都小于 v18.7, 但外部噪声大于 v18.5/v18.9
+          //if(w[4] > 3 * w[0] || w[4] < 30) //v18.11: 此处阈值改30+v18.7, 很好, 内外都降噪 【【但是: 因v18.7, 法向图仍很差 @2018-3-18 21:19:50
+                                                //缺点: 阈值XX导致前 XX帧取不到 mesh
+              return 0; //中断返回, cubeindex 无效
+#endif
 
         // calculate flag indicating if each vertex is inside or outside isosurface
         int cubeindex;

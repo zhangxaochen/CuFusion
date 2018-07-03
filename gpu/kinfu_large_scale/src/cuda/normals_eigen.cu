@@ -52,13 +52,21 @@ namespace pcl
     };
 
     __global__ void
-    computeNmapKernelEigen (int rows, int cols, const PtrStep<float> vmap, PtrStep<float> nmap)
+    //computeNmapKernelEigen (int rows, int cols, const PtrStep<float> vmap, PtrStep<float> nmap)
+    computeNmapKernelEigen (int rows, int cols, const PtrStep<float> vmap, PtrStep<float> nmap, const int2 pxDbg)
     {
       int u = threadIdx.x + blockIdx.x * blockDim.x;
       int v = threadIdx.y + blockIdx.y * blockDim.y;
 
       if (u >= cols || v >= rows)
         return;
+
+      //zc: tsdf v18.3 相关: 
+      bool doDbgPrint = false;
+      if(u > 0 && v > 0 && pxDbg.x == u && pxDbg.y == v){
+          printf(">>>>>>computeNmapKernelEigen: uv: %f, %f\n", u, v);
+          doDbgPrint = true;
+      }
 
       nmap.ptr (v)[u] = numeric_limits<float>::quiet_NaN ();
 
@@ -70,7 +78,8 @@ namespace pcl
 
       float3 centroid = make_float3 (0.f, 0.f, 0.f);
       int counter = 0;
-#if 10   //orig
+#define CUT_PX_BY_DEPTH_DIFF 1
+#if !CUT_PX_BY_DEPTH_DIFF   //orig //"#if" 在 .cu 里也是有效的 【已验证】
       for (int cy = max (v - ky / 2, 0); cy < ty; cy += STEP)
         for (int cx = max (u - kx / 2, 0); cx < tx; cx += STEP)
         {
@@ -87,6 +96,7 @@ namespace pcl
       //@2017-12-22 17:18:10    
       //貌似不管用 @2017-12-23 16:58:05
       float p0z = vmap.ptr (v + 2 * rows)[u];
+      float depthDiffThresh = 0.02f;
       for (int cy = max (v - ky / 2, 0); cy < ty; cy += STEP){
         for (int cx = max (u - kx / 2, 0); cx < tx; cx += STEP){
           float v_x = vmap.ptr (cy)[cx];
@@ -94,11 +104,18 @@ namespace pcl
           {
             float v_y = vmap.ptr (cy + rows)[cx],
                   v_z = vmap.ptr (cy + 2 * rows)[cx];
-            if(abs(v_z - p0z) <= 0.02){ //vmap 量纲应该是 meters
+            if(abs(v_z - p0z) <= depthDiffThresh){ //vmap 量纲应该是 meters
                 centroid.x += v_x;
                 centroid.y += v_y;
                 centroid.z += v_z;
                 ++counter;
+
+                if(doDbgPrint)
+                    printf("cx, cy: %d, %d; v_x, v_y, v_z, p0z, v_z/p0z-diff: %f, %f, %f, %f, %f\n", cx, cy, v_x, v_y, v_z, p0z, abs(v_z-p0z));
+            }
+            else{
+                if(doDbgPrint)
+                    printf("cx, cy: %d, %d; v_z, p0z, v_z/p0z-diff: %f, %f, %f\n", cx, cy, v_z, p0z, abs(v_z-p0z));
             }
           }//if-isnan-vx
         }//for-cx
@@ -122,6 +139,11 @@ namespace pcl
 
           v.y = vmap.ptr (cy + rows)[cx];
           v.z = vmap.ptr (cy + 2 * rows)[cx];
+
+#if CUT_PX_BY_DEPTH_DIFF
+          if(abs(v.z - p0z) > depthDiffThresh)
+              continue;
+#endif
 
           float3 d = v - centroid;
 
@@ -279,7 +301,7 @@ namespace pcl
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void
-pcl::device::computeNormalsEigen (const MapArr& vmap, MapArr& nmap)
+pcl::device::computeNormalsEigen (const MapArr& vmap, MapArr& nmap, int2 pxDbg)
 {
   int cols = vmap.cols ();
   int rows = vmap.rows () / 3;
@@ -291,7 +313,8 @@ pcl::device::computeNormalsEigen (const MapArr& vmap, MapArr& nmap)
   grid.x = divUp (cols, block.x);
   grid.y = divUp (rows, block.y);
 
-  computeNmapKernelEigen<<<grid, block>>>(rows, cols, vmap, nmap);
+  //computeNmapKernelEigen<<<grid, block>>>(rows, cols, vmap, nmap);
+  computeNmapKernelEigen<<<grid, block>>>(rows, cols, vmap, nmap, pxDbg);
   cudaSafeCall (cudaGetLastError ());
   cudaSafeCall (cudaDeviceSynchronize ());
 }

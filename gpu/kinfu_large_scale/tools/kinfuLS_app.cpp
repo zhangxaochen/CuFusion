@@ -102,7 +102,8 @@ typedef pcl::ScopeTime ScopeTimeT;
 
 pcl::console::TicToc tt0, tt1, tt2, tt3; //一些备用计时器
 
-const string pt_picked_str = "PickedPoint";
+const string pt_picked_str = "MousePickedPoint";
+const string pt_dbg_init_str = "InitDbgPoint";
 const string plane_slice_str = "plane_slice_str";
 
 //zc: 离散图像序列处理, 避免 oni 跳帧
@@ -903,7 +904,7 @@ struct SceneCloudView
 		visualization::PointCloudColorHandlerRGBCloud<PointXYZ> rgb(cloud_ptr_, point_colors_ptr_);
 		cloud_viewer_.addPointCloud<PointXYZ> (cloud_ptr_, rgb);
 
-		/*
+		///*
 		cloud_viewer_.removeAllPointClouds ();    
 		if (valid_combined_)
 		{
@@ -916,7 +917,7 @@ struct SceneCloudView
 		visualization::PointCloudColorHandlerRGBHack<PointXYZ> rgb(cloud_ptr_, point_colors_ptr_);
 		cloud_viewer_.addPointCloud<PointXYZ> (cloud_ptr_, rgb);
 		}    
-		*/
+		//*/
 	}
 
 	void
@@ -1018,9 +1019,10 @@ struct KinFuLSApp
 		: exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
 		slice2d_(false), print_nbr_(false), //zc
 		registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_( 480, 640, CV_8UC3, cv::Scalar( 255, 255, 255 )),
-		use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false),
+		use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false), use_omask_(false),
 		kintinuous_( false ), rgbd_odometry_( false ), slac_( false ), bdr_odometry_( false )
-		,cu_odometry_(false), kdtree_odometry_(false)
+		,cu_odometry_(false), s2s_odometry_(false)
+		, kdtree_odometry_(false)
 	{    
 		//Init Kinfu Tracker
 		Eigen::Vector3f volume_size = Vector3f::Constant (vsz/*meters*/);    
@@ -1050,6 +1052,14 @@ struct KinFuLSApp
 		t( 2 ) += sz;
 
 		Eigen::Affine3f pose = Eigen::Translation3f (t) * Eigen::AngleAxisf (R);
+		//cout<<"KinFuLSApp-ctor\n"
+		//	<<"R, t\n"<<R<<endl<<t<<endl
+		//	<<"pose:\n"<<pose.matrix()<<endl
+		//	<<"pose.linear:\n"<<pose.linear()<<endl
+		//	<<"pose.rotation:\n"<<pose.rotation()<<endl
+		//	;
+		//zc: TMP-TESTS
+
 		transformation_inverse_ = pose.matrix().inverse();
 
 		kinfu_->setInitialCameraPose (pose);
@@ -1186,6 +1196,7 @@ struct KinFuLSApp
 
 	//zc
 	void toggleCuOdometry(){ cu_odometry_ = true; }
+	void toggleS2sOdometry(){ s2s_odometry_ = true; }
 
 	void toggleKdtreeOdometry()
 	{
@@ -1409,6 +1420,8 @@ struct KinFuLSApp
 	void
 		toggleEvaluationMode(const string& eval_folder, const string& match_file = string())
 	{
+		eval_folder_ = eval_folder;
+		cout<<"eval_folder_: "<<eval_folder_<<endl;
 		evaluation_ptr_ = Evaluation::Ptr( new Evaluation(eval_folder) );
 		if (!match_file.empty())
 			evaluation_ptr_->setMatchFile(match_file);
@@ -1980,7 +1993,8 @@ struct KinFuLSApp
 						zcFindOrtho3tup(plvec, planeFitter_.membershipImg, fx, fy, cx, cy, cubeCandiPoses, dbgSegMat);
 
 						imshow(winNameAhc, dbgSegMat); //改放这里 @2017-4-19 11:32:30
-						cv::waitKey(0);
+						if(!this->kinfu_->term_1_) //若仅 term_1_, 则不 waitKey
+							cv::waitKey(0);
 
 						size_t crnrCnt = cubeCandiPoses.size();
 						bool isFoundCrnr = (crnrCnt != 0);
@@ -2128,7 +2142,16 @@ struct KinFuLSApp
 
 					}//if-(!isCuInitialized_)
 
+				}//elif-(cu_odometry_)
+				else if (s2s_odometry_){
+					kinfu_->volume().create_init_s2s_volume();
+
+					tt0.tic();
+					has_image = kinfu_->s2sOdometry(depth_device_, &image_view_.colors_device_);
+					printf("kinfu_->s2sOdometry: "); tt0.toc_print();
+
 				}
+
 				else if ( kdtree_odometry_ ) {
 					has_image = kinfu_->kdtreeodometry( depth_device_, &image_view_.colors_device_ );
 				} else {
@@ -2353,7 +2376,7 @@ struct KinFuLSApp
 			cv::Mat sliceGlobal32f,
 					sliceLocal32f;
 			sliceGlobal32f = tsdf_volume_.slice2D(kinfu_->vxlDbg_[0], kinfu_->vxlDbg_[1], kinfu_->vxlDbg_[2],
-				fix_axis, sliceLocal32f);
+				fix_axis, sliceLocal32f, true);
 
 			cv::Mat sliceGlobal8u,
 					sliceLocal8u;
@@ -2365,8 +2388,16 @@ struct KinFuLSApp
 			//cv::applyColorMap(sliceDbgMat32f, sliceDbgMatCmap, cv::COLORMAP_RAINBOW);
 			cv::applyColorMap(sliceLocal8u, sliceLocalCmap, cv::COLORMAP_RAINBOW);
 			cv::applyColorMap(sliceGlobal8u, sliceGlobalCmap, cv::COLORMAP_RAINBOW);
-			cv::imshow("sliceLocalCmap", sliceLocalCmap);
-			cv::imshow("sliceGlobal8u", sliceGlobal8u);
+
+			char *sliceLocalCmap_win_str = "sliceLocalCmap";
+			//cv::namedWindow(sliceLocalCmap_win_str);
+			//cv::moveWindow(sliceLocalCmap_win_str, 1150, 650);
+			cv::imshow(sliceLocalCmap_win_str, sliceLocalCmap);
+
+			char *sliceGlobal8u_win_str = "sliceGlobal8u";
+			cv::namedWindow(sliceGlobal8u_win_str);
+			cv::moveWindow(sliceGlobal8u_win_str, 1150, 650);
+			cv::imshow(sliceGlobal8u_win_str, sliceGlobal8u);
 
 			if(print_nbr_){
 				int x2d, y2d;
@@ -2800,6 +2831,8 @@ struct KinFuLSApp
 
 				printf("---------------currentIndex:= %d\n", currentIndex);
 
+				frame_id_ = currentIndex;
+
 				//--mask xy窗口包围盒分割, 拷贝自上面 @2017-10-10 16:52:53
 				if ( use_mask_ ) {
 					//unsigned short * depth_buffer = &source_depth_data_[0];
@@ -2814,6 +2847,27 @@ struct KinFuLSApp
 					}
 				}
 
+				//逐像素的 mask Mat, 非 bbox @2018-4-2 00:15:23
+				if(use_omask_){
+					char omFnBuf[333];
+					sprintf(omFnBuf, "%s/omask/omask_%06d.png", eval_folder_.c_str(), currentIndex);
+					cout<<"eval_folder_@use_omask_: "<<eval_folder_<<endl
+						<<"omFnBuf: "<<omFnBuf<<endl;
+
+					cv::Mat omMat = cv::imread(omFnBuf, -1);
+					//cv::cvtColor(omMat, omMat, CV_RGB2GRAY);
+
+					unsigned short * depth_buffer = const_cast<unsigned short *>(depth_.data); //const-ptr, 这里 dirty hack
+
+					for (unsigned yIdx = 0; yIdx < depth_.rows; ++yIdx){
+						for (unsigned xIdx = 0; xIdx < depth_.cols; ++xIdx, ++depth_buffer){
+							if(omMat.at<uchar>(yIdx, xIdx) != UCHAR_MAX)
+								//depth_(yIdx, xIdx) = 0;
+								*depth_buffer = 0;
+						}
+					}
+				}
+
 				tt1.tic();
 				printf("rgb24_. c/r, data: (%d, %d), %d\n", rgb24_.cols, rgb24_.rows, rgb24_.data);
 				this->execute(depth_, rgb24_, true); 
@@ -2822,7 +2876,12 @@ struct KinFuLSApp
 				//currentIndex += 1; 
 				currentIndex += everyXframes_; 
 
-				imshow("dummy-win0", cv::Mat::zeros(333, 333, CV_8UC1));
+				const string dummy_win0_str = "dummy-win0";
+				cv::namedWindow(dummy_win0_str);
+				cv::moveWindow(dummy_win0_str, 550, 750);
+				//cv::Mat dum_win0_mat = cv::Mat::zeros(333, 333, CV_8UC1);
+				cv::Mat dum_win0_mat(333, 333, CV_8UC3, 255);
+				cv::imshow(dummy_win0_str, dum_win0_mat);
 				//if(currentIndex >= pngPauseId_)
 				//	cv::waitKey(0);
 					//isPngPause_ = true; //zc: DEPRECATED~
@@ -2854,9 +2913,16 @@ struct KinFuLSApp
 					print_nbr_ = !print_nbr_;
 					printf("print_nbr_ = !print_nbr_; --> %s\n", print_nbr_ ? "TTT" : "FFF");
 				}
+				else if(key >= '1' && key <= '7'){
+					PCL_WARN(">>>>>>>>>PRESSING: %d\n", key - '0');
+					kinfu_->setTerm123(key - '0');
+				}
 
 				if(currentIndex >= evaluation_ptr_->getStreamSize() - 5){
-					isReadOn_ = false;
+// 					isReadOn_ = false; //zc: 暂改成: 存 mesh, 不暂停, 走完自动退出 @2018-3-23 22:47:46
+					this->scan_mesh_ = true;
+					this->writeMesh (7, -1);
+
 					printf("isReadOn_ = false;\n~~~~~~~~~最后几帧\n");
 				}
 				//isFirstFoundCube_ = false; //这里总设置 false, 没毛病
@@ -3044,6 +3110,10 @@ struct KinFuLSApp
 	bool use_mask_;
 	int mask_[ 4 ];
 
+	//zc: object-mask, for "sdf2sdf" eval; 相对路径ptn: "./omask/omask_%06d.png" @2018-4-2 00:10:25
+	bool use_omask_;
+	string eval_folder_; //改类内
+
 	bool rgbd_odometry_;
 	bool kintinuous_;
 	cv::Mat grayImage0_, grayImage1_, depthFlt0_, depthFlt1_;
@@ -3056,6 +3126,7 @@ struct KinFuLSApp
 
 	//zc: cuboid 长方体定位
 	bool cu_odometry_;
+	bool s2s_odometry_; //sdf2sdf impl on GPU
 
 	CameraParam camera_;
 
@@ -3386,7 +3457,7 @@ int
 	pc::parse_argument(argc, argv, "-tsdfErodeRad", app.kinfu_->tsdfErodeRad_);
 
 	//zc: <int,int,int>的 vec3, 表示体素坐标, 用于调试 @tsdf23_v8 //2017-2-13 13:55:44
-    //app.kinfu_->vxlDbg_ = vector<int>(3, 0);
+	//app.kinfu_->vxlDbg_ = vector<int>(3, 0);
 	app.kinfu_->vxlDbg_ = vector<int>(4, 0); //slice2D 之后, 用 vxlDbg_[3] 存 "012", 表示 fix_axis
 	pc::parse_x_arguments(argc, argv, "-vxlDbg", app.kinfu_->vxlDbg_);
 	{//初始就绘制小圆球, 做调试观察用 //2017-2-17 10:10:05
@@ -3399,9 +3470,34 @@ int
 		vxl2pt.y = (vxlDbg[1] + 0.5f) * cellsz.y();
 		vxl2pt.z = (vxlDbg[2] + 0.5f) * cellsz.z();
 
-		app.scene_cloud_view_.cloud_viewer_.addSphere(vxl2pt, cellsz.x()/2, 0,1,0, "vxlDbgPoint");
-
+		app.scene_cloud_view_.cloud_viewer_.addSphere(vxl2pt, cellsz.x()/2, 0,1,0, pt_dbg_init_str); //绿色
 		const int fix_axis = vxlDbg[3];
+		//再加 四个环绕调试点	@2018-3-3 16:54:52
+		int d0[] = {-1, 0, +1, 0},
+			d1[] = {0, +1, 0, -1};
+		const string pt_nbr_str_stub = "NbrDbgPoint";
+		for(int k=01; k<5; k++){ //邻接距离, k>1 则非直接相邻
+			for(int i=0; i<4; i++){	 //四邻域
+				PointXYZ vxl2pt_nbr = vxl2pt; //待绘制邻接点
+				if(0 == fix_axis){
+					//vxl2pt_nbr.x = vxl2pt.x;
+					vxl2pt_nbr.z += k*d0[i] * cellsz.z(); //固定 X轴时, Z轴做切片面的横轴 (d0)
+					vxl2pt_nbr.y += k*d1[i] * cellsz.y();
+				}
+				if(1 == fix_axis){
+					vxl2pt_nbr.x += k*d0[i] * cellsz.x();
+					vxl2pt_nbr.z += k*d1[i] * cellsz.z();
+				}
+				if(2 == fix_axis){
+					vxl2pt_nbr.x += k*d0[i] * cellsz.x();
+					vxl2pt_nbr.y += k*d1[i] * cellsz.y();
+				}
+
+				app.scene_cloud_view_.cloud_viewer_.
+					addSphere(vxl2pt_nbr, cellsz.x()/2, 1,0,0, pt_nbr_str_stub + char('0'+(k-1)*4+i)); //红色邻接点
+			}
+		}
+
 		pcl::ModelCoefficients plane_coeff;
 		plane_coeff.values.resize(4, 0); //默认填零
 		plane_coeff.values[fix_axis] = 1; //垂直于某坐标轴, 则填1
@@ -3414,6 +3510,10 @@ int
 			plane_coeff.values[0], plane_coeff.values[1], plane_coeff.values[2], plane_coeff.values[3]);
 
 	}
+
+	//vxlDbg_ 对应的 px 像素调试点, 外部传参, 暂无法自动求解, 因为 t 时刻求的是 t-1 的 px @2018-3-2 20:43:41
+	app.kinfu_->pxDbg_ = vector<int>(2, 0);
+	pc::parse_x_arguments(argc, argv, "-pxDbg", app.kinfu_->pxDbg_);
 
 	//控制 kinfu.cpp 中的一些调试窗口开关 //2017-3-3 01:09:38
 	//app.kinfu_->dbgKf_ = pc::find_switch(argc, argv, "-dbgKf");
@@ -3557,6 +3657,7 @@ int
 		app.kinfu_->e2c_weight_ = 4.0f;
 		pc::parse_2x_arguments(argc, argv, "-cuAmp", 
 			app.kinfu_->w_f2mkr_, app.kinfu_->e2c_weight_);
+		PCL_WARN("app.kinfu_->w_f2mkr_, app.kinfu_->e2c_weight_: %f, %f\n", app.kinfu_->w_f2mkr_, app.kinfu_->e2c_weight_);
 
 		//@2017-6-3 18:56:05
 		app.kinfu_->with_nmap_ = pc::find_switch(argc, argv, "-nmap");
@@ -3580,6 +3681,25 @@ int
 
 	}
 
+    //s2s CPU impl port to GPU @2018-5-24 17:30:18
+    vector<float> s2s_params;
+    pc::parse_x_arguments(argc, argv, "-s2s", s2s_params);
+    if(s2s_params.size() == 2){
+        //float delta = s2s_params[0],
+        //    eta = s2s_params[1],
+        //    beta = s2s_params[2],
+        //    bilat_sigma_color = s2s_params[3], //depth diff in mm //暂未用到, 定死默认 (30mm, 4.5px)
+        //    bilat_sigma_space = s2s_params[4]; //neighbor pixels
+        PCL_WARN("sdf2sdf-odometry\n");
+
+        float eta = s2s_params[0],
+            beta = s2s_params[1];
+
+        app.toggleS2sOdometry();
+        app.kinfu_->s2s_eta_ = eta;
+        app.kinfu_->s2s_beta_ = beta;
+    }
+
 	app.kinfu_->incidAngleThresh_ = 75; //默认值, 按 pcc 的经验值  @2017-3-8 20:47:22
 	pc::parse_argument(argc, argv, "-incidTh", app.kinfu_->incidAngleThresh_);
 
@@ -3591,6 +3711,8 @@ int
 	if ( pc::parse_argument( argc, argv, "--mask", mask ) > 0 ) {
 		app.toggleMask( mask );
 	}
+
+	app.use_omask_ = pc::find_switch(argc, argv, "-omask");
 
 	// executing
 	if (triggered_capture) std::cout << "Capture mode: triggered\n";

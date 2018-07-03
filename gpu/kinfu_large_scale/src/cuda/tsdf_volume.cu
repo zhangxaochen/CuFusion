@@ -39,6 +39,14 @@
 
 using namespace pcl::device;
 
+/*__global__ */__device__
+const float COS30 = 0.8660254f
+    ,COS45 = 0.7071f
+    ,COS60 = 0.5f
+    ,COS75 = 0.258819f
+    ,COS80 = 0.173649f
+    ;
+
 namespace pcl
 {
   namespace device
@@ -450,7 +458,7 @@ pcl::device::integrateTsdfVolume (const PtrStepSz<ushort>& depth_raw, const Intr
   dim3 block (Tsdf::CTA_SIZE_X, Tsdf::CTA_SIZE_Y);
   dim3 grid (divUp (VOLUME_X, block.x), divUp (VOLUME_Y, block.y));
 
-#if 0
+#if 01
    //tsdf2<<<grid, block>>>(volume, tranc_dist, Rcurr_inv, tcurr, intr, depth_raw, tsdf.cell_size);
    integrateTsdfKernel<<<grid, block>>>(tsdf);
 #endif
@@ -637,6 +645,122 @@ namespace pcl
 		*/
       }       // for(int z = 0; z < VOLUME_Z; ++z)
     }      // __global__ tsdf23
+
+    __global__ void
+    tsdf23_s2s (const PtrStepSz<float> depthScaled, PtrStep<short2> volume,
+            const float tranc_dist, const float eta, //s2s (delta, eta)
+            const Mat33 Rcurr_inv, const float3 tcurr, 
+            const Intr intr, const float3 cell_size, int3 vxlDbg) //zc: 调试
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x >= VOLUME_X || y >= VOLUME_Y)
+        return;
+
+      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+
+      float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
+
+      float v_x = (Rcurr_inv.data[0].x * v_g_x + Rcurr_inv.data[0].y * v_g_y + Rcurr_inv.data[0].z * v_g_z) * intr.fx;
+      float v_y = (Rcurr_inv.data[1].x * v_g_x + Rcurr_inv.data[1].y * v_g_y + Rcurr_inv.data[1].z * v_g_z) * intr.fy;
+      float v_z = (Rcurr_inv.data[2].x * v_g_x + Rcurr_inv.data[2].y * v_g_y + Rcurr_inv.data[2].z * v_g_z);
+
+      float z_scaled = 0;
+
+      float Rcurr_inv_0_z_scaled = Rcurr_inv.data[0].z * cell_size.z * intr.fx;
+      float Rcurr_inv_1_z_scaled = Rcurr_inv.data[1].z * cell_size.z * intr.fy;
+
+      float tranc_dist_inv = 1.0f / tranc_dist;
+
+      short2* pos = volume.ptr (y) + x;
+      int elem_step = volume.step * VOLUME_Y / sizeof(short2);
+
+//#pragma unroll
+      for (int z = 0; z < VOLUME_Z;
+           ++z,
+           v_g_z += cell_size.z,
+           z_scaled += cell_size.z,
+           v_x += Rcurr_inv_0_z_scaled,
+           v_y += Rcurr_inv_1_z_scaled,
+           pos += elem_step)
+      {
+        bool doDbgPrint = false;
+        if(x > 0 && y > 0 && z > 0 //参数默认 000, 做无效值, 所以增加此检测
+            && vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+            doDbgPrint = true;
+
+        float inv_z = 1.0f / (v_z + Rcurr_inv.data[2].z * z_scaled);
+        if (inv_z < 0)
+            continue;
+
+        // project to current cam
+        // old code
+        int2 coo =
+        {
+          __float2int_rn (v_x * inv_z + intr.cx),
+          __float2int_rn (v_y * inv_z + intr.cy)
+        };
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
+        {
+          float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+
+          float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          if(doDbgPrint){
+              printf("@tsdf23_s2s: Dp_scaled, sdf, tranc_dist: %f, %f, %f, %s; sdf/tdist: %f, coo.xy: (%d, %d)\n", Dp_scaled, sdf, tranc_dist, 
+                  sdf >= -tranc_dist ? "sdf >= -tranc_dist" : "", sdf/tranc_dist, coo.x, coo.y);
+          }
+
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters
+          if (Dp_scaled != 0 && sdf >= -eta) //meters //比较 eta , 而非 delta (tdist)
+          {
+            float tsdf = fmin (1.0f, sdf * tranc_dist_inv);
+
+            if(sdf < -tranc_dist)
+                tsdf = -1.0f;
+
+#if 10   //滑窗累加
+            //read and unpack
+            float tsdf_prev;
+            int weight_prev;
+            unpack_tsdf (*pos, tsdf_prev, weight_prev);
+            //v17, 为配合 v17 用 w 二进制末位做标记位, 这里稍作修改: unpack 时 /2, pack 时 *2; @2018-1-22 02:01:27
+            weight_prev = weight_prev >> 1;
+
+            const int Wrk = 1;
+
+            float tsdf_new = (tsdf_prev * weight_prev + Wrk * tsdf) / (weight_prev + Wrk);
+            int weight_new = min (weight_prev + Wrk, Tsdf::MAX_WEIGHT);
+
+            if(doDbgPrint){
+                printf("tsdf_prev, tsdf_curr, tsdf_new: %f, %f, %f; wp, wnew: %d, %d\n", tsdf_prev, tsdf, tsdf_new, weight_prev, weight_new);
+            }
+#elif 1 //直接 set volume 为当前 dmap 映射结果
+            float tsdf_new = tsdf;
+            int weight_new = 1;
+#endif
+            weight_new = weight_new << 1; //省略了+0, v17 的标记位默认值=0
+            pack_tsdf (tsdf_new, weight_new, *pos);
+          }
+          else{ //(Dp_scaled == 0 || sdf < -eta)
+            //float tsdf_new = 0;
+            //int weight_new = 0;
+            //pack_tsdf (tsdf_new, weight_new, *pos);
+            if(doDbgPrint)
+                printf("NOT (Dp_scaled != 0 && sdf >= -eta)\n");
+          }
+        }
+        else{ //NOT (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)
+            if(doDbgPrint){
+                printf("vxlDbg.xyz:= (%d, %d, %d), coo.xy:= (%d, %d)\n", vxlDbg.x, vxlDbg.y, vxlDbg.z, coo.x, coo.y);
+            }
+        }
+      }       // for(int z = 0; z < VOLUME_Z; ++z)
+    }//__global__ tsdf23_s2s
 
     enum{FUSE_KF_AVGE, //kf tsdf 原策略
         FUSE_RESET, //i 冲掉 i-1
@@ -4052,7 +4176,8 @@ namespace pcl
                 if(doDbgPrint)
                     printf("+++++++++++++++isnan(snorm_curr_g.x), weiFactor: %f\n", weiFactor);
 
-                return;
+                //return; //错, v18.x 时才发现 @2018-3-8 15:29:28
+                continue;
             }
 
             snorm_curr_g.y = nmap_curr_g.ptr(coo.y + depthScaled.rows)[coo.x];
@@ -4077,8 +4202,10 @@ namespace pcl
 
             //v17.3: sdf 按照 cos-vray-snorm_c 投影, 暂不管 snorm_p //已验证: 效果不错, 在表面(零值面)附近, 确实需要此法, 确保精确, 以免后面二次截断(neg_near_zero) 误判
             float sdf_cos = abs(cos_vray_norm_curr) * sdf;
-            if(doDbgPrint)
+            if(doDbgPrint){
+                printf("snorm_curr_g, vray_normed: [%f, %f, %f], [%f, %f, %f]\n", snorm_curr_g.x, snorm_curr_g.y, snorm_curr_g.z, vray_normed.x, vray_normed.y, vray_normed.z);
                 printf("sdf-orig: %f,, cos_vray_norm_curr: %f,, sdf_cos: %f\n", sdf, cos_vray_norm_curr, sdf_cos);
+            }
 
             sdf = sdf_cos;
             float sdf_normed = sdf * tranc_dist_inv;
@@ -4257,6 +4384,321 @@ namespace pcl
         }//if- 0 < (x,y) < (cols,rows)
       }// for(int z = 0; z < VOLUME_Z; ++z)
     }//tsdf23_v17
+
+    //for v18, 为了测试 krnl 是否 thread, block 如实遍历, 结果: OK
+    __global__ void
+    test_kernel (int3 vxlDbg){
+        int x = threadIdx.x + blockIdx.x * blockDim.x;
+        int y = threadIdx.y + blockIdx.y * blockDim.y;
+        if(vxlDbg.x == x && vxlDbg.y == y)
+            printf("dbg@test_kernel>>>xy: %d, %d\n", x, y);
+
+    }//test_kernel
+
+    __global__ void
+    tsdf23_v18 (const PtrStepSz<float> depthScaled, PtrStep<short2> volume1, 
+        PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, const PtrStepSz<unsigned char> incidAngleMask,
+        const PtrStep<float> nmap_curr_g, const PtrStep<float> nmap_model_g,
+        /*↑--实参顺序: volume2nd, flagVolume, surfNormVolume, incidAngleMask, nmap_g,*/
+        const PtrStep<float> weight_map, //v11.4
+        const PtrStepSz<ushort> depthModel,
+        const PtrStepSz<short> diff_dmap, //v12.1
+        const float tranc_dist, const Mat33 Rcurr_inv, const float3 tcurr, const Intr intr, const float3 cell_size
+        , int3 vxlDbg)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+      //printf("tsdf23_v18, xy: %d, %d\n", x, y);
+      //if(vxlDbg.x == x && vxlDbg.y == y)
+      //    printf("dbg@tsdf23_v18>>>xy: %d, %d\n", x, y);
+
+      if (x >= VOLUME_X || y >= VOLUME_Y)
+        return;
+
+      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+
+      float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
+
+      float v_x = (Rcurr_inv.data[0].x * v_g_x + Rcurr_inv.data[0].y * v_g_y + Rcurr_inv.data[0].z * v_g_z) * intr.fx;
+      float v_y = (Rcurr_inv.data[1].x * v_g_x + Rcurr_inv.data[1].y * v_g_y + Rcurr_inv.data[1].z * v_g_z) * intr.fy;
+      float v_z = (Rcurr_inv.data[2].x * v_g_x + Rcurr_inv.data[2].y * v_g_y + Rcurr_inv.data[2].z * v_g_z);
+
+      float z_scaled = 0;
+
+      float Rcurr_inv_0_z_scaled = Rcurr_inv.data[0].z * cell_size.z * intr.fx;
+      float Rcurr_inv_1_z_scaled = Rcurr_inv.data[1].z * cell_size.z * intr.fy;
+
+      float tranc_dist_inv = 1.0f / tranc_dist;
+      float pendingFixThresh = cell_size.x * tranc_dist_inv * 3; //v13.4+ 用到: 暂定 3*vox 厚度; //值是相对于 tranc_dist 归一化过的
+
+      short2* pos1 = volume1.ptr (y) + x;
+      int elem_step = volume1.step * VOLUME_Y / sizeof(short2);
+
+      //我的控制量们:
+      short2 *pos2nd = volume2nd.ptr(y) + x;
+      const float tdist2nd_m = TDIST_MIN_MM / 1e3; //v17
+
+      //hadSeen-flag:
+      bool *flag_pos = flagVolume.ptr(y) + x;
+      int flag_elem_step = flagVolume.step * VOLUME_Y / sizeof(bool);
+
+      //vray.prev
+      char4 *vrayPrev_pos = vrayPrevVolume.ptr(y) + x;
+      int vrayPrev_elem_step = vrayPrevVolume.step * VOLUME_Y / sizeof(char4);
+
+      //surface-norm.prev
+      char4 *snorm_pos = surfNormVolume.ptr(y) + x;
+      int snorm_elem_step = surfNormVolume.step * VOLUME_Y / sizeof(char4);
+
+      //if(vxlDbg.x == x && vxlDbg.y == y)
+      //    printf("dbg@tsdf23_v18-before-for-loop>>>xy: %d, %d\n", x, y);
+
+//#pragma unroll
+      for (int z = 0; z < VOLUME_Z;
+           ++z,
+           v_g_z += cell_size.z,
+           z_scaled += cell_size.z,
+           v_x += Rcurr_inv_0_z_scaled,
+           v_y += Rcurr_inv_1_z_scaled,
+           pos1 += elem_step,
+
+           pos2nd += elem_step,
+           flag_pos += flag_elem_step,
+
+           vrayPrev_pos += vrayPrev_elem_step,
+           snorm_pos += snorm_elem_step)
+      {
+        //v18.2 【已解决, 此循环内不该用 return】
+        //if(x > 0 && y > 0 && z > 0 //参数默认 000, 做无效值, 所以增加此检测
+        //    && vxlDbg.x == x && vxlDbg.y == y)// && vxlDbg.z == z)
+        //{   //临时测试: 总有些 vox 无法定位到, 似乎根本不进入此逻辑块; @2018-3-1 22:47:15
+        //    printf("dbg@for-loop>>>xyz: %d, %d, %d\n", x, y, z);
+        //}
+        bool doDbgPrint = false;
+        if(x > 0 && y > 0 && z > 0 //参数默认 000, 做无效值, 所以增加此检测
+            && vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+            doDbgPrint = true;
+
+        float inv_z = 1.0f / (v_z + Rcurr_inv.data[2].z * z_scaled);
+        if(doDbgPrint)
+            printf("inv_z:= %f\n", inv_z);
+
+        if (inv_z < 0)
+            continue;
+
+        // project to current cam
+        int2 coo =
+        {
+          __float2int_rn (v_x * inv_z + intr.cx),
+          __float2int_rn (v_y * inv_z + intr.cy)
+        };
+
+        if(doDbgPrint)
+            printf("coo.xy:(%d, %d)\n", coo.x, coo.y);
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
+        {
+          float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+
+          float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          if(doDbgPrint){
+              printf("Dp_scaled, sdf, tranc_dist, %f, %f, %f\n", Dp_scaled, sdf, tranc_dist);
+          }
+
+          float weiFactor = weight_map.ptr(coo.y)[coo.x];
+          //float tranc_dist_real = max(2*cell_size.x, tranc_dist * weiFactor); //截断不许太短, v11.8
+          float tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v18.4: 边缘可能 w_factor=0, 
+
+          float3 snorm_curr_g;
+          snorm_curr_g.x = nmap_curr_g.ptr(coo.y)[coo.x];
+
+           if(isnan(snorm_curr_g.x)){
+               if(doDbgPrint)
+                   printf("+++++++++++++++isnan(snorm_curr_g.x), weiFactor: %f\n", weiFactor);
+ 
+               //return;    //内循环, 每次都要走遍 z轴, 不该 跳出
+               continue;    //v18.2
+           }
+
+          snorm_curr_g.y = nmap_curr_g.ptr(coo.y + depthScaled.rows)[coo.x];
+          snorm_curr_g.z = nmap_curr_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+          float3 vray;
+          vray.x = v_g_x;
+          vray.y = v_g_y;
+          vray.z = v_g_z;
+          //float vray_norm = norm(vray);
+          float3 vray_normed = normalized(vray); //单位视线向量
+
+          float cos_vray_norm_curr = dot(snorm_curr_g, vray_normed);
+          if(cos_vray_norm_curr > 0){ //当做assert, 要求必须: 夹角>90°, 即法向必须朝向相机这头
+              //printf("ERROR+++++++++++++++cos_vray_norm > 0");
+
+              //假设不保证外部已正确预处理：
+              snorm_curr_g.x *= -1;
+              snorm_curr_g.y *= -1;
+              snorm_curr_g.z *= -1;
+          }
+
+          //float sdf_cos = abs(cos_vray_norm_curr) * sdf;
+          float sdf_cos = max(COS75, abs(cos_vray_norm_curr)) * sdf; //v18.3: 乘数因子不许小于 COS75
+
+          if(doDbgPrint){
+              printf("snorm_curr_g, vray_normed: [%f, %f, %f], [%f, %f, %f]\n", snorm_curr_g.x, snorm_curr_g.y, snorm_curr_g.z, vray_normed.x, vray_normed.y, vray_normed.z);
+              printf("sdf-orig: %f,, cos_vray_norm_curr: %f,, sdf_cos: %f\n", sdf, cos_vray_norm_curr, sdf_cos);
+              printf("\ttranc_dist_real, weiFactor: %f, %f\n", tranc_dist_real, weiFactor);
+          }
+
+          sdf = sdf_cos;
+
+          //↓--v18.17: unpack 挪到外面
+          //read and unpack
+          float tsdf_prev1;
+          int weight_prev1;
+          unpack_tsdf (*pos1, tsdf_prev1, weight_prev1);
+          bool prev_always_edge = weight_prev1 % 2; //【DEL v17.1】 //v18.15: 语义变为: 是否一直处于边缘 (初值:=0:=false) @2018-3-28 15:56:33
+          weight_prev1 = weight_prev1 >> 1; //去掉末位, 只是为了与 v17 保持一致, 方便测试 【【因为 tsdf23 里 w*2 了
+          if(doDbgPrint)
+              printf("prev_always_edge-prev: %d,, tsdf_prev1: %f,, weight_prev1: %d\n", prev_always_edge, tsdf_prev1, weight_prev1);
+
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters
+          if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v18.4
+          //if (Dp_scaled != 0 && tranc_dist_real >= sdf && sdf >= -tranc_dist_real) //meters //v18.6: 测试正值远端截断; 【结果坏：内部降噪, 外部(尤其边缘)加噪; 改放在后面, 见 v18.7
+          {
+            float tsdf_curr = fmin (1.0f, sdf * tranc_dist_inv);
+
+            //↓--这里废弃, 挪到外面了 v18.17
+            ////read and unpack
+            //float tsdf_prev1;
+            //int weight_prev1;
+            //unpack_tsdf (*pos1, tsdf_prev1, weight_prev1);
+            //bool prev_always_edge = weight_prev1 % 2; //【DEL v17.1】 //v18.15: 语义变为: 是否一直处于边缘 (初值:=0:=false) @2018-3-28 15:56:33
+            //weight_prev1 = weight_prev1 >> 1; //去掉末位, 只是为了与 v17 保持一致, 方便测试 【【因为 tsdf23 里 w*2 了
+            //if(doDbgPrint)
+            //    printf("prev_always_edge-prev: %d,, tsdf_prev1: %f,, weight_prev1: %d\n", prev_always_edge, tsdf_prev1, weight_prev1);
+
+            //const int Wrk = 1;
+            int Wrk = 1; //v18.5: 考虑全反射: diff_dmap + 大入射角 (用 nmap_model_g, 不用 nmap-curr 判定) @2018-3-11 11:58:55
+            short diff_c_p = diff_dmap.ptr(coo.y)[coo.x]; //mm, curr-prev, +正值为当前更深
+            ushort depth_prev = depthModel.ptr(coo.y)[coo.x];
+
+            const int diff_c_p_thresh = 20; //20mm
+            if(doDbgPrint)
+                printf("depth_prev: %u; diff_c_p: %d\n", depth_prev, diff_c_p);
+
+            if(depth_prev > 0 //首先要 model 上 px 有效（已初始化）
+                && diff_c_p > diff_c_p_thresh){
+                float3 snorm_prev_g;
+                snorm_prev_g.x = nmap_model_g.ptr(coo.y)[coo.x];
+                if(isnan(snorm_prev_g.x)){
+                    if(doDbgPrint)
+                        printf("\t+++++isnan(snorm_prev_g.x)\n");
+
+                    Wrk = 0;
+                }
+                else{
+                    snorm_prev_g.y = nmap_model_g.ptr(coo.y + depthScaled.rows)[coo.x];
+                    snorm_prev_g.z = nmap_model_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+                    float cos_vray_norm_prev = dot(snorm_prev_g, vray_normed);
+                    if(doDbgPrint)
+                        printf("\tsnorm_prev_g.xyz: (%f, %f, %f), cos_vray_norm_prev: %f\n", 
+                            snorm_prev_g.x, snorm_prev_g.y, snorm_prev_g.z, cos_vray_norm_prev);
+
+                    if(abs(cos_vray_norm_prev) < COS75)
+                        Wrk = 0;
+                }
+            }//if-(diff_c_p > diff_c_p_thresh)
+
+            //v18.7: 改为: 第一次(w=0)观测到远端, 禁止初始化; 
+            //结果：1, 内/外均优于 v18.6, 内部优于 v18.5, 2, 但是外部仍有部分碎片噪声; 3, 法向图(raycast结果)很难看!    【暂存】
+//             if(0 == weight_prev1 && sdf > tranc_dist_real){
+//                 Wrk = 0;
+//             }
+
+            const float W_FACTOR_EDGE_THRESH = 0.99f;
+            bool is_curr_edge = weiFactor < W_FACTOR_EDGE_THRESH;
+
+            if(Wrk != 0){
+                //if(0 == weight_prev1 && is_curr_edge){ //若 w-prev尚未初始化，且 curr 在边缘
+                if(weight_prev1 <= 1 && is_curr_edge){ //v18.18: 略改, 因懒, 因 global_time =0 时用的 tsdf23 直接 w+1 @2018-4-10 17:27:08
+                    prev_always_edge = true;
+                }
+                else if(!is_curr_edge && prev_always_edge){
+                    prev_always_edge = false;
+
+                    //weight_prev1 = min(weight_prev1, 30); //策略1: w-p 直接降权到 30≈1s; //不好, 若t-p=1, 则 1*30 期望仍很大, 难修正
+                    weight_prev1 = min(weight_prev1, 5);
+                }
+            }
+
+            float tsdf_new1 = tsdf_prev1;
+            int weight_new1 = weight_prev1;
+            if(Wrk > 0)
+                //&& !(!prev_always_edge && is_curr_edge && tsdf_curr > 0.99) ) //若: prev确认非边缘, curr是边缘, 且 t-c确实大, 则不更新 t, w
+                //&& (prev_always_edge || !is_curr_edge || tsdf_curr <= 0.99) ) //同义, 
+            {
+                tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+            }
+
+            if(doDbgPrint){
+                //printf("【【tsdf_prev1: %f,, weight_prev1: %d; tsdf_prev1_real_m: %f, neg_near_zero: %s\n", tsdf_prev1, weight_prev1, tsdf_prev1_real_m, neg_near_zero ? "TTT":"FFF");
+                printf("【【tsdf_prev1: %f,, weight_prev1: %d;\n", tsdf_prev1, weight_prev1);
+                printf("【【tsdf_curr: %f,, Wrk: %d; \n", tsdf_curr, Wrk);
+                printf("tsdf_new1: %f,, weight_new1: %d;;; prev_always_edge: %d\n", tsdf_new1, weight_new1, prev_always_edge);
+            }
+
+            if(weight_new1 == 0)
+                tsdf_new1 = 0; //严谨点, 避免调试绘制、marching cubes意外
+
+            //pack 前, 最后 w_new 要加上标记位:
+            weight_new1 = (weight_new1 << 1) + prev_always_edge;
+
+            pack_tsdf (tsdf_new1, weight_new1, *pos1);
+
+          }//if-(Dp_scaled != 0 && sdf >= -tranc_dist) 
+//           else{
+//               if(doDbgPrint)
+//                   printf("NOT (Dp_scaled != 0 && sdf >= -tranc_dist)\n");
+//           }
+          //else if(Dp_scaled != 0 && sdf < -tranc_dist) { //v18.12: 此处+v18.8; 若某vox曾经看见过一眼（因噪声、全反射，持续时间短）, 
+                                                            //但其后长时间不可见, 则慢慢降权(消亡); 【结果：很好, 优于 v18.11, 但有时候看见一眼未必是噪声, 要改
+          else if(Dp_scaled != 0 
+              && sdf < -tranc_dist &&  sdf > -4*tranc_dist   //v18.13: 改-2*tdist +v18.8, 排除 v18.12 的问题 //v18.14 改-4*tdist, 并去掉 v18.8, 就用原来 marching cubes
+              && !prev_always_edge  //v18.17: 仅对非边缘执行 "-1 策略", 若总是边缘(如, 细棍子), 则不 -1 @2018-4-8 02:32:39
+            )
+          {
+              //↓-v18.17: 挪到 if 外面了
+              //float tsdf_prev1;
+              //int weight_prev1;
+              //unpack_tsdf (*pos1, tsdf_prev1, weight_prev1);
+              //bool prev_always_edge = weight_prev1 % 2;
+              //weight_prev1 = weight_prev1 >> 1; //去掉末位, 
+
+              const int POS_VALID_WEIGHT_TH = 0; //30帧≈一秒
+              if(/*tsdf_prev1 >= 0.999 ||*/ //若 t_p 之前存"远端", 非近表面
+                  tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //或, 若 t_p 正值但是尚不稳定
+              {
+                  weight_prev1 = max(0, weight_prev1-1);
+
+                  if(doDbgPrint){
+                      printf("】】tsdf_prev1: %f,, weight_prev1-=1: %d;\n", tsdf_prev1, weight_prev1);
+                  }
+              }
+
+              if(weight_prev1 == 0)
+                  tsdf_prev1 = 0; //严谨点, 避免调试绘制、marching cubes意外
+              weight_prev1 = (weight_prev1 << 1) + prev_always_edge;
+
+              pack_tsdf (tsdf_prev1, weight_prev1, *pos1);
+          }
+        }//if- 0 < (x,y) < (cols,rows)
+      }// for(int z = 0; z < VOLUME_Z; ++z)
+    }//tsdf23_v18
 
     __global__ void
     tsdf23normal_hack (const PtrStepSz<float> depthScaled, PtrStep<short2> volume,
@@ -4505,6 +4947,42 @@ pcl::device::integrateTsdfVolume (const PtrStepSz<ushort>& depth, const Intr& in
   cudaSafeCall (cudaDeviceSynchronize ());
 }
 
+void
+pcl::device::integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const Intr& intr,
+    const float3& volume_size, const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, float eta,
+    PtrStep<short2> volume, DeviceArray2D<float>& depthScaled, int3 vxlDbg) //zc: 调试
+{
+    //depthScaled.create (depth.rows, depth.cols);
+
+    //dim3 block_scale (32, 8);
+    //dim3 grid_scale (divUp (depth.cols, block_scale.x), divUp (depth.rows, block_scale.y));
+
+    ////scales depth along ray and converts mm -> meters. 
+    //scaleDepth<<<grid_scale, block_scale>>>(depth, depthScaled, intr);
+    //cudaSafeCall ( cudaGetLastError () );
+
+    float3 cell_size;
+    cell_size.x = volume_size.x / VOLUME_X;
+    cell_size.y = volume_size.y / VOLUME_Y;
+    cell_size.z = volume_size.z / VOLUME_Z;
+
+    //dim3 block(Tsdf::CTA_SIZE_X, Tsdf::CTA_SIZE_Y);
+    dim3 block (16, 16);
+    dim3 grid (divUp (VOLUME_X, block.x), divUp (VOLUME_Y, block.y));
+
+    //tsdf23<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size, *buffer);    
+    tsdf23_s2s<<<grid, block>>>(depthScaled, volume, tranc_dist, eta,
+        Rcurr_inv, tcurr, intr, cell_size, vxlDbg);    
+
+    //  for ( int i = 0; i < 100; i++ )
+    //    tsdf23test<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size, *buffer);    
+
+    //tsdf23normal_hack<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size);
+
+    cudaSafeCall ( cudaGetLastError () );
+    cudaSafeCall (cudaDeviceSynchronize ());
+}//integrateTsdfVolume_s2s
+
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void 
 pcl::device::integrateTsdfVolume_v11 (const PtrStepSz<ushort>& depth, const Intr& intr, const float3& volume_size, 
@@ -4644,6 +5122,59 @@ pcl::device::integrateTsdfVolume_v13 (const PtrStepSz<ushort>& depth, const Intr
         tranc_dist, Rcurr_inv, tcurr, intr, cell_size, vxlDbg);    
 }//integrateTsdfVolume_v13
 
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+void 
+pcl::device::integrateTsdfVolume_v18 (const PtrStepSz<ushort>& depth, const Intr& intr, const float3& volume_size, 
+    const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, 
+    PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, DeviceArray2D<unsigned char> incidAngleMask, 
+    const MapArr& nmap_curr_g, const MapArr &nmap_model_g,
+    const MapArr &weight_map, //v11.4
+    const PtrStepSz<ushort>& depth_model,
+    DeviceArray2D<short>& diffDmap,
+    DeviceArray2D<float>& depthScaled, int3 vxlDbg)
+{
+    depthScaled.create (depth.rows, depth.cols);
+
+    dim3 block_scale (32, 8);
+    dim3 grid_scale (divUp (depth.cols, block_scale.x), divUp (depth.rows, block_scale.y));
+
+    //scales depth along ray and converts mm -> meters. 
+    scaleDepth<<<grid_scale, block_scale>>>(depth, depthScaled, intr);
+    cudaSafeCall ( cudaGetLastError () );
+
+    //v12 加一步: 求 diffDmap = depth(raw)-depth_model @2017-12-3 22:06:24
+    //DeviceArray2D<short> diffDmap; //short, 而非 ushort
+    //↑--局部变量会导致: Error: unspecified launch failure       ..\..\..\gpu\containers\src\device_memory.cpp:276 //在: DeviceMemory2D::release() 出错
+    diffDmap.create(depth.rows, depth.cols);
+    diffDmaps(depth, depth_model, diffDmap); //仍 mm
+
+    float3 cell_size;
+    cell_size.x = volume_size.x / VOLUME_X;
+    cell_size.y = volume_size.y / VOLUME_Y;
+    cell_size.z = volume_size.z / VOLUME_Z;
+
+    //dim3 block(Tsdf::CTA_SIZE_X, Tsdf::CTA_SIZE_Y);
+    dim3 block (16, 16);
+    dim3 grid (divUp (VOLUME_X, block.x), divUp (VOLUME_Y, block.y));
+
+    printf("vxlDbg@integrateTsdfVolume_v18: [%d, %d, %d]\n", vxlDbg.x, vxlDbg.y, vxlDbg.z);
+
+    //tsdf23<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size);    
+    //tsdf23_v11<<<grid, block>>>(depthScaled, volume, 
+    //tsdf23_v13<<<grid, block>>>(depthScaled, volume, 
+    //tsdf23_v14<<<grid, block>>>(depthScaled, volume, 
+    //tsdf23_v15<<<grid, block>>>(depthScaled, volume, 
+    //tsdf23_v16<<<grid, block>>>(depthScaled, volume,  //测试 tranc_dist_real 用的
+    //tsdf23_v17<<<grid, block>>>(depthScaled, volume,  //长短 tdist, 晶格独立存 tdist
+    //test_kernel<<<grid, block>>>(vxlDbg); //v18.2
+    tsdf23_v18<<<grid, block>>>(depthScaled, volume,  
+        volume2nd, flagVolume, surfNormVolume, vrayPrevVolume, incidAngleMask, 
+        nmap_curr_g, nmap_model_g,
+        weight_map,
+        depth_model, //v18.5, 新增形参, 主要判定 isnan
+        diffDmap,
+        tranc_dist, Rcurr_inv, tcurr, intr, cell_size, vxlDbg);    
+}//integrateTsdfVolume_v18
 
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -4925,6 +5456,33 @@ calcWmapKernel(int rows, int cols, const PtrStep<float> vmapLocal, const PtrStep
 
 }//calcWmapKernel-v2
 
+//@param[in] vmapLocal, 其实只要个 dmap 就行, 暂不改, 与之前 calcWmapKernel 保持一致
+__global__ void
+edge2wmapKernel(int rows, int cols, const PtrStep<float> vmapLocal, const PtrStepSz<float> edgeDistMap, float fxy, PtrStepSz<float> wmap_out){
+    int x = threadIdx.x + blockIdx.x * blockDim.x,
+        y = threadIdx.y + blockIdx.y * blockDim.y;
+
+    const float qnan = pcl::device::numeric_limits<float>::quiet_NaN();
+    if(!(x < cols && y < rows))
+        return;
+
+    wmap_out.ptr(y)[x] = 0; //默认初始权重=0
+
+    float3 vray; //local
+    vray.x = vmapLocal.ptr(y)[x];
+    if(isnan(vray.x))
+        return;
+
+    vray.y = vmapLocal.ptr(y + rows)[x];
+    vray.z = vmapLocal.ptr(y + 2 * rows)[x]; //meters
+
+    const float maxEdgeDist = 10; //in mm //30mm 太长
+    float edgeDistMm = edgeDistMap.ptr(y)[x] / fxy * vray.z * 1e3; //in mm
+
+    float edgeDistFactor = min(1.f, edgeDistMm / maxEdgeDist);
+    wmap_out.ptr(y)[x] = edgeDistFactor;
+}//edge2wmapKernel
+
 void calcWmap(const MapArr &vmapLocal, const MapArr &nmapLocal, const pcl::device::MaskMap &contMask, MapArr &wmap_out){
     int cols = vmapLocal.cols(),
         rows = vmapLocal.rows() / 3;
@@ -4954,6 +5512,21 @@ void calcWmap(const MapArr &vmapLocal, const MapArr &nmapLocal, const DeviceArra
     cudaSafeCall(cudaGetLastError());
     //cudaSafeCall(cudaDeviceSynchronize()); //tmp, 暂时企图避免阻塞 @2017-12-6 22:03:13
 }//calcWmap
+
+void edge2wmap(const MapArr &vmapLocal, const DeviceArray2D<float> &edgeDistMap, const float fxy, MapArr &wmap_out){
+    int cols = vmapLocal.cols(),
+        rows = vmapLocal.rows() / 3;
+
+    wmap_out.create(rows, cols);
+
+    dim3 block(32, 8);
+    dim3 grid(divUp(cols, block.x), divUp(rows, block.y));
+
+    edge2wmapKernel<<<grid, block>>>(rows, cols, vmapLocal, edgeDistMap, fxy, wmap_out);
+
+    cudaSafeCall(cudaGetLastError());
+
+}//edge2wmap
 
 __global__ void
 transformVmapKernel(int rows, int cols, const PtrStep<float> vmap_src, const Mat33 Rmat, const float3 tvec, PtrStepSz<float> vmap_dst){

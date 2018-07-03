@@ -212,7 +212,10 @@ public: //zc:
 	//DeviceArray2D<int> volumeUpper_; //暂放弃
 
 	void create_init_cu_volume();
-    };
+	
+	//在 s2s 实现中, 用 volume2nd_ 存 dmap_curr 在某视角下得到的 volume
+	void create_init_s2s_volume();
+	};
   }
 }
 

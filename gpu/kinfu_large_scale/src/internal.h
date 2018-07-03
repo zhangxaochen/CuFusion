@@ -44,6 +44,8 @@
 
 #include <pcl/gpu/kinfu_large_scale/tsdf_buffer.h>
 
+#include "cuda/zc_cuda_utils.hpp"
+
 namespace zc{
 //     //zc
 //     //typedef unsigned char uchar;
@@ -170,7 +172,8 @@ namespace pcl
       * \param[out] nmap normal map
       */
     void 
-    computeNormalsEigen (const MapArr& vmap, MapArr& nmap);
+    //computeNormalsEigen (const MapArr& vmap, MapArr& nmap);
+    computeNormalsEigen (const MapArr& vmap, MapArr& nmap, int2 pxDbg = int2());
 
 	    /** \brief compute nmap, bdr 方案
       * \param[in] depth map, cv16u
@@ -315,6 +318,20 @@ namespace pcl
                       const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres,
                       DeviceArray2D<double>& gbuf, DeviceArray<double>& mbuf, double* matrixA_host, double* vectorB_host);
 
+
+    //@brief 参考 estimateCombined & integrateTsdfVolume (first version 代码风格也很好)
+    //@param[in] xi_prev, twist of prev transform (R,t)
+    //@param[in] eta, s2s TSDF param in meters, default =0.01 (10mm)
+    void
+    //estimateCombined_s2s(const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr,
+    estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
+                        const Mat33& Rcurr_inv, const float3& tcurr, const float6& xi_prev, 
+                        float tranc_dist, PtrStep<short2> volume, PtrStep<short2> volume2,
+                        //float delta, 
+                        float eta,
+                        DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host,
+                        DeviceArray2D<float>& depthScaled, int &vxlValidCnt, float &sum_s2s_err, int3 vxlDbg = int3()); //zc: 调试
+
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // TSDF volume functions            
 
@@ -362,7 +379,13 @@ namespace pcl
     integrateTsdfVolume (const PtrStepSz<ushort>& depth, const Intr& intr, const float3& volume_size, 
                          //const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, const pcl::gpu::tsdf_buffer* buffer, DeviceArray2D<float>& depthScaled);
                          const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, const pcl::gpu::tsdf_buffer* buffer, DeviceArray2D<float>& depthScaled, int3 vxlDbg = int3()); //zc: 调试
-    
+
+    //大部分照搬, 仅仅 tranc_dist 用 (delta, eta) 逻辑, 去掉 *buffer (不考虑volume shift)
+    PCL_EXPORTS void 
+    integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const Intr& intr, const float3& volume_size, 
+            const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, float eta,
+            PtrStep<short2> volume, DeviceArray2D<float>& depthScaled, int3 vxlDbg = int3()); //zc: 调试
+
     //v11, 尝试融合 v9.4 + v10, 且
     //@param[in] surfNormVolume 取代 vrayPrevVolume, 即语义变为: 不用 vray判定是否 "转过头", 而用法向夹角判定; 由 nmap_g 控制
     PCL_EXPORTS void 
@@ -388,6 +411,20 @@ namespace pcl
     //暂时接口照搬 v11, 之后再改
     PCL_EXPORTS void 
     integrateTsdfVolume_v13 (const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
+                         const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, 
+                         PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, DeviceArray2D<unsigned char> incidAngleMask, const MapArr& nmap_curr_g, 
+                         const MapArr &nmap_model_g, //v11.6: 非 isNewFace 时候, 存 model 法向, 因其比 curr 稳定 @2017-3-14 23:32:12
+                         const MapArr &weight_map, //v11.4
+                         const PtrStepSz<ushort>& depth_model,
+                         DeviceArray2D<short>& diffDmap,
+                         DeviceArray2D<float>& depthScaled, int3 vxlDbg);
+
+    //v18: @2018寒假思路: 
+    //1. 暂完全放弃 长短tdist, 只用 短tdist; 聚焦: ① tsdf-cos, ② 背面观测时有限融合
+    //2. 或者长短 tdist, 但尝试 flipped-tsdf //参考 cvpr2017 论文: Semantic Scene Completion
+    //@param[out] diffDmap, 其实是输出, 此形参可以省, 暂不管 @2018-3-11 11:35:54
+    PCL_EXPORTS void 
+    integrateTsdfVolume_v18 (const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
                          const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, 
                          PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, DeviceArray2D<unsigned char> incidAngleMask, const MapArr& nmap_curr_g, 
                          const MapArr &nmap_model_g, //v11.6: 非 isNewFace 时候, 存 model 法向, 因其比 curr 稳定 @2017-3-14 23:32:12
