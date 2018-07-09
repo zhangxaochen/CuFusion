@@ -846,6 +846,10 @@ namespace pcl
 		Eigen::Vector4f planeFiltParam_; //世界坐标系下的
 
 		float s2s_eta_, s2s_beta_; //sdf2sdf params
+		bool s2s_f2m_; //T:=f2m; F:=f2f
+
+        //zc: 实现 sdf2sdf 时, init_tcam_ 归零, 同时指定 volume 000 全局坐标为 -(old init-t)
+        Vector3f   volume000_gcoo_; //s2s-v0.2
 
       private:
 

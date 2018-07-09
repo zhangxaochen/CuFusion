@@ -752,7 +752,8 @@ void
 
 	rmats_.push_back (init_Rcam_);
 	tvecs_.push_back (init_tcam_);
-	cout<<"\tinit_Rcam_@reset():\n"<<init_Rcam_<<endl;
+	cout<<"\tinit_Rcam_@reset():\n"<<init_Rcam_<<endl
+		<<"\tinit_tcam_:\n"<<init_tcam_.transpose()<<endl;
 
 	tsdf_volume_->reset ();
 
@@ -3498,6 +3499,8 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	//ScopeTime time( "s2sOdometry All" );
 	device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
 
+	float3& device_volume000_gcoo = device_cast<float3>(volume000_gcoo_);
+
 	{
 		//ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all"); //release 下 ~12ms
 		device::bilateralFilter (depth_raw, depths_curr_[0]);
@@ -3523,6 +3526,11 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	vxlPos.y = vxlDbg_[1];
 	vxlPos.z = vxlDbg_[2];
 
+	//scale-depth 放最外面 @2018-7-4 16:54:24
+	scaleDepthDevice(depth_raw, intr, depthRawScaled_);
+	DeviceArray2D<float> depthFiltScaled;
+	scaleDepthDevice(depths_curr_[0], intr, depthFiltScaled);
+
 	//can't perform more on first frame
 	if (global_time_ == 0)
 	{
@@ -3537,8 +3545,10 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		float3 device_volume_size = device_cast<const float3>(tsdf_volume_->getSize());
 
 		//device::integrateTsdfVolume(depth_raw, intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure (), depthRawScaled_);
-		printf("##########(((global_time_ == 0\n");
-		integrateTsdfVolume_s2s(intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+		cout<<"~~~~~~~~~~~(((global_time_ == 0; init-tvec: "<<tvecs_[0].transpose()
+			<<"; volume000_gcoo_: "<<volume000_gcoo_.transpose()<<endl;;
+		integrateTsdfVolume_s2s(intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, device_volume000_gcoo, //s2s-v0.2
+			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
 
 		for (int i = 0; i < LEVELS; ++i)
 			device::tranformMaps (vmaps_curr_[i], nmaps_curr_[i], device_initial_cam_rot, device_initial_cam_trans, vmaps_g_prev_[i], nmaps_g_prev_[i]);
@@ -3565,7 +3575,12 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	// Ray casting //icp 之前先做了, 仿 bdrOdometry 规矩, 与原来 kinfu 不同 @2017-4-5 17:10:59
 	{
 	//ScopeTime time("ray-cast-all"); //11ms, 这么慢? @2018-3-26 00:58:34
-	raycast (intr, device_Rprev, device_tprev, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
+	//raycast (intr, device_Rprev, device_tprev, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
+	//s2s-v0.2:
+	Vector3f tprev_fake = tprev - volume000_gcoo_;
+	float3& device_tprev_fake = device_cast<float3> (tprev_fake);
+
+	raycast (intr, device_Rprev, device_tprev_fake, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
 	for (int i = 1; i < LEVELS; ++i)
 	{
 		resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
@@ -3598,7 +3613,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	//}
 
 	float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
-	for (int iter = 0; iter < 10; ++iter){
+	for (int iter = 0; iter < 11; ++iter){
 		cout<<">>>>>>>>>>iter: "<<iter<<endl;
 		Mat33&  device_Rcurr = device_cast<Mat33> (Rcurr);
 		float3& device_tcurr = device_cast<float3>(tcurr);
@@ -3613,7 +3628,9 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		Vector6f xi_curr;
 
 		cout<<"BEFORE-get_twist_from_rt\n";
-#define XI_C2G 01 //1-c2g; 0-g2c
+#define XI_C2G 0 //1-c2g; 0-g2c    
+		//↑-已测试, 这里 g2c 必须对应@estimate_combined.cu中: tmp = tsdf1 - tsdf2 +...;
+		//c2g 则必须对应 t2-t1 @2018-7-9 15:18:03
 #if XI_C2G
  		//Eigen::AngleAxisf aa(Rcurr);
  		//Vector3f rvec = aa.axis() * aa.angle();
@@ -3646,13 +3663,16 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		int vxlValidCnt = -1;
 		float sum_s2s_err = 0;
 		estimateCombined_s2s(depth_raw, intr, device_volume_size, 
-			device_Rcurr_inv, device_tcurr, device_xi_curr, 
+			device_Rcurr_inv, device_tcurr, device_volume000_gcoo, device_xi_curr, 
 			tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), tsdf_volume_->volume2nd_,
 			0.01, gbuf_s2s_, sumbuf_s2s_, A_s2s_.data(), b_s2s_.data(), 
-			depthRawScaled_, 
+			//depthRawScaled_, 
+			depthFiltScaled, //配准改用 bilat-filt, 不用 raw @2018-7-6 19:58:36
 			vxlValidCnt, sum_s2s_err,
 			vxlPos);
-		printf("estimateCombined_s2s, vxlValidCnt= %d; sum_s2s_err: %f; avg-err: %f; ", vxlValidCnt, sum_s2s_err, sum_s2s_err/vxlValidCnt); tt3.toc_print();
+		printf("estimateCombined_s2s, vxlValidCnt= 【【%d; sum_s2s_err: 【【%f; avg-err: 【【%f; \n"
+			"tsdf_diff_sum_host_: 【【%f; tsdf_abs_diff_sum_host_: 【【%f; ", 
+			vxlValidCnt, sum_s2s_err, sum_s2s_err/vxlValidCnt, tsdf_diff_sum_host_, tsdf_abs_diff_sum_host_); tt3.toc_print();
 
 		double det_f2mod = A_s2s_.determinant();
 		if ( fabs (det_f2mod) < 1e-15 || pcl_isnan (det_f2mod) ){
@@ -3672,8 +3692,9 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 				<<"A'*b(DOUBLE): "<<(A_s2s_.cast<double>().inverse()*b_s2s_.cast<double>()).transpose()<<endl
 				;
 
-		float BETA = 0.5f;
-		xi_curr += BETA * (result - xi_curr);
+		//float BETA = 0.5f;
+		//xi_curr += BETA * (result - xi_curr);
+		xi_curr += s2s_beta_ * (result - xi_curr);
 		//cout<<"xi_curr-AFTER: "<<xi_curr<<endl;
 
 		//rvec = xi_curr.tail(3);
@@ -3695,7 +3716,8 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		Rcurr = Rcurr_inv.inverse();
 		tcurr = - Rcurr * tcurr_inv;
 #endif
-		cout<<"AFTER-xi_curr: "<<xi_curr.transpose()<<endl;
+		cout<<"AFTER-xi_curr: "<<xi_curr.transpose()<<endl
+			<<"xi-inc: "<<result.transpose()<<endl;
 
 	}//for-iter
 	}//ScopeTime-icp-all
@@ -3736,8 +3758,11 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		if(isTsdfVer(2)){
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_);
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
-			initVrayPrevVolume(tsdf_volume_->data());
-			integrateTsdfVolume_s2s(intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+			
+			if(!s2s_f2m_)
+				initVrayPrevVolume(tsdf_volume_->data()); //每帧清空
+			integrateTsdfVolume_s2s(intr, device_volume_size, device_Rcurr_inv, device_tcurr, device_volume000_gcoo,
+				tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
 		}
 	}//if-(integrate)
 

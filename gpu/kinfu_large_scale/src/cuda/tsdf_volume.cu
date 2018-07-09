@@ -649,7 +649,8 @@ namespace pcl
     __global__ void
     tsdf23_s2s (const PtrStepSz<float> depthScaled, PtrStep<short2> volume,
             const float tranc_dist, const float eta, //s2s (delta, eta)
-            const Mat33 Rcurr_inv, const float3 tcurr, 
+            //const Mat33 Rcurr_inv, const float3 tcurr, 
+            const Mat33 Rcurr_inv, const float3 tcurr, const float3 volume000_gcoo,
             const Intr intr, const float3 cell_size, int3 vxlDbg) //zc: ต๗สิ
     {
       int x = threadIdx.x + blockIdx.x * blockDim.x;
@@ -658,9 +659,12 @@ namespace pcl
       if (x >= VOLUME_X || y >= VOLUME_Y)
         return;
 
-      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
-      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
-      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+      //float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      //float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      //float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+      float v_g_x = (x + 0.5f) * cell_size.x + volume000_gcoo.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y + volume000_gcoo.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z + volume000_gcoo.z - tcurr.z;
 
       float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
 
@@ -4949,7 +4953,7 @@ pcl::device::integrateTsdfVolume (const PtrStepSz<ushort>& depth, const Intr& in
 
 void
 pcl::device::integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const Intr& intr,
-    const float3& volume_size, const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, float eta,
+    const float3& volume_size, const Mat33& Rcurr_inv, const float3& tcurr, const float3& volume000_gcoo, float tranc_dist, float eta,
     PtrStep<short2> volume, DeviceArray2D<float>& depthScaled, int3 vxlDbg) //zc: ต๗สิ
 {
     //depthScaled.create (depth.rows, depth.cols);
@@ -4972,7 +4976,7 @@ pcl::device::integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const 
 
     //tsdf23<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size, *buffer);    
     tsdf23_s2s<<<grid, block>>>(depthScaled, volume, tranc_dist, eta,
-        Rcurr_inv, tcurr, intr, cell_size, vxlDbg);    
+        Rcurr_inv, tcurr, volume000_gcoo, intr, cell_size, vxlDbg);    
 
     //  for ( int i = 0; i < 100; i++ )
     //    tsdf23test<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size, *buffer);    

@@ -703,7 +703,11 @@ struct ImageView
 		}
 
 		// new add for vmap and nmap
-		raycaster_ptr_->run(kinfu.volume(), kinfu.getCameraPose(), kinfu.getCyclicalBufferStructure ());
+		//raycaster_ptr_->run(kinfu.volume(), kinfu.getCameraPose(), kinfu.getCyclicalBufferStructure ());
+		Eigen::Affine3f cam_pose_curr_fake = kinfu.getCameraPose();
+		cam_pose_curr_fake.translation() -= kinfu.volume000_gcoo_;
+		raycaster_ptr_->run(kinfu.volume(), cam_pose_curr_fake, kinfu.getCyclicalBufferStructure ());
+
 		raycaster_ptr_->generateDepthImage(generated_depth_);
 		int c;
 		vector<unsigned short> data;
@@ -1019,7 +1023,7 @@ struct KinFuLSApp
 		: exit_ (false), scan_ (false), scan_mesh_(false), file_index_( 0 ), transformation_( Eigen::Matrix4f::Identity() ), scan_volume_ (false), independent_camera_ (false),
 		slice2d_(false), print_nbr_(false), //zc
 		registration_ (false), integrate_colors_ (false), pcd_source_ (false), focal_length_(-1.f), capture_ (source), time_ms_(0), record_script_ (false), play_script_ (false), recording_ (false), use_device_ (useDevice), traj_(cv::Mat::zeros( 480, 640, CV_8UC3 )), traj_buffer_( 480, 640, CV_8UC3, cv::Scalar( 255, 255, 255 )),
-		use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false), use_omask_(false),
+		use_rgbdslam_ (false), record_log_ (false), fragment_rate_ (fragmentRate), fragment_start_ (fragmentStart), use_schedule_ (false), use_graph_registration_ (false), frame_id_ (0), use_bbox_ ( false ), seek_start_( -1 ), kinfu_image_ (false), traj_token_ (0), use_mask_ (false), use_omask_(false), use_tmask_(false), 
 		kintinuous_( false ), rgbd_odometry_( false ), slac_( false ), bdr_odometry_( false )
 		,cu_odometry_(false), s2s_odometry_(false)
 		, kdtree_odometry_(false)
@@ -2439,7 +2443,14 @@ struct KinFuLSApp
 			current_frame_cloud_view_->show (*kinfu_);
 
 		if (!independent_camera_)
-			setViewerPose (scene_cloud_view_.cloud_viewer_, kinfu_->getCameraPose());
+		{
+			//setViewerPose (scene_cloud_view_.cloud_viewer_, kinfu_->getCameraPose());
+
+			//s2s 实现把 T移到原点, 相应各种viewer 要调整, 避免显示错乱
+			Eigen::Affine3f cam_pose_curr_fake = kinfu_->getCameraPose();
+			cam_pose_curr_fake.translation() -= kinfu_->volume000_gcoo_;
+			setViewerPose (scene_cloud_view_.cloud_viewer_, cam_pose_curr_fake);
+		}
 
 		if (enable_texture_extraction_) {
 			if ( (frame_counter_  % snapshot_rate_) == 0 )   // Should be defined as a parameter. Done.
@@ -2857,11 +2868,20 @@ struct KinFuLSApp
 					cv::Mat omMat = cv::imread(omFnBuf, -1);
 					//cv::cvtColor(omMat, omMat, CV_RGB2GRAY);
 
+					cv::Mat totalMsk = omMat.clone(); //可能要 +tmask, 看情况 cmd 参数
+
+					if(use_tmask_){
+						char tmFnBuf[333];
+						sprintf(tmFnBuf, "%s/tmask/tmask_%06d.png", eval_folder_.c_str(), currentIndex);
+						cv::Mat tmMat = cv::imread(tmFnBuf, -1);
+						totalMsk.setTo(UCHAR_MAX, tmMat == UCHAR_MAX);
+					}
+
 					unsigned short * depth_buffer = const_cast<unsigned short *>(depth_.data); //const-ptr, 这里 dirty hack
 
 					for (unsigned yIdx = 0; yIdx < depth_.rows; ++yIdx){
 						for (unsigned xIdx = 0; xIdx < depth_.cols; ++xIdx, ++depth_buffer){
-							if(omMat.at<uchar>(yIdx, xIdx) != UCHAR_MAX)
+							if(totalMsk.at<uchar>(yIdx, xIdx) != UCHAR_MAX)
 								//depth_(yIdx, xIdx) = 0;
 								*depth_buffer = 0;
 						}
@@ -3112,6 +3132,8 @@ struct KinFuLSApp
 
 	//zc: object-mask, for "sdf2sdf" eval; 相对路径ptn: "./omask/omask_%06d.png" @2018-4-2 00:10:25
 	bool use_omask_;
+	bool use_tmask_; //table-mask @2018-7-5 14:53:00
+
 	string eval_folder_; //改类内
 
 	bool rgbd_odometry_;
@@ -3681,24 +3703,36 @@ int
 
 	}
 
-    //s2s CPU impl port to GPU @2018-5-24 17:30:18
-    vector<float> s2s_params;
-    pc::parse_x_arguments(argc, argv, "-s2s", s2s_params);
-    if(s2s_params.size() == 2){
-        //float delta = s2s_params[0],
-        //    eta = s2s_params[1],
-        //    beta = s2s_params[2],
-        //    bilat_sigma_color = s2s_params[3], //depth diff in mm //暂未用到, 定死默认 (30mm, 4.5px)
-        //    bilat_sigma_space = s2s_params[4]; //neighbor pixels
-        PCL_WARN("sdf2sdf-odometry\n");
+	//s2s CPU impl port to GPU @2018-5-24 17:30:18
+	vector<float> s2s_params;
+	pc::parse_x_arguments(argc, argv, "-s2s", s2s_params);
+	if(s2s_params.size() == 3){
+		//float delta = s2s_params[0],
+		//    eta = s2s_params[1],
+		//    beta = s2s_params[2],
+		//    bilat_sigma_color = s2s_params[3], //depth diff in mm //暂未用到, 定死默认 (30mm, 4.5px)
+		//    bilat_sigma_space = s2s_params[4]; //neighbor pixels
+		PCL_WARN("sdf2sdf-odometry\n");
 
-        float eta = s2s_params[0],
-            beta = s2s_params[1];
+		float eta = s2s_params[0],
+			beta = s2s_params[1];
 
-        app.toggleS2sOdometry();
-        app.kinfu_->s2s_eta_ = eta;
-        app.kinfu_->s2s_beta_ = beta;
-    }
+		app.toggleS2sOdometry();
+		app.kinfu_->s2s_eta_ = eta;
+		app.kinfu_->s2s_beta_ = beta;
+		app.kinfu_->s2s_f2m_ = bool(s2s_params[2]);
+		cout<<"app.kinfu_->s2s_f2m_: " << app.kinfu_->s2s_f2m_<<endl;
+
+		if(01){
+		Eigen::Affine3f init_pose_orig = app.kinfu_->getCameraPose(0);
+		
+		app.kinfu_->volume000_gcoo_ = -init_pose_orig.translation();
+
+		Eigen::Vector3f t(0, 0, 0);
+		init_pose_orig.translation() = t;
+		app.kinfu_->setInitialCameraPose(init_pose_orig);
+		}
+	}
 
 	app.kinfu_->incidAngleThresh_ = 75; //默认值, 按 pcc 的经验值  @2017-3-8 20:47:22
 	pc::parse_argument(argc, argv, "-incidTh", app.kinfu_->incidAngleThresh_);
@@ -3713,6 +3747,7 @@ int
 	}
 
 	app.use_omask_ = pc::find_switch(argc, argv, "-omask");
+	app.use_tmask_ = pc::find_switch(argc, argv, "-tm");
 
 	// executing
 	if (triggered_capture) std::cout << "Capture mode: triggered\n";

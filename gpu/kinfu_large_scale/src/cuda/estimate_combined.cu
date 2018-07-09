@@ -800,12 +800,15 @@ namespace pcl
     //↓--count how many vxls are used in the cost function optimization
     __device__ int vxlValidCnt_device;
     __device__ float sumS2sErr_device;
+    __device__ float tsdfDiffSum_device;
+    __device__ float tsdfAbsDiffSum_device;
 
     //参考 tsdf23_v11_remake
     __global__ void
     estimateCombined_s2s_kernel(const PtrStepSz<float> depthScaled, PtrStep<short2> volume, PtrStep<short2> volume2, 
         const float tranc_dist, const float eta, //s2s (delta, eta)
-        const Mat33 Rcurr_inv, const float3 tcurr, float6 xi_prev, 
+        const Mat33 Rcurr_inv, const float3 tcurr, 
+        const float3 volume000_gcoo, float6 xi_prev, 
         const Intr intr, const float3 cell_size, 
         PtrStep<float> gbuf, 
         int3 vxlDbg)
@@ -817,9 +820,12 @@ namespace pcl
       if (x <= 1 || y <= 1 || x >= VOLUME_X-1 || y >= VOLUME_Y-1) //因 pos2 用到邻域算tsdf隐函数梯度
           return;
 
-      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
-      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
-      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+      //float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      //float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      //float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+      float v_g_x = (x + 0.5f) * cell_size.x + volume000_gcoo.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y + volume000_gcoo.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z + volume000_gcoo.z - tcurr.z;
 
       float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
 
@@ -939,8 +945,9 @@ namespace pcl
           weight2 = weight2 >> 1;
 
           if(doDbgPrint)
-              printf("F1/F2, W1/W2: %f, %f, %d, %d; pos1/2-addr: %p, %p, %d; %p, %p, %d\n", tsdf1, tsdf2, weight1, weight2, 
-              (void*)pos, (void*)volume.ptr(), pos-volume.ptr(), (void*)pos2, (void*)volume2.ptr(), pos2-volume2.ptr());
+              //printf("F1/F2, W1/W2: %f, %f, %d, %d; pos1/2-addr: %p, %p, %d; %p, %p, %d\n", tsdf1, tsdf2, weight1, weight2, 
+              //(void*)pos, (void*)volume.ptr(), pos-volume.ptr(), (void*)pos2, (void*)volume2.ptr(), pos2-volume2.ptr());
+              printf("F1/F2, W1/W2: 【%f, %f】, %d, %d;\n", tsdf1, tsdf2, weight1, weight2);
 
           float row[7]; //尝试改放循环内, 应无差别
 
@@ -1000,9 +1007,15 @@ namespace pcl
               *(float3*)&row[0] = dPhi_dX;
               //推导存疑: g·u^= g^·u
               float3 pt_g; //in meters
+#if 01 //就用 g-coo, 不用 cam-coo @2018-7-9 15:37:25
               pt_g.x = v_g_x;
               pt_g.y = v_g_y;
               pt_g.z = v_g_z;
+#elif 1
+              pt_g.x = v_x;
+              pt_g.y = v_y;
+              pt_g.z = v_z + Rcurr_inv.data[2].z * z_scaled;
+#endif
               //pt_g*=m2mm;
 
               //*(float3*)&row[3] = cross(dPhi_dX, pt_g);
@@ -1017,7 +1030,10 @@ namespace pcl
 
           atomicAdd(&vxlValidCnt_device, 1);
           atomicAdd(&sumS2sErr_device, (tsdf1-tsdf2)*(tsdf1-tsdf2) );
-
+          atomicAdd(&tsdfDiffSum_device, tsdf2 - tsdf1);
+          atomicAdd(&tsdfAbsDiffSum_device, abs(tsdf2 - tsdf1));
+//           printf("vg.xyz: %f, %f, %f; coo.xy:(%d, %d), F1/2: %f, %f, adiff: %f\n", 
+//               v_g_x, v_g_y, v_g_z, coo.x, coo.y, tsdf1, tsdf2, abs(tsdf2 - tsdf1));
           int tid = Block::flattenedThreadId ();
           int total_tid = (blockIdx.x + gridDim.x * blockIdx.y) * (blockDim.x * blockDim.y) + tid;
 
@@ -1033,8 +1049,8 @@ namespace pcl
 
           //跟之前区别: gbuf:21+6 之前6是右列, 现在是最底行
           //这里 shift==21
-          //float tmp = tsdf1 - tsdf2 + dot(*(float6*)&row[0], xi_prev);
-          float tmp = tsdf2 - tsdf1 + dot(*(float6*)&row[0], xi_prev);
+          float tmp = tsdf1 - tsdf2 + dot(*(float6*)&row[0], xi_prev); //XI_C2G:=0, i.e. g2c
+          //float tmp = tsdf2 - tsdf1 + dot(*(float6*)&row[0], xi_prev); //XI_C2G:=1
           float6 b = *(float6*)&row[0];
           b *= tmp;
           gbuf.ptr(shift++)[ total_tid ] += b.x;
@@ -1180,9 +1196,13 @@ pcl::device::estimateCombined (const Mat33& Rcurr, const float3& tcurr,
     }
 }
 
+float pcl::device::tsdf_diff_sum_host_;
+float pcl::device::tsdf_abs_diff_sum_host_;
+
 void
 pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
-        const Mat33& Rcurr_inv, const float3& tcurr, const float6& xi_prev, 
+        const Mat33& Rcurr_inv, const float3& tcurr, 
+        const float3& volume000_gcoo, const float6& xi_prev, 
         float tranc_dist, PtrStep<short2> volume, PtrStep<short2> volume2,
         //float delta, 
         float eta, //s2s TSDF param, delta is tranc_dist, 
@@ -1191,6 +1211,7 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
 {
     //pcl::console::TicToc tt;
     clock_t begt = clock();
+#if 0
   depthScaled.create (depth_raw.rows, depth_raw.cols);
 
   dim3 block_scale (32, 8);
@@ -1200,8 +1221,12 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
   scaleDepth<<<grid_scale, block_scale>>>(depth_raw, depthScaled, intr);
   cudaSafeCall ( cudaGetLastError () );
 
+#elif 0 //移到 KinfuTracker::s2sOdometry 最外层
+    scaleDepthDevice(depth_raw, intr, depthScaled);
+#endif
+
   integrateTsdfVolume_s2s(/*depth_raw,*/ intr, volume_size, Rcurr_inv, tcurr,
-      tranc_dist, eta, volume2, depthScaled, vxlDbg); //这里 set vol-2
+      volume000_gcoo, tranc_dist, eta, volume2, depthScaled, vxlDbg); //这里 set vol-2
   printf("integrateTsdfVolume_s2s-volume2"); 
   //tt.toc_print();
   printf(" %d\n", clock()-begt);
@@ -1219,16 +1244,20 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
   //cudaSafeCall(cudaMemset(&vxlValidCnt_device, 0, sizeof(int)) );
   int dummy0 = 0;
   cudaSafeCall(cudaMemcpyToSymbol(vxlValidCnt_device, &dummy0, sizeof(int)) );
-  int dummy0f = 0;
+  float dummy0f = 0.f;
   cudaSafeCall(cudaMemcpyToSymbol(sumS2sErr_device, &dummy0f, sizeof(float)) );
+  cudaSafeCall(cudaMemcpyToSymbol(tsdfDiffSum_device, &dummy0f, sizeof(float)) );
+  cudaSafeCall(cudaMemcpyToSymbol(tsdfAbsDiffSum_device, &dummy0f, sizeof(float)) );
 
   estimateCombined_s2s_kernel<<<grid, block>>>(depthScaled, volume, volume2,
-      tranc_dist, eta, Rcurr_inv, tcurr, xi_prev, intr, cell_size, 
-      gbuf, 
+      tranc_dist, eta, Rcurr_inv, tcurr, volume000_gcoo, xi_prev, 
+      intr, cell_size, gbuf, 
       vxlDbg);    
 
   cudaSafeCall(cudaMemcpyFromSymbol(&vxlValidCnt, vxlValidCnt_device, sizeof(vxlValidCnt)) );
   cudaSafeCall(cudaMemcpyFromSymbol(&sum_s2s_err, sumS2sErr_device, sizeof(sum_s2s_err)) );
+  cudaSafeCall(cudaMemcpyFromSymbol(&tsdf_diff_sum_host_, tsdfDiffSum_device, sizeof(tsdf_diff_sum_host_)) );
+  cudaSafeCall(cudaMemcpyFromSymbol(&tsdf_abs_diff_sum_host_, tsdfAbsDiffSum_device, sizeof(tsdf_abs_diff_sum_host_)) );
 
   TranformReduction tr2;
   tr2.gbuf = gbuf;
@@ -1262,6 +1291,23 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
   for (int i = 0; i < 6; ++i)  //最底行, 最后六个值
       vectorB_host[i] = host_data[shift++];
 }//estimateCombined_s2s
+
+void
+pcl::device::scaleDepthDevice(const PtrStepSz<ushort>& depth_raw, const Intr& intr, DeviceArray2D<float>& depthScaled){
+    //pcl::console::TicToc tt;
+    clock_t begt = clock();
+    depthScaled.create (depth_raw.rows, depth_raw.cols);
+
+    dim3 block_scale (32, 8);
+    dim3 grid_scale (divUp (depth_raw.cols, block_scale.x), divUp (depth_raw.rows, block_scale.y));
+
+    //scales depth along ray and converts mm -> meters. 
+    scaleDepth<<<grid_scale, block_scale>>>(depth_raw, depthScaled, intr);
+    cudaSafeCall ( cudaGetLastError () );
+
+    //printf("\t>>>-------scaleDepthDevice-time: %dms\n", clock()-begt); //0ms
+
+}//scaleDepthDevice
 
 //zc: nmap 惩罚项专用, 与 estimateCombined 区别是 combinedKernel2 调用链非 operator() @2017-6-1 13:11:25
 void

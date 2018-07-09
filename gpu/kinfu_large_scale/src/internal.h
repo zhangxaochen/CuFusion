@@ -83,7 +83,7 @@ namespace pcl
     //enum { VOLUME_X = 392, VOLUME_Y = 392, VOLUME_Z = 392 };
 
     //zc: 限制在 1.5m--256分辨率  @2017-3-17 00:35:45
-    const int VRES = 256;
+    const int VRES = 64;
     enum { VOLUME_X = VRES, VOLUME_Y = VRES, VOLUME_Z = VRES };
 
 	
@@ -318,6 +318,8 @@ namespace pcl
                       const MapArr& vmap_g_prev, const MapArr& nmap_g_prev, float distThres, float angleThres,
                       DeviceArray2D<double>& gbuf, DeviceArray<double>& mbuf, double* matrixA_host, double* vectorB_host);
 
+    extern float tsdf_diff_sum_host_;
+    extern float tsdf_abs_diff_sum_host_;
 
     //@brief 参考 estimateCombined & integrateTsdfVolume (first version 代码风格也很好)
     //@param[in] xi_prev, twist of prev transform (R,t)
@@ -325,12 +327,17 @@ namespace pcl
     void
     //estimateCombined_s2s(const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr,
     estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
-                        const Mat33& Rcurr_inv, const float3& tcurr, const float6& xi_prev, 
+                        const Mat33& Rcurr_inv, const float3& tcurr, 
+                        const float3& volume000_gcoo, const float6& xi_prev, 
                         float tranc_dist, PtrStep<short2> volume, PtrStep<short2> volume2,
                         //float delta, 
                         float eta,
                         DeviceArray2D<float>& gbuf, DeviceArray<float>& mbuf, float* matrixA_host, float* vectorB_host,
                         DeviceArray2D<float>& depthScaled, int &vxlValidCnt, float &sum_s2s_err, int3 vxlDbg = int3()); //zc: 调试
+
+    //@brief extract method from old code, to de-coupling
+    void
+    scaleDepthDevice(const PtrStepSz<ushort>& depth_raw, const Intr& intr, DeviceArray2D<float>& depthScaled);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // TSDF volume functions            
@@ -383,7 +390,7 @@ namespace pcl
     //大部分照搬, 仅仅 tranc_dist 用 (delta, eta) 逻辑, 去掉 *buffer (不考虑volume shift)
     PCL_EXPORTS void 
     integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const Intr& intr, const float3& volume_size, 
-            const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, float eta,
+            const Mat33& Rcurr_inv, const float3& tcurr, const float3& volume000_gcoo, float tranc_dist, float eta,
             PtrStep<short2> volume, DeviceArray2D<float>& depthScaled, int3 vxlDbg = int3()); //zc: 调试
 
     //v11, 尝试融合 v9.4 + v10, 且
