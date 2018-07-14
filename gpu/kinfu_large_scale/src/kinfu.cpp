@@ -3496,13 +3496,16 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View *pcolor /*= NULL*/){
 	//printf("---------------callCnt:= %d\n", callCnt_);
 	callCnt_++;
-	//ScopeTime time( "s2sOdometry All" );
+	ScopeTime time( "s2sOdometry All" );
 	device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
 
 	float3& device_volume000_gcoo = device_cast<float3>(volume000_gcoo_);
 
+	//scale-depth 放最外面 @2018-7-4 16:54:24
+	DeviceArray2D<float> depthFiltScaled;
+
 	{
-		//ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all"); //release 下 ~12ms
+		//ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all"); //release 下 ~2ms
 		device::bilateralFilter (depth_raw, depths_curr_[0]);
 
 		if (max_icp_distance_ > 0)
@@ -3517,6 +3520,10 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 			//device::createNMap(vmaps_curr_[i], nmaps_curr_[i]);
 			computeNormalsEigen (vmaps_curr_[i], nmaps_curr_[i]);
 		}
+
+		scaleDepthDevice(depth_raw, intr, depthRawScaled_);
+		scaleDepthDevice(depths_curr_[0], intr, depthFiltScaled);
+
 		pcl::device::sync ();
 	}//">>> Bilateral, pyr-down-all, create-maps-all"
 
@@ -3526,10 +3533,6 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	vxlPos.y = vxlDbg_[1];
 	vxlPos.z = vxlDbg_[2];
 
-	//scale-depth 放最外面 @2018-7-4 16:54:24
-	scaleDepthDevice(depth_raw, intr, depthRawScaled_);
-	DeviceArray2D<float> depthFiltScaled;
-	scaleDepthDevice(depths_curr_[0], intr, depthFiltScaled);
 
 	//can't perform more on first frame
 	if (global_time_ == 0)
@@ -3562,7 +3565,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	Matrix3frm Rprev = rmats_[global_time_ - 1]; //  [Ri|ti] - pos of camera, i.e.
 	Vector3f   tprev = tvecs_[global_time_ - 1]; //  tranfrom from camera to global coo space for (i-1)th camera pose
 	Matrix3frm Rprev_inv = Rprev.inverse (); //Rprev.t();
-	cout<<"Rprev: "<<Rprev<<endl;
+	//cout<<"Rprev: "<<Rprev<<endl;
 	Mat33&  device_Rprev     = device_cast<Mat33> (Rprev);
 	Mat33&  device_Rprev_inv = device_cast<Mat33> (Rprev_inv);
 	float3& device_tprev     = device_cast<float3> (tprev);
@@ -3574,7 +3577,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 	// Ray casting //icp 之前先做了, 仿 bdrOdometry 规矩, 与原来 kinfu 不同 @2017-4-5 17:10:59
 	{
-	//ScopeTime time("ray-cast-all"); //11ms, 这么慢? @2018-3-26 00:58:34
+	ScopeTime time("ray-cast-all"); //11ms, 这么慢? @2018-3-26 00:58:34
 	//raycast (intr, device_Rprev, device_tprev, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
 	//s2s-v0.2:
 	Vector3f tprev_fake = tprev - volume000_gcoo_;
@@ -3593,6 +3596,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	Vector3f   tcurr = tprev;
 	{
 	ScopeTime time(">>> icp-all");
+
 	//for (int level_index = LEVELS-1; level_index>=0; --level_index){
 	//	int iter_num = icp_iterations_[level_index];
 
@@ -3613,8 +3617,11 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	//}
 
 	float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
+	float avgErr_i1 = 1e3, 
+		avgErr_curr = 0;
+
 	for (int iter = 0; iter < 11; ++iter){
-		cout<<">>>>>>>>>>iter: "<<iter<<endl;
+		//cout<<">>>>>>>>>>iter: "<<iter<<endl;
 		Mat33&  device_Rcurr = device_cast<Mat33> (Rcurr);
 		float3& device_tcurr = device_cast<float3>(tcurr);
 
@@ -3627,8 +3634,8 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 		Vector6f xi_curr;
 
-		cout<<"BEFORE-get_twist_from_rt\n";
-#define XI_C2G 0 //1-c2g; 0-g2c    
+		//cout<<"BEFORE-get_twist_from_rt\n";
+#define XI_C2G 01 //1-c2g; 0-g2c    
 		//↑-已测试, 这里 g2c 必须对应@estimate_combined.cu中: tmp = tsdf1 - tsdf2 +...;
 		//c2g 则必须对应 t2-t1 @2018-7-9 15:18:03
 #if XI_C2G
@@ -3640,6 +3647,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 		//Sophus::SE3f se_rt(Rcurr, tcurr);
 		//xi_curr = se_rt.log(); 
+
 		xi_curr = get_twist_from_rt(Rcurr, tcurr);
 #else	//g2c
 		//Eigen::AngleAxisf aa(Rcurr_inv); //g2c
@@ -3647,9 +3655,11 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		Vector3f tcurr_inv = - Rcurr_inv * tcurr;
 		//xi_curr << tcurr_inv, rvec;
 
-		xi_curr = get_twist_from_rt(Rcurr_inv, tcurr_inv); //(R', -R'*t)`
+		//xi_curr = get_twist_from_rt(Rcurr_inv, tcurr_inv); //(R', -R'*t)
 #endif
-		cout<<"xi_curr: "<<xi_curr.transpose()<<endl;
+		//xi_curr << 0,0,0, 0,0,0;		//xi 不对应 (R,t)_curr, 而仅对应一次迭代中的增量
+		//↑-已验证, 不用 000, 不是误差来源 @2018-7-14 01:31:05
+		//cout<<"xi_curr: "<<xi_curr.transpose()<<endl;
 		float6& device_xi_curr = device_cast<float6>(xi_curr);
 
 		//estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr (level_index),
@@ -3670,9 +3680,22 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 			depthFiltScaled, //配准改用 bilat-filt, 不用 raw @2018-7-6 19:58:36
 			vxlValidCnt, sum_s2s_err,
 			vxlPos);
-		printf("estimateCombined_s2s, vxlValidCnt= 【【%d; sum_s2s_err: 【【%f; avg-err: 【【%f; \n"
-			"tsdf_diff_sum_host_: 【【%f; tsdf_abs_diff_sum_host_: 【【%f; ", 
-			vxlValidCnt, sum_s2s_err, sum_s2s_err/vxlValidCnt, tsdf_diff_sum_host_, tsdf_abs_diff_sum_host_); tt3.toc_print();
+		//printf("estimateCombined_s2s, vxlValidCnt= 【【%d; sum_s2s_err: 【【%f; avg-err: 【【%f; \n"
+		//	"tsdf_diff_sum_host_: 【【%f; tsdf_abs_diff_sum_host_: 【【%f; ", 
+		//	vxlValidCnt, sum_s2s_err, sum_s2s_err/vxlValidCnt, tsdf_diff_sum_host_, tsdf_abs_diff_sum_host_); 
+		//tt3.toc_print();
+
+		avgErr_curr = sum_s2s_err / vxlValidCnt;
+		if(avgErr_i1 - avgErr_curr < 1e-4){ //收敛终止条件
+			if(dbgKf_ >= 1)
+				printf("vxlValidCnt= 【【%d; sum_s2s_err: 【【%f; avgErr_i1, avgErr_curr: %f, %f, diff: %f; iter= %d\n", 
+				vxlValidCnt,sum_s2s_err, 
+				avgErr_i1, avgErr_curr, avgErr_i1 - avgErr_curr, iter);
+
+			break;
+		}
+		else
+			avgErr_i1 = avgErr_curr;
 
 		double det_f2mod = A_s2s_.determinant();
 		if ( fabs (det_f2mod) < 1e-15 || pcl_isnan (det_f2mod) ){
@@ -3692,32 +3715,97 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 				<<"A'*b(DOUBLE): "<<(A_s2s_.cast<double>().inverse()*b_s2s_.cast<double>()).transpose()<<endl
 				;
 
-		//float BETA = 0.5f;
-		//xi_curr += BETA * (result - xi_curr);
-		xi_curr += s2s_beta_ * (result - xi_curr);
-		//cout<<"xi_curr-AFTER: "<<xi_curr<<endl;
+		Vector6f xi_inc = s2s_beta_ * (result - xi_curr);
+		//cout
+		//	<<"xi-star: "<<result.transpose()<<endl
+		//	<<"xi_inc: "<<xi_inc.transpose()<<endl
+			;
 
-		//rvec = xi_curr.tail(3);
-		//float angle = rvec.norm();
-		//rvec.normalize();
+		Matrix3frm Rinc; //此 inc 其实是 i~i+1 之间的, 所以是先乘而非后乘	@2018-7-10 20:45:01 
+		Vector3f tinc;
+		get_rt_from_twist(xi_inc, Rinc, tinc);
+#if XI_C2G //看 e-combined.cu 情况
 
-#if XI_C2G
-		//Rcurr = Eigen::AngleAxisf(angle, rvec).toRotationMatrix();
-		//tcurr << xi_curr; //6elems->3elems, OK
-		//tcurr = xi_curr.head(3);
-
-		//cout<<"BEFORE-get_rt_from_twist\n";
+#if 0	//用李代数加法 //不如矩阵乘法, 会飘
+		xi_curr = get_twist_from_rt(Rcurr, tcurr);
+		xi_curr += xi_inc;
 		get_rt_from_twist(xi_curr, Rcurr, tcurr);
-#else
-		//Rcurr_inv = Eigen::AngleAxisf(angle, rvec).toRotationMatrix();
-		//tcurr_inv = xi_curr.head(3);
+#elif 1	//用李群, 矩阵乘法
+		//tcurr = Rinc * tcurr + tinc; //左乘 Tinc, 不行
+		//Rcurr = Rinc * Rcurr;
+		tcurr = Rcurr * tinc + tcurr; //右乘 Tinc, 一样不行, 其实应该左乘, 跟kf论文一致, 因为此 Tinc≠T(k, k+1)
+		Rcurr = Rcurr * Rinc;
+#endif //李群 vs. 李代数
 
-		get_rt_from_twist(xi_curr, Rcurr_inv, tcurr_inv);
+#else //g2c
+
+#if 0	//用李代数加法
+#elif 1	//用李群, 矩阵乘法
+		tcurr_inv = Rinc * tcurr_inv + tinc;
+		Rcurr_inv = Rinc * Rcurr_inv;
+
 		Rcurr = Rcurr_inv.inverse();
 		tcurr = - Rcurr * tcurr_inv;
-#endif
-		cout<<"AFTER-xi_curr: "<<xi_curr.transpose()<<endl
-			<<"xi-inc: "<<result.transpose()<<endl;
+#endif //李群 vs. 李代数
+
+#endif //XI_C2G vs. g2c
+
+//#if 0	//按 s2s 论文, 李代数加法求解, 但似乎仅在 xi≈0附近成立, 原理未证明 @2018-7-9 16:17:46
+//		//float BETA = 0.5f;
+//		//xi_curr += BETA * (result - xi_curr);
+//		xi_curr += xi_inc;
+//
+//		//rvec = xi_curr.tail(3);
+//		//float angle = rvec.norm();
+//		//rvec.normalize();
+//
+//#elif 1 //尝试改用李群乘法
+//		Matrix3frm Rinc;
+//		Vector3f tinc;
+//		get_rt_from_twist(xi_inc, Rinc, tinc);
+//		//Affine3f aff_inc;
+//		//aff_inc.linear() = Rinc;
+//		//aff_inc.translation() = tinc;
+//
+//		Matrix3frm Rcurr_tmp; //不是真的 Rcurr, 可能是 inv, 随 XI_C2G而变
+//		Vector3f tcurr_tmp;
+//		//get_rt_from_twist(xi_curr, Rcurr_tmp, tcurr_tmp); //不用 xi 做桥
+//#if XI_C2G
+//		Rcurr_tmp = Rcurr;
+//		tcurr_tmp = tcurr;
+//#else
+//		Rcurr_tmp = Rcurr_inv;
+//		tcurr_tmp = tcurr_inv;
+//#endif
+//		cout<<"Rcurr_tmp, tcurr_tmp:\n"<<Rcurr_tmp<<endl;
+//
+//		tcurr_tmp = Rinc * tcurr_tmp + tinc;
+//		Rcurr_tmp = Rinc * Rcurr_tmp;
+//
+//		xi_curr = get_twist_from_rt(Rcurr_tmp, tcurr_tmp);
+//#endif
+//		cout
+//			//<<"Rcurr_tmp, tcurr_tmp:\n"<<Rcurr_tmp<<endl
+//			//<<tcurr_tmp.transpose()<<endl
+//			<<"xi-star: "<<result.transpose()<<endl
+//			<<"xi_inc: "<<xi_inc.transpose()<<endl
+//			<<"AFTER-xi_curr: "<<xi_curr.transpose()<<endl
+//			;
+//#if XI_C2G
+//		//Rcurr = Eigen::AngleAxisf(angle, rvec).toRotationMatrix();
+//		//tcurr << xi_curr; //6elems->3elems, OK
+//		//tcurr = xi_curr.head(3);
+//
+//		//cout<<"BEFORE-get_rt_from_twist\n";
+//		get_rt_from_twist(xi_curr, Rcurr, tcurr);
+//#else
+//		//Rcurr_inv = Eigen::AngleAxisf(angle, rvec).toRotationMatrix();
+//		//tcurr_inv = xi_curr.head(3);
+//
+//		get_rt_from_twist(xi_curr, Rcurr_inv, tcurr_inv);
+//		Rcurr = Rcurr_inv.inverse();
+//		tcurr = - Rcurr * tcurr_inv;
+//#endif
 
 	}//for-iter
 	}//ScopeTime-icp-all
@@ -3759,8 +3847,8 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_);
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
 			
-			if(!s2s_f2m_)
-				initVrayPrevVolume(tsdf_volume_->data()); //每帧清空
+			if(!s2s_f2m_) //若命令行参数 f2f, 而非 f2m, 每帧清空 global volume
+				initVrayPrevVolume(tsdf_volume_->data());
 			integrateTsdfVolume_s2s(intr, device_volume_size, device_Rcurr_inv, device_tcurr, device_volume000_gcoo,
 				tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
 		}

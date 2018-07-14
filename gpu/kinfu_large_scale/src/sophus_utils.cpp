@@ -17,21 +17,28 @@ void foo(){
 //@param[in] twist, Lie algebra (u, w)
 //@param[out] Rmat, rotation-mat
 //@param[out] tvec, translation-vec
-//void get_rt_from_twist(const Vector6f &twist, Matrix3f &Rmat, Vector3f &tvec){
+void get_rt_from_twist(const Vector6f &twist, Matrix3f &Rmat, Vector3f &tvec){
+//void get_rt_from_twist(const Vector6f &twist, Matrix3frm &Rmat, Vector3f &tvec){
+	Sophus::SE3f se3f_exp = Sophus::SE3f::exp(twist);
+	Rmat = se3f_exp.rotationMatrix();
+	tvec = se3f_exp.translation();
+}//get_rt_from_twist
+
 void get_rt_from_twist(const Vector6f &twist, Matrix3frm &Rmat, Vector3f &tvec){
 	Sophus::SE3f se3f_exp = Sophus::SE3f::exp(twist);
 	Rmat = se3f_exp.rotationMatrix();
 	tvec = se3f_exp.translation();
 }//get_rt_from_twist
 
-//void get_rt_from_twist(const Vector6f &twist, Matrix3frm &Rmat, Vector3f &tvec){
-//	get_rt_from_twist(twist, Rmat, tvec);
-//}//get_rt_from_twist
-
 //@param[in] Rmat, rotation-mat
 //@param[in] tvec, translation-vec
 //@return the 6DOF twist
 Vector6f get_twist_from_rt(const Matrix3f &Rmat, const Vector3f &tvec){
+	Sophus::SE3f se3f_rt(Rmat, tvec);
+	return se3f_rt.log();
+}//get_twist_from_rt
+
+Vector6f get_twist_from_rt(const Matrix3frm &Rmat, const Vector3f &tvec){
 	Sophus::SE3f se3f_rt(Rmat, tvec);
 	return se3f_rt.log();
 }//get_twist_from_rt

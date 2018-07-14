@@ -1813,12 +1813,16 @@ struct KinFuLSApp
 			//	delete []buf;
 			//}
 
-			printf("depth_device_. c/r/step: %d, %d, %d\n", depth_device_.cols(), depth_device_.rows(), depth_device_.step());
+			if(kinfu_->dbgKf_ >= 1)
+				printf("depth_device_. c/r/step: %d, %d, %d\n", depth_device_.cols(), depth_device_.rows(), depth_device_.step()); //640, 480, 1536
+
 			depth_device_.upload (depth.data, depth.step, depth.rows, depth.cols);
-			printf("depth_device_-after. c/r/step: %d, %d, %d\n", depth_device_.cols(), depth_device_.rows(), depth_device_.step());
-			
-			printf("execute.rgb24. c/r, data: (%d, %d), %d\n", rgb24.cols, rgb24.rows, rgb24.data);
-			printf("colors_device_. c/r/step: %d, %d, %d\n", image_view_.colors_device_.cols(), image_view_.colors_device_.rows(), image_view_.colors_device_.step());
+
+			if(kinfu_->dbgKf_ >= 1){
+				printf("depth_device_-after. c/r/step: %d, %d, %d\n", depth_device_.cols(), depth_device_.rows(), depth_device_.step()); //640, 480, 1536
+				printf("execute.rgb24. c/r, data: (%d, %d), %d\n", rgb24.cols, rgb24.rows, rgb24.data);
+				printf("colors_device_. c/r/step: %d, %d, %d\n", image_view_.colors_device_.cols(), image_view_.colors_device_.rows(), image_view_.colors_device_.step());
+			}
 
 			if (integrate_colors_)
 				image_view_.colors_device_.upload (rgb24.data, rgb24.step, rgb24.rows, rgb24.cols);
@@ -2889,7 +2893,7 @@ struct KinFuLSApp
 				}
 
 				tt1.tic();
-				printf("rgb24_. c/r, data: (%d, %d), %d\n", rgb24_.cols, rgb24_.rows, rgb24_.data);
+				//printf("rgb24_. c/r, data: (%d, %d), %d\n", rgb24_.cols, rgb24_.rows, rgb24_.data);
 				this->execute(depth_, rgb24_, true); 
 				printf("KinFuLSApp.execute: "); tt1.toc_print();
 				scene_cloud_view_.cloud_viewer_.spinOnce (3); 
@@ -3723,7 +3727,7 @@ int
 		app.kinfu_->s2s_f2m_ = bool(s2s_params[2]);
 		cout<<"app.kinfu_->s2s_f2m_: " << app.kinfu_->s2s_f2m_<<endl;
 
-		if(01){
+		if(0){ //已验证: volume000_gcoo_ 不是配准好坏因素, 关闭(默认 000) 无妨 @2018-7-14 11:03:33
 		Eigen::Affine3f init_pose_orig = app.kinfu_->getCameraPose(0);
 		
 		app.kinfu_->volume000_gcoo_ = -init_pose_orig.translation();

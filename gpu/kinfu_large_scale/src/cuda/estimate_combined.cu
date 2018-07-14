@@ -1030,8 +1030,8 @@ namespace pcl
 
           atomicAdd(&vxlValidCnt_device, 1);
           atomicAdd(&sumS2sErr_device, (tsdf1-tsdf2)*(tsdf1-tsdf2) );
-          atomicAdd(&tsdfDiffSum_device, tsdf2 - tsdf1);
-          atomicAdd(&tsdfAbsDiffSum_device, abs(tsdf2 - tsdf1));
+//           atomicAdd(&tsdfDiffSum_device, tsdf2 - tsdf1);
+//           atomicAdd(&tsdfAbsDiffSum_device, abs(tsdf2 - tsdf1));
 //           printf("vg.xyz: %f, %f, %f; coo.xy:(%d, %d), F1/2: %f, %f, adiff: %f\n", 
 //               v_g_x, v_g_y, v_g_z, coo.x, coo.y, tsdf1, tsdf2, abs(tsdf2 - tsdf1));
           int tid = Block::flattenedThreadId ();
@@ -1063,6 +1063,275 @@ namespace pcl
       }//for-z
 
     }//estimateCombined_s2s_kernel
+
+    //虽然 volume 是 gcoo, 但是本v2 函数内, 各种坐标 v, n, 均转到 ref (即 k-1; tar 为 k) 坐标系中
+    __global__ void
+    estimateCombined_s2s_kernel_v2(const PtrStepSz<float> depthScaled, PtrStep<short2> volume, PtrStep<short2> volume2, 
+        const float tranc_dist, const float eta, //s2s (delta, eta)
+        const Mat33 Rcurr_inv, const float3 tcurr, 
+        const float3 volume000_gcoo, float6 xi_prev, 
+        const Intr intr, const float3 cell_size, 
+        PtrStep<float> gbuf, 
+        int3 vxlDbg)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      //if (x >= VOLUME_X || y >= VOLUME_Y)
+      if (x <= 1 || y <= 1 || x >= VOLUME_X-1 || y >= VOLUME_Y-1) //因 pos2 用到邻域算tsdf隐函数梯度
+          return;
+
+      //float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      //float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      //float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+      float v_g_x = (x + 0.5f) * cell_size.x + volume000_gcoo.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y + volume000_gcoo.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z + volume000_gcoo.z - tcurr.z;
+
+      float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
+
+      float v_x = (Rcurr_inv.data[0].x * v_g_x + Rcurr_inv.data[0].y * v_g_y + Rcurr_inv.data[0].z * v_g_z) * intr.fx;
+      float v_y = (Rcurr_inv.data[1].x * v_g_x + Rcurr_inv.data[1].y * v_g_y + Rcurr_inv.data[1].z * v_g_z) * intr.fy;
+      float v_z = (Rcurr_inv.data[2].x * v_g_x + Rcurr_inv.data[2].y * v_g_y + Rcurr_inv.data[2].z * v_g_z);
+
+      float z_scaled = 0;
+
+      float Rcurr_inv_0_z_scaled = Rcurr_inv.data[0].z * cell_size.z * intr.fx;
+      float Rcurr_inv_1_z_scaled = Rcurr_inv.data[1].z * cell_size.z * intr.fy;
+
+      float tranc_dist_inv = 1.0f / tranc_dist;
+
+      //model /global
+      short2* pos = volume.ptr (y) + x;
+      int elem_step = volume.step * VOLUME_Y / sizeof(short2);
+
+      //curr
+      short2* pos2 = volume2.ptr (y) + x;
+      int elem_step2 = volume2.step * VOLUME_Y / sizeof(short2);
+
+      //float row[7]; //放循环外
+
+      for (int z = 0; z < VOLUME_Z;
+      //for (int z = 1; z < VOLUME_Z - 1; //错！导致 idx 偏了
+           ++z,
+           v_g_z += cell_size.z,
+           z_scaled += cell_size.z,
+           v_x += Rcurr_inv_0_z_scaled,
+           v_y += Rcurr_inv_1_z_scaled,
+           pos += elem_step,
+           pos2 += elem_step2)
+      {
+        bool doDbgPrint = false;
+        if(x > 0 && y > 0 && z > 0 //参数默认 000, 做无效值, 所以增加此检测
+            && vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+            doDbgPrint = true;
+        
+        //放到for最前面
+        if(0 == z){ //for-loop-begin-set-0
+            int tid = Block::flattenedThreadId ();
+            int total_tid = (blockIdx.x + gridDim.x * blockIdx.y) * (blockDim.x * blockDim.y) + tid;
+
+            int shift = 0;
+
+            #pragma unroll
+            for (int i = 0; i < 6; ++i)        //rows
+                #pragma unroll
+                for (int j = i; j < 7; ++j)          // cols + b
+                    gbuf.ptr (shift++)[ total_tid ] = 0;
+        }
+        if(0 == z || VOLUME_Z -1 == z){
+            if(doDbgPrint)
+                printf("######################(0 == z || VOLUME_Z -1 == z)\n");
+            continue;
+        }
+
+        float inv_z = 1.0f / (v_z + Rcurr_inv.data[2].z * z_scaled);
+        if (inv_z < 0)
+            continue;
+
+        // project to current cam
+        int2 coo =
+        {
+          __float2int_rn (v_x * inv_z + intr.cx),
+          __float2int_rn (v_y * inv_z + intr.cy)
+        };
+
+        if(doDbgPrint)
+            printf("esti-s2s_kernel:: coo.xy:(%d, %d)\n", coo.x, coo.y);
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
+        {
+          //float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+
+          //float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          //if(doDbgPrint){
+          //    printf("Dp_scaled, sdf, tranc_dist, %f, %f, %f\n", Dp_scaled, sdf, tranc_dist);
+          //    printf("coo.xy:(%d, %d)\n", coo.x, coo.y);
+          //}
+
+          //float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          ////if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters
+          //if (Dp_scaled != 0 && sdf >= -eta) //meters //比较 eta , 而非 delta (tdist)
+          //{
+          //  //read and unpack
+          //  float tsdf_prev;
+          //  int weight_prev;
+          //  unpack_tsdf (*pos, tsdf_prev, weight_prev);
+          //  //v17, 为配合 v17 用 w 二进制末位做标记位, 这里稍作修改: unpack 时 /2, pack 时 *2; @2018-1-22 02:01:27
+          //  weight_prev = weight_prev >> 1;
+
+          //  if(weight_prev == 0)
+          //      continue;
+
+          //  //↑--prev, ↓--curr
+          //  float tsdf = fmin (1.0f, sdf * tranc_dist_inv);
+          //  if(sdf < -tranc_dist)
+          //      tsdf = -1.0f;
+
+          //  const int Wrk = 1; //sdf>-eta ==> wrk=0 已经外层滤掉了, 不必再判断
+          //  if(tsdf == tsdf_prev)
+          //      continue;
+
+          float tsdf1;
+          int weight1;
+          unpack_tsdf (*pos, tsdf1, weight1);
+          //v17, 为配合 v17 用 w 二进制末位做标记位, 这里稍作修改: unpack 时 /2, pack 时 *2; @2018-1-22 02:01:27
+          weight1 = weight1 >> 1;
+
+          float tsdf2;
+          int weight2;
+          unpack_tsdf (*pos2, tsdf2, weight2);
+          weight2 = weight2 >> 1;
+
+          if(doDbgPrint)
+              //printf("F1/F2, W1/W2: %f, %f, %d, %d; pos1/2-addr: %p, %p, %d; %p, %p, %d\n", tsdf1, tsdf2, weight1, weight2, 
+              //(void*)pos, (void*)volume.ptr(), pos-volume.ptr(), (void*)pos2, (void*)volume2.ptr(), pos2-volume2.ptr());
+              printf("F1/F2, W1/W2: 【%f, %f】, %d, %d;\n", tsdf1, tsdf2, weight1, weight2);
+
+          float row[7]; //尝试改放循环内, 应无差别
+
+          if(0 != weight1 && 0 != weight2 && tsdf1 != tsdf2){
+              //+++++++++++++++PhiFuncGradients
+              //参考 tsdf23normal_hack, 存疑: 不归一化, 不除 cell-sz 应该也行
+              const float qnan = numeric_limits<float>::quiet_NaN();
+
+              float3 dPhi_dX = make_float3(qnan, qnan, qnan);
+
+              //const float m2mm = 1e3;
+
+              float Fn, Fp;
+              int Wn = 0, Wp = 0;
+              unpack_tsdf (*(pos2 + elem_step2), Fn, Wn);
+              unpack_tsdf (*(pos2 - elem_step2), Fp, Wp);
+              Wn >>= 1; Wp >>= 1;
+              if(doDbgPrint)
+                  printf("\tz-Fn/Fp, Wn/Wp: %f, %f, %d, %d;\n", Fn, Fp, Wn, Wp);
+
+              if(Wn != 0 && Wp != 0)
+                  dPhi_dX.z = (Fn - Fp)/(2*cell_size.z); //csz in meters
+                  //dPhi_dX.z = (Fn - Fp)/(2*cell_size.z*m2mm);
+              else
+                  continue;
+
+              unpack_tsdf (*(pos2 + volume2.step/sizeof(short2) ), Fn, Wn);
+              unpack_tsdf (*(pos2 - volume2.step/sizeof(short2) ), Fp, Wp);
+              Wn >>= 1; Wp >>= 1;
+              if(doDbgPrint)
+                  printf("\ty-Fn/Fp, Wn/Wp: %f, %f, %d, %d;\n", Fn, Fp, Wn, Wp);
+
+              if(Wn != 0 && Wp != 0)
+                  dPhi_dX.y = (Fn - Fp)/(2*cell_size.y);
+                  //dPhi_dX.y = (Fn - Fp)/(2*cell_size.y*m2mm);
+              else
+                  continue;
+
+              unpack_tsdf (*(pos2 + 1), Fn, Wn);
+              unpack_tsdf (*(pos2 - 1), Fp, Wp);
+              Wn >>= 1; Wp >>= 1;
+              if(doDbgPrint)
+                  printf("\tx-Fn/Fp, Wn/Wp: %f, %f, %d, %d;\n", Fn, Fp, Wn, Wp);
+
+              if(Wn != 0 && Wp != 0)
+                  dPhi_dX.x = (Fn - Fp)/(2*cell_size.x);
+                  //dPhi_dX.x = (Fn - Fp)/(2*cell_size.x*m2mm);
+              else
+                  continue;
+
+
+              //if(doDbgPrint)
+              //    printf(">>>>>>dPhi_dX.xyz: %f, %f, %f\n", dPhi_dX.x, dPhi_dX.y, dPhi_dX.z);
+              dPhi_dX = Rcurr_inv * dPhi_dX; //use local (cam-coo)
+              if(doDbgPrint)
+                  printf("<<<<<dPhi_dX.xyz: %f, %f, %f\n", dPhi_dX.x, dPhi_dX.y, dPhi_dX.z);
+
+              //concatenate_matrix<<Eigen::MatrixXd::Identity(3,3),-selfCross(trans_point);
+              //Eigen::Matrix<double, 1, 6> twist_partial = gradient * concatenate_matrix;
+              //手写 1*3·3*6 = 1*6, 公式8 chain rule
+              *(float3*)&row[0] = dPhi_dX;
+              //推导存疑: g·u^= g^·u
+              float3 pt_g; //in meters
+#if 0 //就用 g-coo, 不用 cam-coo @2018-7-9 15:37:25
+              pt_g.x = v_g_x;
+              pt_g.y = v_g_y;
+              pt_g.z = v_g_z;
+#elif 1 //use local (cam-coo)
+              pt_g.x = v_x / intr.fx; //因为前面的 vx 带了 *fx 乘数, 不是真的物理量
+              pt_g.y = v_y / intr.fy;
+              pt_g.z = v_z + Rcurr_inv.data[2].z * z_scaled;
+
+              //if(doDbgPrint)
+              //    printf("\tpt_g.xyz: %f, %f, %f\n", pt_g.x, pt_g.y, pt_g.z);
+#endif
+              //pt_g*=m2mm;
+
+              //*(float3*)&row[3] = cross(dPhi_dX, pt_g);
+              //*(float3*)&row[3] *= -1;
+              *(float3*)&row[3] = cross(pt_g, dPhi_dX); //dPhi*(-^pt)
+
+              //row[6] = dot(tsdf1 - tsdf2 + dot(*(float6*)&row[0], xi_prev), *(float3*)&row[0]);
+          }
+          else
+              //row[0] = row[1] = row[2] = row[3] = row[4] = row[5] = row[6] = 0.f;
+              continue;
+
+          atomicAdd(&vxlValidCnt_device, 1);
+          atomicAdd(&sumS2sErr_device, (tsdf1-tsdf2)*(tsdf1-tsdf2) );
+          //atomicAdd(&tsdfDiffSum_device, tsdf2 - tsdf1);
+          //atomicAdd(&tsdfAbsDiffSum_device, abs(tsdf2 - tsdf1));
+//           printf("vg.xyz: %f, %f, %f; coo.xy:(%d, %d), F1/2: %f, %f, adiff: %f\n", 
+//               v_g_x, v_g_y, v_g_z, coo.x, coo.y, tsdf1, tsdf2, abs(tsdf2 - tsdf1));
+          int tid = Block::flattenedThreadId ();
+          int total_tid = (blockIdx.x + gridDim.x * blockIdx.y) * (blockDim.x * blockDim.y) + tid;
+
+          int shift = 0;
+
+          //这里无论是否 0==z:
+          #pragma unroll
+          for (int i = 0; i < 6; ++i)        //rows
+              #pragma unroll
+              //for (int j = i; j < 7; ++j)          // cols + b
+              for (int j = i; j < 6; ++j)          // cols, 不管最右列, 改放为最底行
+                  gbuf.ptr (shift++)[ total_tid ] += row[i]*row[j]; //+=, NOT =
+
+          //跟之前区别: gbuf:21+6 之前6是右列, 现在是最底行
+          //这里 shift==21
+          //float tmp = tsdf1 - tsdf2 + dot(*(float6*)&row[0], xi_prev); //g2c, i.e., XI_C2G:=0
+          float tmp = tsdf2 - tsdf1 + dot(*(float6*)&row[0], xi_prev); //XI_C2G:=1
+          float6 b = *(float6*)&row[0];
+          b *= tmp;
+          gbuf.ptr(shift++)[ total_tid ] += b.x;
+          gbuf.ptr(shift++)[ total_tid ] += b.y;
+          gbuf.ptr(shift++)[ total_tid ] += b.z;
+          gbuf.ptr(shift++)[ total_tid ] += b.a;
+          gbuf.ptr(shift++)[ total_tid ] += b.b;
+          gbuf.ptr(shift++)[ total_tid ] += b.c;
+        }//if-coo.xy >0 && <(rows,cols)
+      }//for-z
+
+    }//estimateCombined_s2s_kernel_v2
+
   }//namespace device
 }//namespace pcl
 
@@ -1227,9 +1496,8 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
 
   integrateTsdfVolume_s2s(/*depth_raw,*/ intr, volume_size, Rcurr_inv, tcurr,
       volume000_gcoo, tranc_dist, eta, volume2, depthScaled, vxlDbg); //这里 set vol-2
-  printf("integrateTsdfVolume_s2s-volume2"); 
+  //printf("integrateTsdfVolume_s2s-volume2: %dms\n", clock()-begt); 
   //tt.toc_print();
-  printf(" %d\n", clock()-begt);
 
   float3 cell_size;
   cell_size.x = volume_size.x / VOLUME_X;
@@ -1240,24 +1508,25 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
   dim3 block (16, 16);
   dim3 grid (divUp (VOLUME_X, block.x), divUp (VOLUME_Y, block.y));
 
-  //vxlValidCnt_device
-  //cudaSafeCall(cudaMemset(&vxlValidCnt_device, 0, sizeof(int)) );
+  //cudaSafeCall(cudaMemset(&vxlValidCnt_device, 0, sizeof(int)) ); //×
+
   int dummy0 = 0;
   cudaSafeCall(cudaMemcpyToSymbol(vxlValidCnt_device, &dummy0, sizeof(int)) );
   float dummy0f = 0.f;
   cudaSafeCall(cudaMemcpyToSymbol(sumS2sErr_device, &dummy0f, sizeof(float)) );
-  cudaSafeCall(cudaMemcpyToSymbol(tsdfDiffSum_device, &dummy0f, sizeof(float)) );
-  cudaSafeCall(cudaMemcpyToSymbol(tsdfAbsDiffSum_device, &dummy0f, sizeof(float)) );
+//   cudaSafeCall(cudaMemcpyToSymbol(tsdfDiffSum_device, &dummy0f, sizeof(float)) );
+//   cudaSafeCall(cudaMemcpyToSymbol(tsdfAbsDiffSum_device, &dummy0f, sizeof(float)) );
 
-  estimateCombined_s2s_kernel<<<grid, block>>>(depthScaled, volume, volume2,
+  //estimateCombined_s2s_kernel<<<grid, block>>>(depthScaled, volume, volume2,
+  estimateCombined_s2s_kernel_v2<<<grid, block>>>(depthScaled, volume, volume2,
       tranc_dist, eta, Rcurr_inv, tcurr, volume000_gcoo, xi_prev, 
       intr, cell_size, gbuf, 
       vxlDbg);    
 
   cudaSafeCall(cudaMemcpyFromSymbol(&vxlValidCnt, vxlValidCnt_device, sizeof(vxlValidCnt)) );
   cudaSafeCall(cudaMemcpyFromSymbol(&sum_s2s_err, sumS2sErr_device, sizeof(sum_s2s_err)) );
-  cudaSafeCall(cudaMemcpyFromSymbol(&tsdf_diff_sum_host_, tsdfDiffSum_device, sizeof(tsdf_diff_sum_host_)) );
-  cudaSafeCall(cudaMemcpyFromSymbol(&tsdf_abs_diff_sum_host_, tsdfAbsDiffSum_device, sizeof(tsdf_abs_diff_sum_host_)) );
+//   cudaSafeCall(cudaMemcpyFromSymbol(&tsdf_diff_sum_host_, tsdfDiffSum_device, sizeof(tsdf_diff_sum_host_)) );
+//   cudaSafeCall(cudaMemcpyFromSymbol(&tsdf_abs_diff_sum_host_, tsdfAbsDiffSum_device, sizeof(tsdf_abs_diff_sum_host_)) );
 
   TranformReduction tr2;
   tr2.gbuf = gbuf;
