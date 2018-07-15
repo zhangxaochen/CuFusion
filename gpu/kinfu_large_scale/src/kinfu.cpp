@@ -3584,11 +3584,11 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	float3& device_tprev_fake = device_cast<float3> (tprev_fake);
 
 	raycast (intr, device_Rprev, device_tprev_fake, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
-	for (int i = 1; i < LEVELS; ++i)
-	{
-		resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
-		resizeNMap (nmaps_g_prev_[i-1], nmaps_g_prev_[i]);
-	}
+// 	for (int i = 1; i < LEVELS; ++i)
+// 	{
+// 		resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
+// 		resizeNMap (nmaps_g_prev_[i-1], nmaps_g_prev_[i]);
+// 	}
 	//pcl::device::sync ();
 	}
 

@@ -69,12 +69,15 @@ pcl_kinfu_largeScale_release.exe --shift_z -0.3 --bdr_odometry -trunc_dist 0.025
 ### 2.3. ElasticFusion [3]
 To test this algorithm, we need to convert the image sequences to  `*.klg` files. We use [**this code**](https://github.com/HTLife/png_to_klg) for such work, build [**ElasticFusion**](https://github.com/mp3guy/ElasticFusion) from source, and run it.
 
+### 2.4. SDF-2-SDF [4]
+#### //2018-07-15
+We have implemented a trial version of the sdf-2-sdf algorithm on GPU (cuda). This version includes only E_geom(xi) in the objective function for optimization, yet don't have E_norm(xi) with it. Neither global optimization is applied. You can simply choose frame-to-model / frame-to-frame camera tracking for comparison, using command line args "-s2s". 
 
 # References
 1. Newcombe, R. A.; Izadi, S.; Hilliges, O.; Molyneaux, D.; Kim, D.; Davison, A. J.; Kohli, P.; Shotton, J.; 				Hodges, S.; Fitzgibbon, A. KinectFusion: Real-time Dense Surface Mapping and Tracking. In Proceedings of the 2011 10th IEEE International Symposium on Mixed and Augmented Reality; ISMAR ’11; IEEE Computer Society: Washington, DC, USA, 2011; pp. 127–136.
 2. Zhou, Q.-Y.; Koltun, V. Depth camera tracking with contour cues. In 2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR); 2015; pp. 632–638.
 3. Whelan, T.; Leutenegger, S.; Moreno, R. S.; Glocker, B.; Davison, A. ElasticFusion: Dense SLAM Without A Pose Graph. In Proceedings of Robotics: Science and Systems; Rome, Italy, 2015.
-
+4. Slavcheva M, Kehl W, Navab N, et al. SDF-2-SDF: highly accurate 3D object reconstruction[C]//European Conference on Computer Vision. Springer, Cham, 2016: 680-696.
 
 
 # Original README.txt of StanfordPCL
