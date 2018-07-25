@@ -627,6 +627,9 @@ namespace pcl
 		//@brief impl of sdf2sdf @2018-5-24 17:42:59
 		bool s2sOdometry( const DepthMap &depth, const View *pcolor = NULL);
 
+		//-no_icp, 命令行指定外参文件 syntheticRT.txt 
+		bool integrateWithGtPoses( const DepthMap &depth, const View *pcolor = NULL);
+
 		//全不行... @2017-4-2 14:30:29
 		void dbgAhcPeac( const DepthMap &depth_raw, const View *pcolor = NULL);
 		void dbgAhcPeac2( const CloudType::Ptr depCloud);
@@ -848,8 +851,14 @@ namespace pcl
 		float s2s_eta_, s2s_beta_; //sdf2sdf params
 		bool s2s_f2m_; //T:=f2m; F:=f2f
 
-        //zc: 实现 sdf2sdf 时, init_tcam_ 归零, 同时指定 volume 000 全局坐标为 -(old init-t)
-        Vector3f   volume000_gcoo_; //s2s-v0.2
+		//zc: 实现 sdf2sdf 时, init_tcam_ 归零, 同时指定 volume 000 全局坐标为 -(old init-t)
+		Vector3f   volume000_gcoo_; //s2s-v0.2
+
+		/** \brief ICP step is completelly disabled. Inly integratio now */
+		bool disable_icp_; //2018-7-19 16:53:27
+		typedef Eigen::Matrix<float, 3, 3, Eigen::RowMajor> Matrix3frm;
+		std::vector<Matrix3frm> gtRmats_;
+		std::vector<Vector3f> gtTvecs_;
 
       private:
 
@@ -1098,6 +1107,11 @@ namespace pcl
         
       public:
 		EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+		///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+		void disableIcp() { disable_icp_ = true; }
+
+		void enableIcp(){ disable_icp_ = false; }
 
     };
   }

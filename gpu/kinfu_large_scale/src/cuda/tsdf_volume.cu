@@ -586,7 +586,7 @@ namespace pcl
             int weight_new = min (weight_prev + Wrk, Tsdf::MAX_WEIGHT);
 
             if(doDbgPrint){
-                printf("tsdf_prev, tsdf, tsdf_new: %f, %f, %f\n", tsdf_prev, tsdf, tsdf_new);
+                printf("tsdf_prev & tsdf, ->tsdf_new: %f, %f, %f; w_p, w_new: %d, %d\n", tsdf_prev, tsdf, tsdf_new, weight_prev, weight_new);
             }
 
             weight_new = weight_new << 1; //省略了+0, v17 的标记位默认值=0

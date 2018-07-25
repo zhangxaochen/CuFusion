@@ -2159,7 +2159,10 @@ struct KinFuLSApp
 					printf("kinfu_->s2sOdometry: "); tt0.toc_print();
 
 				}
-
+				else if (kinfu_->disable_icp_){ //-no_icp cmd args
+					kinfu_->integrateWithGtPoses(depth_device_, &image_view_.colors_device_);
+					printf("kinfu_->integrateWithGtPoses: "); tt0.toc_print();
+				}
 				else if ( kdtree_odometry_ ) {
 					has_image = kinfu_->kdtreeodometry( depth_device_, &image_view_.colors_device_ );
 				} else {
@@ -3154,6 +3157,9 @@ struct KinFuLSApp
 	bool cu_odometry_;
 	bool s2s_odometry_; //sdf2sdf impl on GPU
 
+
+	vector<vector<float>> synthetic_RT_; //t3+r9
+
 	CameraParam camera_;
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3575,6 +3581,45 @@ int
 
 		pc::parse_argument(argc, argv, "-everyX", everyXframes_);
 		pc::parse_argument(argc, argv, "-pauseId", pngPauseId_);
+
+		//↓-若 "-no_icp", 则用 syntheticRT.txt 预设相机姿态, 不做配准
+		if(pc::find_switch(argc, argv, "-no_icp")){
+			app.kinfu_->disableIcp();
+
+			string synRtFn = "syntheticRT.txt"; //不带路径, 意味着必须放在 png_dir 目录下; 默认值xxx
+			pc::parse_argument(argc, argv, "-synRtFn", synRtFn); //尝试从命令行参数读取,替换默认值
+			string path_rt = eval_folder + "/" + synRtFn;
+			cout<<path_rt<<endl;
+			//if(!boost::filesystem::exists(path_rt))
+			//    PCL_THROW_EXCEPTION (pcl::IOException, "file does not exist");
+
+			if(boost::filesystem::exists(path_rt)){
+				ifstream synRtFin(path_rt);
+				//for (int i=0;i<pngFnames.size();++i)
+				int i = 0; //用 while 替代 for, 针对当 png 是截取一部分, 而 syntheticRT.txt 是整个时   //2016-7-17 22:16:04
+				while(1)
+				{
+					if(!synRtFin.good()){
+						cout<<"fstream synthetic_rt NOT good! i= "<<i<<endl;
+						break;
+					}
+					vector<float> gtRt;
+					for (int j=0;j<12;++j)
+					{
+						float tmp;
+						synRtFin>>tmp;
+						gtRt.push_back(tmp);
+					}
+					//app.synthetic_RT_.push_back(rt);
+					//app.kinfu_->gtTvecs_ << gtRt[0], gtRt[1], gtRt[2]; //前三元
+					app.kinfu_->gtTvecs_.push_back(Vector3f::Map(gtRt.data()));
+					typedef Eigen::Matrix<float, 3, 3, Eigen::RowMajor> Matrix3frm;
+					app.kinfu_->gtRmats_.push_back(Matrix3frm::Map(gtRt.data()+3));
+
+					i++;
+				}
+			}
+		}
 
 	}
 

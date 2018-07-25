@@ -83,7 +83,7 @@ namespace pcl
     //enum { VOLUME_X = 392, VOLUME_Y = 392, VOLUME_Z = 392 };
 
     //zc: 限制在 1.5m--256分辨率  @2017-3-17 00:35:45
-    const int VRES = 256;
+    const int VRES = 64;
     enum { VOLUME_X = VRES, VOLUME_Y = VRES, VOLUME_Z = VRES };
 
 	

@@ -557,6 +557,7 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	: cyclical_( DISTANCE_THRESHOLD, pcl::device::VOLUME_SIZE, VOLUME_X), cyclical2_( DISTANCE_THRESHOLD, pcl::device::VOLUME_SIZE, VOLUME_X)
 	, rows_(rows), cols_(cols), global_time_(0), max_icp_distance_(0), integration_metric_threshold_(0.f), perform_last_scan_ (false), finished_(false), force_shift_(false), max_integrate_distance_(0)
 	, extract_world_( false ), use_slac_( false ), dist_thresh_( 0.03 ), amplifier_( 4.0f )
+	, disable_icp_(false) //默认不 disable
 {
 	//const Vector3f volume_size = Vector3f::Constant (VOLUME_SIZE);
 	const Vector3i volume_resolution (VOLUME_X, VOLUME_Y, VOLUME_Z);
@@ -632,6 +633,10 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	g2oOptmizer_.setAlgorithm(algo);
 	g2oOptmizer_.setVerbose(true);
 
+	//s2s-init
+	s2s_beta_ = 0.5f; //inc step
+	s2s_eta_ = 0.01f; //10mm
+	s2s_f2m_ = true;
 }//KinfuTracker-ctor
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -3620,7 +3625,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	float avgErr_i1 = 1e3, 
 		avgErr_curr = 0;
 
-	for (int iter = 0; iter < 11; ++iter){
+	for (int iter = 0; iter < 19; ++iter){
 		//cout<<">>>>>>>>>>iter: "<<iter<<endl;
 		Mat33&  device_Rcurr = device_cast<Mat33> (Rcurr);
 		float3& device_tcurr = device_cast<float3>(tcurr);
@@ -3860,6 +3865,117 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	++global_time_;
 	return true;
 }//s2sOdometry
+
+bool pcl::gpu::KinfuTracker::integrateWithGtPoses( const DepthMap &depth_raw, const View *pcolor /*= NULL*/){
+	//printf("---------------callCnt:= %d\n", callCnt_);
+	callCnt_++;
+	ScopeTime time( "integrateWithGtPoses All" );
+	device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
+
+	float3& device_volume000_gcoo = device_cast<float3>(volume000_gcoo_);
+
+	//scale-depth 放最外面 @2018-7-4 16:54:24
+	//DeviceArray2D<float> depthFiltScaled; //-no_icp 所以不需要 bilateral-filt, pyramid, registration, etc.
+
+	scaleDepthDevice(depth_raw, intr, depthRawScaled_);
+	//scaleDepthDevice(depths_curr_[0], intr, depthFiltScaled);
+
+	//定点调试观察某体素:
+	int3 vxlPos;
+	vxlPos.x = vxlDbg_[0];
+	vxlPos.y = vxlDbg_[1];
+	vxlPos.z = vxlDbg_[2];
+
+	if (global_time_ == 0)
+	{
+		Matrix3frm initial_cam_rot = rmats_[0]; //  [Ri|ti] - pos of camera, i.e.
+		Matrix3frm initial_cam_rot_inv = initial_cam_rot.inverse ();
+		Vector3f   initial_cam_trans = tvecs_[0]; //  transform from camera to global coo space for (i-1)th camera pose
+
+		Mat33&  device_initial_cam_rot = device_cast<Mat33> (initial_cam_rot);
+		Mat33&  device_initial_cam_rot_inv = device_cast<Mat33> (initial_cam_rot_inv);
+		float3& device_initial_cam_trans = device_cast<float3>(initial_cam_trans);
+
+		float3 device_volume_size = device_cast<const float3>(tsdf_volume_->getSize());
+		cout<<"~~~~~~~~~~~(((global_time_ == 0; init-tvec: "<<tvecs_[0].transpose()
+			<<"; volume000_gcoo_: "<<volume000_gcoo_.transpose()<<endl;;
+		integrateTsdfVolume_s2s(intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, device_volume000_gcoo, //s2s-v0.2
+			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+
+		for (int i = 0; i < LEVELS; ++i)
+			device::tranformMaps (vmaps_curr_[i], nmaps_curr_[i], device_initial_cam_rot, device_initial_cam_trans, vmaps_g_prev_[i], nmaps_g_prev_[i]);
+
+		++global_time_;
+		return (false);
+	}//if-(global_time_ == 0)
+
+	Matrix3frm Rprev = rmats_[global_time_ - 1]; //  [Ri|ti] - pos of camera, i.e.
+	Vector3f   tprev = tvecs_[global_time_ - 1]; //  tranfrom from camera to global coo space for (i-1)th camera pose
+	Matrix3frm Rprev_inv = Rprev.inverse (); //Rprev.t();
+	//cout<<"Rprev: "<<Rprev<<endl;
+	Mat33&  device_Rprev     = device_cast<Mat33> (Rprev);
+	Mat33&  device_Rprev_inv = device_cast<Mat33> (Rprev_inv);
+	float3& device_tprev     = device_cast<float3> (tprev);
+
+	float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
+
+	// Ray casting //icp 之前先做了, 仿 bdrOdometry 规矩, 与原来 kinfu 不同 @2017-4-5 17:10:59
+	{
+		ScopeTime time("ray-cast-all"); //11ms, 这么慢? @2018-3-26 00:58:34
+		//raycast (intr, device_Rprev, device_tprev, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
+		//s2s-v0.2:
+		Vector3f tprev_fake = tprev - volume000_gcoo_;
+		float3& device_tprev_fake = device_cast<float3> (tprev_fake);
+
+		raycast (intr, device_Rprev, device_tprev_fake, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
+	}
+
+	//直接用 gt, 不配准
+	Matrix3frm gtR_i = gtRmats_[global_time_]; //pose: c_i->g
+	Vector3f gtT_i = gtTvecs_[global_time_];
+
+	Matrix3frm gtR_0 = gtRmats_[0];
+	Vector3f gtT_0 = gtTvecs_[0];
+
+	//用gt 预加载的求解 i->g->0
+	Matrix3frm gtR_i0 = gtR_0.transpose() * gtR_i;
+	Vector3f gtT_i0 =  gtR_0.transpose() * (gtT_i - gtT_0);
+
+	Matrix3frm R_0g = rmats_[0];
+	Vector3f t_0g = tvecs_[0];
+
+	//new: i->0->g
+	Matrix3frm Rcurr = R_0g * gtR_i0;
+	Vector3f tcurr = R_0g * gtT_i0 + t_0g;
+
+	rmats_.push_back (Rcurr);
+	tvecs_.push_back (tcurr);
+
+	bool integrate = true;
+
+	///////////////////////////////////////////////////////////////////////////////////////////
+	// Volume integration
+
+	Matrix3frm Rcurr_inv = Rcurr.inverse ();
+	Mat33&  device_Rcurr = device_cast<Mat33> (Rcurr);
+	Mat33&  device_Rcurr_inv = device_cast<Mat33> (Rcurr_inv);
+	float3& device_tcurr = device_cast<float3> (tcurr);
+	if (integrate)
+	{
+		ScopeTime time("if-integrate");
+// 		cout<<"depthRawScaled_:"<<depthRawScaled_.cols()<<","<<depthRawScaled_.rows()<<endl	//640*480
+// 			<<"tsdf_volume_:"<<tsdf_volume_->data().cols()<<";"<<tsdf_volume_->data().rows()<<endl;	//64*4096
+		integrateTsdfVolume_s2s(intr, device_volume_size, device_Rcurr_inv, device_tcurr, device_volume000_gcoo,
+			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+	}//if-(integrate)
+
+	///////////////////////////////////////////////////////////////////////////////////////////
+	// Ray casting //改调到最前面, 仿 bdrOdometry 规矩
+
+	++global_time_;
+	return true;
+
+}//integrateWithGtPoses
 
 void pcl::gpu::KinfuTracker::dbgAhcPeac( const DepthMap &depth_raw, const View *pcolor /*= NULL*/){
 	//device::Intr intr (fx_, fy_, cx_, cy_, max_integrate_distance_);
