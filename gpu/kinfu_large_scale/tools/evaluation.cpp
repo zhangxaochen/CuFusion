@@ -223,8 +223,10 @@ bool Evaluation::grab (double stamp, PtrStepSz<const unsigned short>& depth)
       return false;
 
   string file = folder_ + (accociations_.empty() ? depth_stamps_and_filenames_[i].second : accociations_[i].name1);
-  
+  cout << "file: " << file << endl;
+
   cv::Mat d_img = cv::imread(file, CV_LOAD_IMAGE_ANYDEPTH | CV_LOAD_IMAGE_ANYCOLOR);
+  cout << "after_imread: " << d_img.size() << endl;
   if(d_img.empty())
       return false;
    
@@ -237,12 +239,23 @@ bool Evaluation::grab (double stamp, PtrStepSz<const unsigned short>& depth)
   // Datasets are with factor 5000 (pixel to m) 
   // http://cvpr.in.tum.de/data/datasets/rgbd-dataset/file_formats#color_images_and_depth_maps
     
+//   cout << "BEFORE_d_img_convertTo: " << impl_->depth_buffer.size() << endl
+//       << "depth_buffer.type: " << impl_->depth_buffer.type() << endl
+//       ;
+//   cv::Rect roi(320, 240, 5, 5);
+//   cout << "d_img.ROI: " << d_img(cv::Rect(320, 240, 5, 5)) << endl
+//       ;
+//   if(impl_->depth_buffer.size().width > 0)
+//       cout << "depth_buffer.ROI: " << impl_->depth_buffer(roi) << endl;
   //d_img.convertTo(impl_->depth_buffer, d_img.type(), 0.2);
   d_img.convertTo(impl_->depth_buffer, d_img.type(), 1); //zc
+//   cout << "after_d_img_convertTo\n";
   depth.data = impl_->depth_buffer.ptr<ushort>();
+//   cout << "after-impl_->depth_buffer.ptr\n";
   depth.cols = impl_->depth_buffer.cols;
   depth.rows = impl_->depth_buffer.rows;
   depth.step = impl_->depth_buffer.cols*sizeof(ushort); // 1280 = 640*2
+//   cout << "after-depth.step\n";
 
 #if 0	//²âÊÔ ahc-peac bug:	@2017-4-1 09:59:24
   pcl::device::Intr intr(529.22, 528.98, 313.77, 254.10, 5.0);

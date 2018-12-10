@@ -783,6 +783,8 @@ namespace pcl
 
     __global__ void
     scaleDepth (const PtrStepSz<ushort> depth, PtrStep<float> scaled, const Intr intr);
+    __global__ void
+    scaleDepth_vmap (const PtrStepSz<float> vmap_g, float3 tvec, PtrStep<float> scaled, const Intr intr);
 
     //__device__ __forceinline__ float3
     //getVoxelGCoo (int x, int y, int z) /*const*/
@@ -1069,6 +1071,7 @@ namespace pcl
     estimateCombined_s2s_kernel_v2(const PtrStepSz<float> depthScaled, PtrStep<short2> volume, PtrStep<short2> volume2, 
         const float tranc_dist, const float eta, //s2s (delta, eta)
         const Mat33 Rcurr_inv, const float3 tcurr, 
+        const Mat33 Rprev_inv, const float3 tprev, PtrStep<float> vmap_g_prev,  //改 f2m 用rcast 单视角的mod
         const float3 volume000_gcoo, float6 xi_prev, 
         const Intr intr, const float3 cell_size, 
         PtrStep<float> gbuf, 
@@ -1084,9 +1087,21 @@ namespace pcl
       //float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
       //float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
       //float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+#define F2M_NEW_USE_RCAST 0    //已验证, 根本来的 f2m 没多少区别, 在 long4-changjing 上 f240+ 仍然飘走 @2018-11-25 15:35:17
+#if 0   //!F2M_NEW_USE_RCAST
       float v_g_x = (x + 0.5f) * cell_size.x + volume000_gcoo.x - tcurr.x;
       float v_g_y = (y + 0.5f) * cell_size.y + volume000_gcoo.y - tcurr.y;
       float v_g_z = (0 + 0.5f) * cell_size.z + volume000_gcoo.z - tcurr.z;
+#else   //之前 f2m 在比如 long4-changjing 数据上漂移， 怀疑因为用了整个model, 尝试改用mod rcast 的视角相关方式 @2018-11-25 00:08:16
+      float3 vg_true;
+      vg_true.x = (x + 0.5f) * cell_size.x + volume000_gcoo.x;
+      vg_true.y = (y + 0.5f) * cell_size.y + volume000_gcoo.y;
+      vg_true.z = (0 + 0.5f) * cell_size.z + volume000_gcoo.z;
+
+      float v_g_x = vg_true.x - tcurr.x;
+      float v_g_y = vg_true.y - tcurr.y;
+      float v_g_z = vg_true.z - tcurr.z;
+#endif
 
       float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
 
@@ -1115,6 +1130,9 @@ namespace pcl
       //for (int z = 1; z < VOLUME_Z - 1; //错！导致 idx 偏了
            ++z,
            v_g_z += cell_size.z,
+#if 1   //F2M_NEW_USE_RCAST
+           vg_true.z += cell_size.z,
+#endif
            z_scaled += cell_size.z,
            v_x += Rcurr_inv_0_z_scaled,
            v_y += Rcurr_inv_1_z_scaled,
@@ -1156,12 +1174,13 @@ namespace pcl
           __float2int_rn (v_y * inv_z + intr.cy)
         };
 
-        if(doDbgPrint)
-            printf("esti-s2s_kernel:: coo.xy:(%d, %d)\n", coo.x, coo.y);
+        //if(doDbgPrint)
+        //    printf("esti-s2s_kernel:: coo.xy:(%d, %d)\n", coo.x, coo.y);
 
+        //↓-coo 范围判定, 貌似去掉也毫无变化, 为啥?    @2018-11-25 02:07:16
         if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
         {
-          //float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+          float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters 【【sdf、tsdf 本不需要再这样求, 因外部预计算了, 这里主要用作下面 ourlier 滤除  @2018-11-26 22:09:01
 
           //float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
 
@@ -1194,21 +1213,113 @@ namespace pcl
           //  if(tsdf == tsdf_prev)
           //      continue;
 
+
+          //vox 用 T_prev 转到 (i-1) cam-coo, 然后查找 vmap_g_prev
+          //vg_true.x = v_g_x_true; //vg_true 定义在最前面
+          //vg_true.y = v_g_y_true;
+          //vg_true.z = v_g_z_true;
+          float3 vprev_cam = Rprev_inv * (vg_true - tprev); //转到 prev cam-coo
+          int2 coo_prev = //核心目的是对应点查找, 原文提到无需s2s优点之一是无需对应点查找, 实践发现通过 对应点dist对比, 滤除 outlier 很有必要 @2018-11-26 22:03:36
+          {
+              __float2int_rn (vprev_cam.x * intr.fx / vprev_cam.z + intr.cx),
+              __float2int_rn (vprev_cam.y * intr.fy / vprev_cam.z + intr.cy)
+          };
+          if (!(coo_prev.x >= 0 && coo_prev.y >= 0 
+              && coo_prev.x < depthScaled.cols && coo_prev.y < depthScaled.rows))
+          {
+              if(doDbgPrint){
+                  printf("coo_prev_out_of_ROI; xy:= %d, %d\n", coo_prev.x, coo_prev.y);
+                  //printf("Rpre")
+              }
+
+              continue;
+          }
+
+          float3 v_g_rcast;
+          v_g_rcast.x = vmap_g_prev.ptr(coo_prev.y)[coo_prev.x];
+          if (isnan (v_g_rcast.x)) //若 vmap_g_prev 对应位置无效值, 跳过
+              continue;
+          v_g_rcast.y = vmap_g_prev.ptr(coo_prev.y + depthScaled.rows)[coo_prev.x];
+          v_g_rcast.z = vmap_g_prev.ptr(coo_prev.y + depthScaled.rows * 2)[coo_prev.x];
+
+          //v_g_rcast = v_g_rcast -tcurr; //虽然 vg-rc 是 prev查表得到, 但此处不是 -tprev
+          float depth_model_scaled = norm(v_g_rcast -tcurr); //虽然 vg-rc 是 prev查表得到, 但此处不是 -tprev
+          if(depth_model_scaled == 0){ //理论上不可能进来
+              printf("depth_model_scaled_eq_0; v_g_rcast: %f, %f, %f\n", v_g_rcast.x, v_g_rcast.y, v_g_rcast.z);
+              continue;
+          }
+
+          //if(abs(depth_model_scaled - Dp_scaled) > 0.05){ //meters
+          //    if(doDbgPrint)
+          //        printf("abs(depth_model_scaled - Dp_scaled), outlier...\n");
+          //    continue;
+          //}
+          //↑--改放到后面, 因为想看 outlier 时候 F1/F2 到底啥样
+
+#if !F2M_NEW_USE_RCAST
           float tsdf1;
           int weight1;
           unpack_tsdf (*pos, tsdf1, weight1);
           //v17, 为配合 v17 用 w 二进制末位做标记位, 这里稍作修改: unpack 时 /2, pack 时 *2; @2018-1-22 02:01:27
-          weight1 = weight1 >> 1;
+          //weight1 = weight1 >> 1;
+          weight1 = weight1 >> VOL1_FLAG_BIT_CNT; //后来标记位不止 1bit 了，尽管 s2s 融合用的独立的 integrateTsdfVolume_s2s, 但因为 march-cube 中统一 shift, 所以integ以及这里必须呼应
+#else
 
+          float tsdf1;
+          int weight1;
+          float sdf = depth_model_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+          if(doDbgPrint){
+              printf("d_mod_scaled: %f, v_g_rcast: (%f, %f, %f); tcurr: (%f, %f, %f)\n", 
+                  depth_model_scaled, v_g_rcast.x, v_g_rcast.y, v_g_rcast.z, tcurr.x, tcurr.y, tcurr.z);
+              printf("sdf_F2M_NEW_USE_RCAST:= %f; d_mod_scaled: %f, vox_cam_dist: %f, sdf_again: %f\n", 
+                  sdf, depth_model_scaled, sqrtf (v_g_z * v_g_z + v_g_part_norm),
+                  depth_model_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm));
+          }
+          if(sdf > -eta){
+              weight1 = 1;
+              //tranc_dist_inv
+              tsdf1 = fmin (1.0f, sdf * tranc_dist_inv);
+
+              if(sdf < -tranc_dist)
+                  tsdf1 = -1.0f;
+
+              if(doDbgPrint){
+                  float tsdf_unpack;
+                  int weight_unpack;
+
+                  unpack_tsdf (*pos, tsdf_unpack, weight_unpack);
+                  weight_unpack = weight_unpack >> VOL1_FLAG_BIT_CNT;
+                  printf("tsdf1: %f, tranc_dist: %f, eta: %f; (t, w)_unpack: %f, %d\n", 
+                      tsdf1, tranc_dist, eta, tsdf_unpack, weight_unpack);
+              }
+          }
+#endif
           float tsdf2;
           int weight2;
           unpack_tsdf (*pos2, tsdf2, weight2);
-          weight2 = weight2 >> 1;
+          weight2 = weight2 >> VOL1_FLAG_BIT_CNT;
 
-          if(doDbgPrint)
+          if(doDbgPrint){
               //printf("F1/F2, W1/W2: %f, %f, %d, %d; pos1/2-addr: %p, %p, %d; %p, %p, %d\n", tsdf1, tsdf2, weight1, weight2, 
               //(void*)pos, (void*)volume.ptr(), pos-volume.ptr(), (void*)pos2, (void*)volume2.ptr(), pos2-volume2.ptr());
-              printf("F1/F2, W1/W2: 【%f, %f】, %d, %d;\n", tsdf1, tsdf2, weight1, weight2);
+
+              //printf("F1/F2, W1/W2: 【%f, %f】, %d, %d; condi_BEFORE: %d\n", 
+              //    tsdf1, tsdf2, weight1, weight2,
+              //    (0 != weight1 && 0 != weight2 && tsdf1 != tsdf2)
+              //    );
+
+              //printf("\t BEFORE:--w1: %d, w2: %d, t1: %f, t2: %f; condi: %d\n",
+              //    weight1, weight2, tsdf1, tsdf2,
+              //    (0 != weight1 && 0 != weight2 && tsdf1 != tsdf2)
+              //    );
+
+          }
+
+          if(abs(depth_model_scaled - Dp_scaled) > 0.05){ //meters
+              if(doDbgPrint)
+                  printf("abs(depth_model_scaled - Dp_scaled), outlier...\n");
+              continue;
+          }
 
           float row[7]; //尝试改放循环内, 应无差别
 
@@ -1225,7 +1336,8 @@ namespace pcl
               int Wn = 0, Wp = 0;
               unpack_tsdf (*(pos2 + elem_step2), Fn, Wn);
               unpack_tsdf (*(pos2 - elem_step2), Fp, Wp);
-              Wn >>= 1; Wp >>= 1;
+              //Wn >>= 1; Wp >>= 1;
+              Wn >>= VOL1_FLAG_BIT_CNT; Wp >>= VOL1_FLAG_BIT_CNT;
               if(doDbgPrint)
                   printf("\tz-Fn/Fp, Wn/Wp: %f, %f, %d, %d;\n", Fn, Fp, Wn, Wp);
 
@@ -1237,7 +1349,8 @@ namespace pcl
 
               unpack_tsdf (*(pos2 + volume2.step/sizeof(short2) ), Fn, Wn);
               unpack_tsdf (*(pos2 - volume2.step/sizeof(short2) ), Fp, Wp);
-              Wn >>= 1; Wp >>= 1;
+              //Wn >>= 1; Wp >>= 1;
+              Wn >>= VOL1_FLAG_BIT_CNT; Wp >>= VOL1_FLAG_BIT_CNT;
               if(doDbgPrint)
                   printf("\ty-Fn/Fp, Wn/Wp: %f, %f, %d, %d;\n", Fn, Fp, Wn, Wp);
 
@@ -1249,7 +1362,8 @@ namespace pcl
 
               unpack_tsdf (*(pos2 + 1), Fn, Wn);
               unpack_tsdf (*(pos2 - 1), Fp, Wp);
-              Wn >>= 1; Wp >>= 1;
+              //Wn >>= 1; Wp >>= 1;
+              Wn >>= VOL1_FLAG_BIT_CNT; Wp >>= VOL1_FLAG_BIT_CNT;
               if(doDbgPrint)
                   printf("\tx-Fn/Fp, Wn/Wp: %f, %f, %d, %d;\n", Fn, Fp, Wn, Wp);
 
@@ -1292,10 +1406,16 @@ namespace pcl
 
               //row[6] = dot(tsdf1 - tsdf2 + dot(*(float6*)&row[0], xi_prev), *(float3*)&row[0]);
           }
-          else
+          else{
               //row[0] = row[1] = row[2] = row[3] = row[4] = row[5] = row[6] = 0.f;
+              if(doDbgPrint){
+                  printf("\t w1_w2_invalid_or_t1_eq_t2, w1: %d, w2: %d, t1: %f, t2: %f; condi: %d\n",
+                      weight1, weight2, tsdf1, tsdf2,
+                      (0 != weight1 && 0 != weight2 && tsdf1 != tsdf2)
+                      );
+              }
               continue;
-
+          }
           atomicAdd(&vxlValidCnt_device, 1);
           atomicAdd(&sumS2sErr_device, (tsdf1-tsdf2)*(tsdf1-tsdf2) );
           //atomicAdd(&tsdfDiffSum_device, tsdf2 - tsdf1);
@@ -1471,6 +1591,7 @@ float pcl::device::tsdf_abs_diff_sum_host_;
 void
 pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
         const Mat33& Rcurr_inv, const float3& tcurr, 
+        const Mat33& Rprev_inv, const float3& tprev, PtrStep<float> vmap_g_prev,    //F2M_NEW_USE_RCAST @2018-11-25 00:47:27
         const float3& volume000_gcoo, const float6& xi_prev, 
         float tranc_dist, PtrStep<short2> volume, PtrStep<short2> volume2,
         //float delta, 
@@ -1493,9 +1614,10 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
 #elif 0 //移到 KinfuTracker::s2sOdometry 最外层
     scaleDepthDevice(depth_raw, intr, depthScaled);
 #endif
+  //↓--也放到外面, 放到 initVrayPrevVolume(tsdf_volume_->volume2nd_); 之后 @2018-11-25 16:39:26
+//   integrateTsdfVolume_s2s(/*depth_raw,*/ intr, volume_size, Rcurr_inv, tcurr,
+//       volume000_gcoo, tranc_dist, eta, volume2, depthScaled, vxlDbg); //这里 set vol-2
 
-  integrateTsdfVolume_s2s(/*depth_raw,*/ intr, volume_size, Rcurr_inv, tcurr,
-      volume000_gcoo, tranc_dist, eta, volume2, depthScaled, vxlDbg); //这里 set vol-2
   //printf("integrateTsdfVolume_s2s-volume2: %dms\n", clock()-begt); 
   //tt.toc_print();
 
@@ -1519,7 +1641,9 @@ pcl::device::estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr
 
   //estimateCombined_s2s_kernel<<<grid, block>>>(depthScaled, volume, volume2,
   estimateCombined_s2s_kernel_v2<<<grid, block>>>(depthScaled, volume, volume2,
-      tranc_dist, eta, Rcurr_inv, tcurr, volume000_gcoo, xi_prev, 
+      tranc_dist, eta, Rcurr_inv, tcurr, 
+      Rprev_inv, tprev, vmap_g_prev, //F2M_NEW_USE_RCAST @2018-11-25 00:54:42
+      volume000_gcoo, xi_prev, 
       intr, cell_size, gbuf, 
       vxlDbg);    
 
@@ -1577,6 +1701,28 @@ pcl::device::scaleDepthDevice(const PtrStepSz<ushort>& depth_raw, const Intr& in
     //printf("\t>>>-------scaleDepthDevice-time: %dms\n", clock()-begt); //0ms
 
 }//scaleDepthDevice
+
+void
+pcl::device::scaleDepthDevice(const MapArr& vmap_g, const float3& tvec, const Intr& intr, DeviceArray2D<float>& depthScaled){
+    //pcl::console::TicToc tt;
+
+    //clock_t begt = clock();
+    int cols = vmap_g.cols ();
+    int rows = vmap_g.rows () / 3;
+    //printf("cc,rr@scaleDepthDevice_vmap: %d, %d\n", cols, rows); //640, 480 没问题
+
+    depthScaled.create (rows, cols);
+
+    dim3 block_scale (32, 8);
+    dim3 grid_scale (divUp (cols, block_scale.x), divUp (rows, block_scale.y));
+
+    //scales depth along ray and converts mm -> meters. 
+    scaleDepth_vmap<<<grid_scale, block_scale>>>(vmap_g, tvec, depthScaled, intr);
+    cudaSafeCall ( cudaGetLastError () );
+
+    //printf("\t>>>-------scaleDepthDevice-time: %dms\n", clock()-begt); //0ms
+
+}//scaleDepthDevice-vmap版
 
 //zc: nmap 惩罚项专用, 与 estimateCombined 区别是 combinedKernel2 调用链非 operator() @2017-6-1 13:11:25
 void

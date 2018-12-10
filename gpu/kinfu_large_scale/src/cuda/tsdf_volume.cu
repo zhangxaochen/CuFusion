@@ -36,6 +36,7 @@
  */
 
 #include "device.hpp"
+#include <fstream>
 
 using namespace pcl::device;
 
@@ -45,6 +46,8 @@ const float COS30 = 0.8660254f
     ,COS60 = 0.5f
     ,COS75 = 0.258819f
     ,COS80 = 0.173649f
+    ,COS120 = -0.5f
+    ,COS150 = -0.8660254f
     ;
 
 namespace pcl
@@ -258,7 +261,7 @@ namespace pcl
       {
         CTA_SIZE_X = 32, CTA_SIZE_Y = 8,
         //MAX_WEIGHT = 1 << 7
-        MAX_WEIGHT = 1 << 9
+        MAX_WEIGHT = 1 << 8
         //MAX_WEIGHT = 15
         //MAX_WEIGHT = 255
         //MAX_WEIGHT = 15
@@ -486,11 +489,67 @@ namespace pcl
       float yl = (y - intr.cy) / intr.fy;
       float lambda = sqrtf (xl * xl + yl * yl + 1);
 
-	  float res = Dp * lambda/1000.f; //meters
-	  if ( intr.trunc_dist > 0 && res > intr.trunc_dist )
-		  scaled.ptr (y)[x] = 0;
-	  else
-		scaled.ptr (y)[x] = res;
+      float res = Dp * lambda/1000.f; //meters
+      if ( intr.trunc_dist > 0 && res > intr.trunc_dist )
+          scaled.ptr (y)[x] = 0;
+      else
+          scaled.ptr (y)[x] = res;
+    }
+
+    //重载版, 直接输入vmap_g   @2018-11-25 22:18:12
+    //@param[in] vmap_g, in meters
+    __global__ void
+    scaleDepth_vmap (const PtrStepSz<float> vmap_g, float3 tvec, PtrStep<float> scaled, const Intr intr)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      int cols = vmap_g.cols;
+      int rows = vmap_g.rows / 3;
+      if (x >= cols || y >= rows)
+        return;
+
+      //const float qnan = numeric_limits<float>::quiet_NaN();
+      float3 v_g;
+      v_g.x = vmap_g.ptr(y)[x];
+      if(isnan(v_g.x)){ //若 vmap 对应 px 是无效值
+          scaled.ptr(y)[x] = 0;
+          return;
+      }
+
+      v_g.y = vmap_g.ptr(y + rows)[x];
+      v_g.z = vmap_g.ptr(y + rows * 2)[x];
+
+      float res = norm(v_g - tvec); //in meters
+
+      if ( intr.trunc_dist > 0 && res > intr.trunc_dist )
+          scaled.ptr (y)[x] = 0;
+      else
+          scaled.ptr (y)[x] = res;
+    }
+
+    //zc: 重载, ushort->short, depth 分正负, 用于 rcFlag 沿视线 scale, 且 mm->m @2018-10-14 21:28:11
+    //暂未用到 @2018-11-25 22:14:08
+    __global__ void
+    scaleDepth_short (const PtrStepSz<short> depth, PtrStep<float> scaled, const Intr intr)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x >= depth.cols || y >= depth.rows)
+        return;
+
+      int Dp = depth.ptr (y)[x];
+
+      float xl = (x - intr.cx) / intr.fx;
+      float yl = (y - intr.cy) / intr.fy;
+      float lambda = sqrtf (xl * xl + yl * yl + 1);
+
+      float res = Dp * lambda/1000.f; //meters
+      if ( intr.trunc_dist > 0 && res > intr.trunc_dist )
+          scaled.ptr (y)[x] = 0;
+      else
+          scaled.ptr (y)[x] = res;
     }
 
     __global__ void
@@ -578,7 +637,11 @@ namespace pcl
             int weight_prev;
             unpack_tsdf (*pos, tsdf_prev, weight_prev);
             //v17, 为配合 v17 用 w 二进制末位做标记位, 这里稍作修改: unpack 时 /2, pack 时 *2; @2018-1-22 02:01:27
-            weight_prev = weight_prev >> 1;
+            //weight_prev = weight_prev >> 1;
+
+            //v19.8.1
+            int non_edge_ccnt = weight_prev % VOL1_FLAG_TH;
+            weight_prev = weight_prev >> VOL1_FLAG_BIT_CNT;
 
             const int Wrk = 1;
 
@@ -589,7 +652,8 @@ namespace pcl
                 printf("tsdf_prev & tsdf, ->tsdf_new: %f, %f, %f; w_p, w_new: %d, %d\n", tsdf_prev, tsdf, tsdf_new, weight_prev, weight_new);
             }
 
-            weight_new = weight_new << 1; //省略了+0, v17 的标记位默认值=0
+            //weight_new = weight_new << 1; //省略了+0, v17 的标记位默认值=0
+            weight_new = (weight_new << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
             pack_tsdf (tsdf_new, weight_new, *pos);
           }
         }
@@ -649,6 +713,7 @@ namespace pcl
     __global__ void
     tsdf23_s2s (const PtrStepSz<float> depthScaled, PtrStep<short2> volume,
             const float tranc_dist, const float eta, //s2s (delta, eta)
+            bool use_eta_trunc,
             //const Mat33 Rcurr_inv, const float3 tcurr, 
             const Mat33 Rcurr_inv, const float3 tcurr, const float3 volume000_gcoo,
             const Intr intr, const float3 cell_size, int3 vxlDbg) //zc: 调试
@@ -715,12 +780,16 @@ namespace pcl
           float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
 
           if(doDbgPrint){
-              printf("@tsdf23_s2s: Dp_scaled, sdf, tranc_dist: %f, %f, %f, %s; sdf/tdist: %f, coo.xy: (%d, %d)\n", Dp_scaled, sdf, tranc_dist, 
-                  sdf >= -tranc_dist ? "sdf >= -tranc_dist" : "", sdf/tranc_dist, coo.x, coo.y);
+              //printf("@tsdf23_s2s: Dp_scaled, sdf, tranc_dist: %f, %f, %f, %s; sdf/tdist: %f, coo.xy: (%d, %d)\n", Dp_scaled, sdf, tranc_dist, 
+              //    sdf >= -tranc_dist ? "sdf >= -tranc_dist" : "", sdf/tranc_dist, coo.x, coo.y);
           }
 
           //if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters
-          if (Dp_scaled != 0 && sdf >= -eta) //meters //比较 eta , 而非 delta (tdist)
+          //if (Dp_scaled != 0 && sdf >= -eta) //meters //比较 eta , 而非 delta (tdist)
+
+          //↓-参数控制到底选谁做 tdist, 
+          float tdist_real = use_eta_trunc ? eta : tranc_dist;
+          if (Dp_scaled != 0 && sdf >= -tdist_real) //meters 
           {
             float tsdf = fmin (1.0f, sdf * tranc_dist_inv);
 
@@ -733,7 +802,7 @@ namespace pcl
             int weight_prev;
             unpack_tsdf (*pos, tsdf_prev, weight_prev);
             //v17, 为配合 v17 用 w 二进制末位做标记位, 这里稍作修改: unpack 时 /2, pack 时 *2; @2018-1-22 02:01:27
-            weight_prev = weight_prev >> 1;
+            weight_prev = weight_prev >> VOL1_FLAG_BIT_CNT;
 
             const int Wrk = 1;
 
@@ -741,13 +810,13 @@ namespace pcl
             int weight_new = min (weight_prev + Wrk, Tsdf::MAX_WEIGHT);
 
             if(doDbgPrint){
-                printf("tsdf_prev, tsdf_curr, tsdf_new: %f, %f, %f; wp, wnew: %d, %d\n", tsdf_prev, tsdf, tsdf_new, weight_prev, weight_new);
+                //printf("tsdf_prev, tsdf_curr, tsdf_new: %f, %f, %f; wp, wnew: %d, %d\n", tsdf_prev, tsdf, tsdf_new, weight_prev, weight_new);
             }
 #elif 1 //直接 set volume 为当前 dmap 映射结果
             float tsdf_new = tsdf;
             int weight_new = 1;
 #endif
-            weight_new = weight_new << 1; //省略了+0, v17 的标记位默认值=0
+            weight_new = weight_new << VOL1_FLAG_BIT_CNT; //省略了+0, v17 的标记位默认值=0
             pack_tsdf (tsdf_new, weight_new, *pos);
           }
           else{ //(Dp_scaled == 0 || sdf < -eta)
@@ -759,9 +828,9 @@ namespace pcl
           }
         }
         else{ //NOT (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)
-            if(doDbgPrint){
-                printf("vxlDbg.xyz:= (%d, %d, %d), coo.xy:= (%d, %d)\n", vxlDbg.x, vxlDbg.y, vxlDbg.z, coo.x, coo.y);
-            }
+            //if(doDbgPrint){
+            //    printf("vxlDbg.xyz:= (%d, %d, %d), coo.xy:= (%d, %d)\n", vxlDbg.x, vxlDbg.y, vxlDbg.z, coo.x, coo.y);
+            //}
         }
       }       // for(int z = 0; z < VOLUME_Z; ++z)
     }//__global__ tsdf23_s2s
@@ -770,6 +839,7 @@ namespace pcl
         FUSE_RESET, //i 冲掉 i-1
         FUSE_IGNORE_CURR //忽视 i
         ,FUSE_FIX_PREDICTION //先负后正, 正冲掉负
+        ,FUSE_CLUSTER   //二分类思路
     };
 
     __global__ void
@@ -4516,6 +4586,10 @@ namespace pcl
           //float tranc_dist_real = max(2*cell_size.x, tranc_dist * weiFactor); //截断不许太短, v11.8
           float tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v18.4: 边缘可能 w_factor=0, 
 
+          //↓--v18.20: 放在 sdf >= -tranc_dist_real 之前, @2018-8-13 16:21:48
+          const float W_FACTOR_EDGE_THRESH = 0.99f;
+          bool is_curr_edge = weiFactor < W_FACTOR_EDGE_THRESH;
+
           float3 snorm_curr_g;
           snorm_curr_g.x = nmap_curr_g.ptr(coo.y)[coo.x];
 
@@ -4556,7 +4630,7 @@ namespace pcl
               printf("\ttranc_dist_real, weiFactor: %f, %f\n", tranc_dist_real, weiFactor);
           }
 
-          sdf = sdf_cos;
+          sdf = sdf_cos; //v18.23: 若去掉, 只用 tranc_dist_real, 也不好, 边缘尖锐, 但代价是破碎 @2018-8-23 10:03:48
 
           //↓--v18.17: unpack 挪到外面
           //read and unpack
@@ -4566,7 +4640,20 @@ namespace pcl
           bool prev_always_edge = weight_prev1 % 2; //【DEL v17.1】 //v18.15: 语义变为: 是否一直处于边缘 (初值:=0:=false) @2018-3-28 15:56:33
           weight_prev1 = weight_prev1 >> 1; //去掉末位, 只是为了与 v17 保持一致, 方便测试 【【因为 tsdf23 里 w*2 了
           if(doDbgPrint)
-              printf("prev_always_edge-prev: %d,, tsdf_prev1: %f,, weight_prev1: %d\n", prev_always_edge, tsdf_prev1, weight_prev1);
+              printf("prev_always_edge-prev: %d, is_curr_edge: %d, tsdf_prev1: %f,, weight_prev1: %d\n", prev_always_edge, is_curr_edge, tsdf_prev1, weight_prev1);
+
+          //↓--v18.20: 移到这里了 @2018-8-14 00:01:12
+          if(weight_prev1 <= 1 && is_curr_edge){ //v18.18: 略改, 因懒, 因 global_time =0 时用的 tsdf23 直接 w+1 @2018-4-10 17:27:08
+              prev_always_edge = true;
+          }
+          else if(!is_curr_edge && prev_always_edge){
+              prev_always_edge = false;
+
+              //weight_prev1 = min(weight_prev1, 30); //策略1: w-p 直接降权到 30≈1s; //不好, 若t-p=1, 则 1*30 期望仍很大, 难修正
+              //weight_prev1 = min(weight_prev1, 5);	//v18.21: 直接降权不行, 易受尖峰噪声干扰, 下面改成缓降 @2018-8-17 10:53:36
+              //weight_prev1 = max(5, weight_prev1 / 2); //v18.24: 去掉所有降权, 在 box-small 上, 内部噪声反而大大减小 (仍不完善) @2018-8-23 10:35:13
+
+          }
 
           //if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters
           if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v18.4
@@ -4623,21 +4710,22 @@ namespace pcl
 //                 Wrk = 0;
 //             }
 
-            const float W_FACTOR_EDGE_THRESH = 0.99f;
-            bool is_curr_edge = weiFactor < W_FACTOR_EDGE_THRESH;
+            //const float W_FACTOR_EDGE_THRESH = 0.99f; //v18.20: 移到前面了
+            //bool is_curr_edge = weiFactor < W_FACTOR_EDGE_THRESH;
 
-            if(Wrk != 0){
-                //if(0 == weight_prev1 && is_curr_edge){ //若 w-prev尚未初始化，且 curr 在边缘
-                if(weight_prev1 <= 1 && is_curr_edge){ //v18.18: 略改, 因懒, 因 global_time =0 时用的 tsdf23 直接 w+1 @2018-4-10 17:27:08
-                    prev_always_edge = true;
-                }
-                else if(!is_curr_edge && prev_always_edge){
-                    prev_always_edge = false;
+            //↓--v18.20 移到上面了
+            //if(Wrk != 0){
+            //    //if(0 == weight_prev1 && is_curr_edge){ //若 w-prev尚未初始化，且 curr 在边缘
+            //    if(weight_prev1 <= 1 && is_curr_edge){ //v18.18: 略改, 因懒, 因 global_time =0 时用的 tsdf23 直接 w+1 @2018-4-10 17:27:08
+            //        prev_always_edge = true;
+            //    }
+            //    else if(!is_curr_edge && prev_always_edge){
+            //        prev_always_edge = false;
 
-                    //weight_prev1 = min(weight_prev1, 30); //策略1: w-p 直接降权到 30≈1s; //不好, 若t-p=1, 则 1*30 期望仍很大, 难修正
-                    weight_prev1 = min(weight_prev1, 5);
-                }
-            }
+            //        //weight_prev1 = min(weight_prev1, 30); //策略1: w-p 直接降权到 30≈1s; //不好, 若t-p=1, 则 1*30 期望仍很大, 难修正
+            //        weight_prev1 = min(weight_prev1, 5);
+            //    }
+            //}
 
             float tsdf_new1 = tsdf_prev1;
             int weight_new1 = weight_prev1;
@@ -4673,6 +4761,7 @@ namespace pcl
                                                             //但其后长时间不可见, 则慢慢降权(消亡); 【结果：很好, 优于 v18.11, 但有时候看见一眼未必是噪声, 要改
           else if(Dp_scaled != 0 
               && sdf < -tranc_dist &&  sdf > -4*tranc_dist   //v18.13: 改-2*tdist +v18.8, 排除 v18.12 的问题 //v18.14 改-4*tdist, 并去掉 v18.8, 就用原来 marching cubes
+              //&&  sdf > -4*tranc_dist   //v18.19: else 已隐含 sdf >= -tranc_dist_real @2018-8-13 15:38:07
               && !prev_always_edge  //v18.17: 仅对非边缘执行 "-1 策略", 若总是边缘(如, 细棍子), 则不 -1 @2018-4-8 02:32:39
             )
           {
@@ -4683,11 +4772,13 @@ namespace pcl
               //bool prev_always_edge = weight_prev1 % 2;
               //weight_prev1 = weight_prev1 >> 1; //去掉末位, 
 
-              const int POS_VALID_WEIGHT_TH = 0; //30帧≈一秒
+              const int POS_VALID_WEIGHT_TH = 30; //30帧≈一秒
               if(/*tsdf_prev1 >= 0.999 ||*/ //若 t_p 之前存"远端", 非近表面
                   tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //或, 若 t_p 正值但是尚不稳定
               {
-                  weight_prev1 = max(0, weight_prev1-1);
+                  //weight_prev1 = max(0, weight_prev1-1);
+                  weight_prev1 = max(01, weight_prev1-1); //v18.22
+                  //printf("^^^^^^^^^^^^in else if(Dp_scaled != 0 ------weight_prev1 < POS_VALID_WEIGHT_TH\n"); //若 POS_VALID_WEIGHT_TH置零, 则不会进入此逻辑 @2018-8-13 11:45:51
 
                   if(doDbgPrint){
                       printf("】】tsdf_prev1: %f,, weight_prev1-=1: %d;\n", tsdf_prev1, weight_prev1);
@@ -4703,6 +4794,2543 @@ namespace pcl
         }//if- 0 < (x,y) < (cols,rows)
       }// for(int z = 0; z < VOLUME_Z; ++z)
     }//tsdf23_v18
+
+    //v19: 输出变量到文件, 外部调试
+    //输出: tsdf, sn-p-c(1or3轴?), is/non-edge, diff-c-p(+dp), tdist/real-td
+    //__device__ float tsdf_curr_dev;
+    __device__ float sdf_orig_dev;
+    __device__ float cos_dev;
+    __device__ float sdf_cos_dev;
+    __device__ float tdist_real_dev;
+    __device__ bool snorm_oppo_dev; //opposite
+    __device__ bool is_curr_edge_dev;
+    __device__ bool is_non_edge_near0_dev;
+    __device__ short depth_curr_dev;
+    __device__ short depth_prev_dev;
+    __device__ short diff_cp_dev;
+
+    __global__ void
+    tsdf23_v19 (const PtrStepSz<float> depthScaled, PtrStep<short2> volume1, 
+        PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, const PtrStepSz<unsigned char> incidAngleMask,
+        const PtrStep<float> nmap_curr_g, const PtrStep<float> nmap_model_g,
+        /*↑--实参顺序: volume2nd, flagVolume, surfNormVolume, incidAngleMask, nmap_g,*/
+        const PtrStep<float> weight_map, //v11.4
+        const PtrStepSz<ushort> depthModel,
+        const PtrStepSz<short> diff_dmap, //v12.1
+        const float tranc_dist, const Mat33 Rcurr_inv, const float3 tcurr, const Intr intr, const float3 cell_size
+        , int3 vxlDbg)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x >= VOLUME_X || y >= VOLUME_Y)
+          return;
+
+      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+
+      float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
+
+      float v_x = (Rcurr_inv.data[0].x * v_g_x + Rcurr_inv.data[0].y * v_g_y + Rcurr_inv.data[0].z * v_g_z) * intr.fx;
+      float v_y = (Rcurr_inv.data[1].x * v_g_x + Rcurr_inv.data[1].y * v_g_y + Rcurr_inv.data[1].z * v_g_z) * intr.fy;
+      float v_z = (Rcurr_inv.data[2].x * v_g_x + Rcurr_inv.data[2].y * v_g_y + Rcurr_inv.data[2].z * v_g_z);
+
+      float z_scaled = 0;
+
+      float Rcurr_inv_0_z_scaled = Rcurr_inv.data[0].z * cell_size.z * intr.fx;
+      float Rcurr_inv_1_z_scaled = Rcurr_inv.data[1].z * cell_size.z * intr.fy;
+
+      float tranc_dist_inv = 1.0f / tranc_dist;
+      float pendingFixThresh = cell_size.x * tranc_dist_inv * 3; //v13.4+ 用到: 暂定 3*vox 厚度; //值是相对于 tranc_dist 归一化过的
+
+      short2* pos1 = volume1.ptr (y) + x;
+      int elem_step = volume1.step * VOLUME_Y / sizeof(short2);
+
+      short2* pos2nd = volume2nd.ptr (y) + x;
+
+//#pragma unroll
+      for (int z = 0; z < VOLUME_Z;
+           ++z,
+           v_g_z += cell_size.z,
+           z_scaled += cell_size.z,
+           v_x += Rcurr_inv_0_z_scaled,
+           v_y += Rcurr_inv_1_z_scaled,
+           pos1 += elem_step
+           ,pos2nd += elem_step
+
+           )
+      {
+        bool doDbgPrint = false;
+        if(x > 0 && y > 0 && z > 0 //参数默认 000, 做无效值, 所以增加此检测
+            && vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+            doDbgPrint = true;
+
+        float inv_z = 1.0f / (v_z + Rcurr_inv.data[2].z * z_scaled);
+        if(doDbgPrint)
+            printf("inv_z:= %f\n", inv_z);
+
+        if (inv_z < 0)
+            continue;
+
+        // project to current cam
+        int2 coo =
+        {
+          __float2int_rn (v_x * inv_z + intr.cx),
+          __float2int_rn (v_y * inv_z + intr.cy)
+        };
+
+        if(doDbgPrint)
+            printf("coo.xy:(%d, %d)\n", coo.x, coo.y);
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
+        {
+          float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+
+          float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          if(doDbgPrint){
+              printf("Dp_scaled, sdf, tranc_dist, %f, %f, %f\n", Dp_scaled, sdf, tranc_dist);
+          }
+
+          float weiFactor = weight_map.ptr(coo.y)[coo.x];
+          float tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v18.4: 边缘可能 w_factor=0, 
+
+          //↓--v18.20: 放在 sdf >= -tranc_dist_real 之前, @2018-8-13 16:21:48
+          const float W_FACTOR_EDGE_THRESH = 0.99f;
+          bool is_curr_edge_wide = weiFactor < W_FACTOR_EDGE_THRESH;
+          is_curr_edge_wide = weiFactor < 0.3;//W_FACTOR_EDGE_THRESH;
+          //↑--v19.6.3: 去掉 v19.6.2, 并重新用 0.3, wide 实际边 narrow @2018-9-6 15:56:23
+          //is_curr_edge_wide = weiFactor < 0.1;//W_FACTOR_EDGE_THRESH;
+          //↑--v19.6.9: 改 0.1 @2018-9-9 22:12:29
+          bool is_curr_edge_narrow = weiFactor < 0.3; //v19.2.2: 阈值 0.6~0.8 都不行, 0.3 凑合 @2018-8-25 11:33:56
+
+          float3 snorm_curr_g;
+          snorm_curr_g.x = nmap_curr_g.ptr(coo.y)[coo.x];
+          float3 snorm_prev_g;
+          snorm_prev_g.x = nmap_model_g.ptr(coo.y)[coo.x];
+
+          if(isnan(snorm_curr_g.x) && isnan(snorm_prev_g.x)){
+              if(doDbgPrint)
+                  printf("+++++++++++++++isnan(snorm_curr_g.x) && isnan(snorm_prev_g.x), weiFactor: %f\n", weiFactor);
+
+              //return;    //内循环, 每次都要走遍 z轴, 不该 跳出
+              continue;    //v18.2
+          }
+
+          bool sn_curr_valid = false,
+               sn_prev_valid = false; //如果没有 continue 跳出, 走到下面至少有一个 true
+
+          if(!isnan(snorm_curr_g.x) ){
+              snorm_curr_g.y = nmap_curr_g.ptr(coo.y + depthScaled.rows)[coo.x];
+              snorm_curr_g.z = nmap_curr_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+              sn_curr_valid = true;
+          }
+          else{
+              if(doDbgPrint)
+                  printf("+++++++++++++++isnan(snorm_curr_g.x), weiFactor: %f\n", weiFactor);
+          }
+
+          if(!isnan(snorm_prev_g.x)){
+              snorm_prev_g.y = nmap_model_g.ptr(coo.y + depthScaled.rows)[coo.x];
+              snorm_prev_g.z = nmap_model_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+              sn_prev_valid = true;
+          }
+          else{
+              if(doDbgPrint)
+                  printf("\t+++++isnan(snorm_prev_g.x), weiFactor\n", weiFactor);
+          }
+
+          float3 vray;
+          vray.x = v_g_x;
+          vray.y = v_g_y;
+          vray.z = v_g_z;
+          //float vray_norm = norm(vray);
+          float3 vray_normed = normalized(vray); //单位视线向量
+
+          float cos_vray_norm_curr = -11;
+          if(sn_curr_valid){
+              cos_vray_norm_curr = dot(snorm_curr_g, vray_normed);
+              if(cos_vray_norm_curr > 0){ //当做assert, 要求必须: 夹角>90°, 即法向必须朝向相机这头
+                  //printf("ERROR+++++++++++++++cos_vray_norm > 0");
+
+                  //假设不保证外部已正确预处理：
+                  snorm_curr_g.x *= -1;
+                  snorm_curr_g.y *= -1;
+                  snorm_curr_g.z *= -1;
+
+                  cos_vray_norm_curr *= -1;
+              }
+          }
+
+          float cos_vray_norm_prev = -11; //-11 作为无效标记(有效[-1~+1]); 到这里 c/p 至少有一个有效
+          if(sn_prev_valid){
+              cos_vray_norm_prev = dot(snorm_prev_g, vray_normed);
+              if(cos_vray_norm_prev > 0){ //当做assert, 要求必须: 夹角>90°, 即法向必须朝向相机这头
+                  //printf("ERROR+++++++++++++++cos_vray_norm > 0");
+
+                  //假设不保证外部已正确预处理：
+                  snorm_prev_g.x *= -1;
+                  snorm_prev_g.y *= -1;
+                  snorm_prev_g.z *= -1;
+
+                  cos_vray_norm_prev *= -1;
+              }
+          }
+
+          //v19.1: 以 c/p 较大夹角（较小 abs-cos）为准
+          float cos_abs_min = min(-cos_vray_norm_curr, -cos_vray_norm_prev);
+          float cos_factor = max(COS75, abs(cos_abs_min));
+
+          //float sdf_cos = abs(cos_vray_norm_curr) * sdf;
+          float sdf_cos = cos_factor * sdf; //v18.3: 乘数因子不许小于 COS75
+          //float sdf_cos = max(COS75, min(abs(cos_abs_min), weiFactor) ) * sdf; //v19.5.2 并不好, 不应 @2018-9-3 01:39:02 
+
+          if(doDbgPrint){
+              printf("sn_c, sn_p, vray_normed = [%f, %f, %f], [%f, %f, %f], [%f, %f, %f]\n", 
+                  snorm_curr_g.x, snorm_curr_g.y, snorm_curr_g.z, 
+                  snorm_prev_g.x, snorm_prev_g.y, snorm_prev_g.z, vray_normed.x, vray_normed.y, vray_normed.z);
+              printf("sdf-orig: %f,, cos_vray_norm_curr: %f,, sdf_cos: %f\n", sdf, cos_abs_min, sdf_cos);
+              printf("\ttranc_dist_real, weiFactor: %f, %f\n", tranc_dist_real, weiFactor);
+          }
+
+          float tsdf_prev1;
+          int weight_prev1;
+          unpack_tsdf (*pos1, tsdf_prev1, weight_prev1);
+          //↓-原 prev_always_edge  //v19.1: 语义变为: 非边缘区域(即使)标记, 当 "大入射角全反射/突变/curr边缘"时, 加锁保护, 避免噪声导致碎片 @2018-8-23 11:12:35
+          //bool non_edge_near0 = weight_prev1 % 2;
+
+          //v19.8.1: 改使用 NON_EDGE_TH 检测 “稳定” 的non-edge-area, 暂用 3bits @2018-9-11 13:13:55
+          int non_edge_ccnt = weight_prev1 % VOL1_FLAG_TH;
+          bool non_edge_near0 = (non_edge_ccnt + 1 == VOL1_FLAG_TH);
+          weight_prev1 = weight_prev1 >> VOL1_FLAG_BIT_CNT;
+          if(doDbgPrint){
+              printf("non_edge_ccnt: %d, NON_EDGE_TH: %d\n", non_edge_ccnt, VOL1_FLAG_TH);
+              printf("non_edge_near0: %d, is_curr_edge: %d, tsdf_prev1: %f,, weight_prev1: %d\n", non_edge_near0, is_curr_edge_wide, tsdf_prev1, weight_prev1);
+          }
+
+          const float shrink_dist_th = 0.02; //20mm
+
+#define TSDF_ORIG 0
+#if !TSDF_ORIG
+          //sdf = sdf_cos; //v18~19.5
+
+          //↓--v19.6.1 sdf & tdist 都根据是否边缘调整 @2018-9-6 01:47:59
+          if(!non_edge_near0){ //必然一直是 edge //改了: 语义为: non_edge_ccnt 未达到 NON_EDGE_TH
+              if(doDbgPrint)
+                  printf("if(!non_edge_near0)\n");
+
+              //v19.8.1: 
+              //if(!is_curr_edge_wide && abs(sdf) < 4 * tranc_dist)
+              if(!is_curr_edge_wide && abs(sdf) < shrink_dist_th)
+                  non_edge_ccnt = min(7, non_edge_ccnt + 1);
+              else
+                  non_edge_ccnt = max(0, non_edge_ccnt - 1);
+
+              if(doDbgPrint)
+                  printf("\tAFTER-non_edge_ccnt: %d\n", non_edge_ccnt);
+
+              //边缘上： 希望既用小 tdist 避免棱边膨大, 又不会bias导致腐蚀
+              sdf = sdf_cos;
+              tranc_dist_real = tranc_dist * cos_factor;
+              //tranc_dist_real = tranc_dist; //v19.6.5 对比上面, 不好 @2018-9-8 01:23:46
+          }
+          else{ //non_edge_near0, 确认非contour
+//               if(-tranc_dist * 1.2 < sdf && sdf < -tranc_dist){  【错，放弃】 @2018-9-17 11:17:59
+//                   if(doDbgPrint)
+//                       printf("")
+//                   continue;
+//               }
+              //if(0 == weight_prev1 && sdf > tranc_dist * 1.2){ //v19.8.9: non-edge & wp==0 说明之前是背面 -td~-shrink_dist_th 区域, 现在 sdf>某th, 则不要 fuse @2018-9-18 17:49:31
+              if(0 == weight_prev1 && sdf > +shrink_dist_th){ //v19.8.10: 背面法向误判可解决, 其他问题无解 @2018-9-18 17:51:32
+                  if(doDbgPrint)
+                      printf("non-edge, p<-td, c>td*factor, DONT fuse\n");
+
+                  continue;
+              }
+
+              if(is_curr_edge_wide){ //但当前是edge
+                  tranc_dist_real = tranc_dist * cos_factor;
+                  //tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v19.6.2: 尝试更小的 //没大区别
+              }
+              else{//且当前在内部
+                  if(sdf < 0) //v19.6.4, good @2018-9-8 19:39:56
+                  //v19.7.4 试试去掉上面↑ 19.6.4, 变厚, 19.7.3 的破碎解决, 凹凸噪点未解决 @2018-9-10 07:01:21
+                      sdf = sdf_cos;
+                  tranc_dist_real = tranc_dist;
+              }
+          }
+
+          if(doDbgPrint)
+              printf("AFTER-sdf: %f, tranc_dist_real: %f; sdf>-td: %s\n", sdf, tranc_dist_real, sdf > -tranc_dist_real ? "sdfTTT": "sdfFFF");
+
+#endif
+
+          //v19.3: 尝试二类,单维度,聚类(类比混合高斯) binary-gmm
+          float tsdf_prev2nd = -123;
+          int weight_prev2nd = -233;
+          unpack_tsdf (*pos2nd, tsdf_prev2nd, weight_prev2nd);
+
+          //weight_prev2nd = weight_prev2nd >> VOL1_FLAG_BIT_CNT;
+          const float min_thickness = max(0.003, cell_size.x*1.11); //薄壁最小可表征厚度>=3mm,
+          float tsdf_mut_thresh = min_thickness * tranc_dist_inv; //mutation-threshold, 归一化的突变阈值, 
+
+          //if(!is_curr_edge_wide && abs(sdf) < 4 * tranc_dist){ //or tranc_dist_real?
+          //    non_edge_near0 = true;
+          //}
+          //↑--v19.8.1 注释掉
+
+          float tsdf_new1 = tsdf_prev1; //放在 if之前
+          int weight_new1 = weight_prev1;
+          if(doDbgPrint){
+              printf("【【tsdf_prev1: %f,, weight_prev1: %d;\n", tsdf_prev1, weight_prev1);
+              printf("\t【【tsdf_prev2nd: %f,, weight_prev2nd: %d;\n", tsdf_prev2nd, weight_prev2nd);
+
+              if(01){ //输出到外部文件, 调试 @2018-8-30 09:54:53
+                  //输出: sdf(not tsdf), tdist/real-td, sn-p-c(1or3轴?), is/non-edge, diff-c-p(+dp),
+                  //tsdf_curr_dev = fmin (1.0f, sdf * tranc_dist_inv);
+                  sdf_orig_dev = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+                  cos_dev = max(COS75, abs(cos_abs_min));
+                  //sdf_cos_dev = sdf;
+                  sdf_cos_dev = sdf_orig_dev * cos_dev; //改, 上面不对
+                  tdist_real_dev = tranc_dist_real;
+
+                  depth_curr_dev = Dp_scaled * 1e3; //需要 float(m)->short(mm)
+                  depth_prev_dev = depthModel.ptr(coo.y)[coo.x];
+                  diff_cp_dev = diff_dmap.ptr(coo.y)[coo.x];
+
+                  is_curr_edge_dev = is_curr_edge_wide;
+                  is_non_edge_near0_dev = non_edge_near0;
+                  { //sn_oppo
+                  int which_axis_larger = -1; //snorm_curr_g.x > snorm_curr_g.y ? 0 : (snorm_curr_g.y > snorm_curr_g.z ? 1 : 2);
+                  float sn_curr_dir = 0.f;
+
+                  float absnx = abs(snorm_curr_g.x),
+                      absny = abs(snorm_curr_g.y),
+                      absnz = abs(snorm_curr_g.z);
+                  if(absnx > absny){
+                      which_axis_larger = absnx > absnz ? 0 : 2;
+                      sn_curr_dir = absnx > absnz ? snorm_curr_g.x : snorm_curr_g.z;
+                  }
+                  else{ //x<=y
+                      which_axis_larger = absny > absnz ? 1 : 2;
+                      sn_curr_dir = absny > absnz ? snorm_curr_g.y : snorm_curr_g.z;
+                  }
+
+                  float sn_prev_dir = 0.f;
+
+                  float Fn, Fp;
+                  int Wn = 0, Wp = 0;
+                  switch(which_axis_larger){
+                  case 2:
+                      //unpack_tsdf(*(pos1 + volume1.step/sizeof(short2)), Fn, Wn);
+                      unpack_tsdf (*(pos1 + elem_step), Fn, Wn);
+                      unpack_tsdf (*(pos1 - elem_step), Fp, Wp); //二邻域都取出, 以防临界情况时, 某邻域未初始化; @2018-8-27 17:20:53
+                      //走到这里不存在二邻域均未初始化情形
+                      break;
+
+                  case 1:
+                      unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                      unpack_tsdf (*(pos1 - volume1.step/sizeof(short2) ), Fp, Wp);
+                      break;
+
+                  case 0:
+                      unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                      unpack_tsdf (*(pos1 - 1), Fp, Wp);
+                      break;
+                  }
+                  float tsdf_curr = fmin (1.0f, sdf * tranc_dist_inv);
+                  if(Wn == 0) Fn = tsdf_curr;
+                  if(Wp == 0) Fp = tsdf_curr; //避免无效vox
+
+                  sn_prev_dir = Fn - Fp; //确实是 n-p, 与表面前正后负一致
+
+                  snorm_oppo_dev = sn_curr_dir * sn_prev_dir < 0 ? true : false;
+                  }
+              }
+          }//if-(doDbgPrint)
+
+#if TSDF_ORIG
+          if (Dp_scaled != 0 && sdf >= -tranc_dist) //meters //v18.4
+          {
+            float tsdf_curr = fmin (1.0f, sdf * tranc_dist_inv);
+            int Wrk = 1;
+            tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+            weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+          }
+          else if(Dp_scaled != 0 && non_edge_near0 && !is_curr_edge_wide
+              //&& sdf > -4*tranc_dist_real
+              && sdf > -4*tranc_dist    //good
+              )
+          {
+              //要不要 if-- tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH 条件？待定 @2018-8-24 01:08:46
+              //v19.2: 要, 
+              const int POS_VALID_WEIGHT_TH = 30; //30帧≈一秒
+              if(tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //或, 若 t_p 正值但是尚不稳定
+              {
+                  weight_new1 = max(0, weight_new1-1); //v18.22
+                  if(weight_new1 == 0)
+                      tsdf_new1 = 0; //严谨点, 避免调试绘制、marching cubes意外
+
+                  if(doDbgPrint)
+                      printf("】】tsdf_new1: %f,, weight_new1-=1: %d;\n", tsdf_new1, weight_new1);
+              }
+
+          }//elif-(-4*td < sdf < -td)
+
+#elif 1
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist) //v19.5.3 棱边膨大严重, 不可取 @2018-9-4 19:26:57
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v18.4
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist * cos_factor) //meters //v19.5.4 棱边膨大 @2018-9-6 00:21:27
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist * (non_edge_near0 ? 1 : cos_factor)) //meters //v19.5.5 @2018-9-6 00:21:27
+          if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v19.6
+          {
+            float tsdf_curr = fmin (1.0f, sdf * tranc_dist_inv);
+            int Wrk = 1;
+            short diff_c_p = diff_dmap.ptr(coo.y)[coo.x]; //mm, curr-prev, +正值为当前更深
+            ushort depth_prev = depthModel.ptr(coo.y)[coo.x];
+
+            const int diff_c_p_thresh = 20; //20mm
+            if(doDbgPrint){
+                printf("【【tsdf_curr: %f,, Wrk: %d; \n", tsdf_curr, Wrk);
+                printf("depth_prev: %u; diff_c_p: %d\n", depth_prev, diff_c_p);
+            }
+
+            if(non_edge_near0 && is_curr_edge_wide  //v19.2.1: edge_wide加上深度突变判定, 首先要 model 上 px 有效（已初始化）
+                && depth_prev > 0
+                && diff_c_p > diff_c_p_thresh
+            //if(non_edge_near0 && is_curr_edge_narrow  //v19.2.2: 较难稳定融合临近边缘区域, 暂定经验阈值: 【0.3, 60】 @2018-8-24 17:18:56
+            //    && weight_prev1 < 60
+                )
+            {
+                if(doDbgPrint)
+                    printf("P-non-edge & C-edge & d_prev+ & diff_cp > TH\n");
+
+                Wrk = 0;
+            }
+
+            //v19.3
+            const int weight_confid_th = 60;
+            //if(
+            //    //weight_prev1 > weight_confid_th
+            //    tsdf_prev1 + tsdf_curr < 0
+            //    //↑--v19.5: 放弃 weight_confid_th 判定, 改为: tp+tc<0 (理论上反面观测一定和为负,除非抖动)
+            //    //&& abs(tsdf_curr - tsdf_prev1) > tsdf_mut_thresh
+            //    //↑--v19.4: ① 放弃此 tsdf突变 thresh 判定, ② 放弃下面交换 pos1/pos2 方案, ①②都太武断; ③使用 norm 顺/逆(prev用F梯度/c用nmap)判定 @2018-8-27 16:17:18
+            //    && non_edge_near0 && !is_curr_edge_wide //已累积足够可信, 且prev是内部, 且curr也非边缘
+            //    )
+
+            //↓--v19.7.1: 主要修复超薄穿透问题, 沿视线检测过零点-p>>+c @2018-9-9 19:18:37
+            if(non_edge_near0 && !is_curr_edge_wide) //prev是内部, 且curr也非边缘
+            {
+                if(doDbgPrint){
+                    printf("】】】】 non_edge_near0 && !is_curr_edge_wide; tsdf_curr: %f\n", tsdf_curr);
+                    printf("\tw2nd: %d\n", weight_prev2nd);
+                }
+
+                //Wrk = min(int(abs(tsdf_prev1) / (abs(tsdf_curr)+0.01)), 10); //v19.3.1: 上限 5、10都不行, 放弃 @2018-8-26 00:48:15
+#if 0   //尝试为了效率, norm顺逆仅判定单轴, 而非俩norm三轴内积 @2018-8-27 16:21:05
+                int which_axis_larger = -1; //snorm_curr_g.x > snorm_curr_g.y ? 0 : (snorm_curr_g.y > snorm_curr_g.z ? 1 : 2);
+                float sn_curr_dir = 0.f;
+
+                float absnx = abs(snorm_curr_g.x),
+                    absny = abs(snorm_curr_g.y),
+                    absnz = abs(snorm_curr_g.z);
+                if(absnx > absny){
+                    which_axis_larger = absnx > absnz ? 0 : 2;
+                    sn_curr_dir = absnx > absnz ? snorm_curr_g.x : snorm_curr_g.z;
+                }
+                else{ //x<=y
+                    which_axis_larger = absny > absnz ? 1 : 2;
+                    sn_curr_dir = absny > absnz ? snorm_curr_g.y : snorm_curr_g.z;
+                }
+
+                float sn_prev_dir = 0.f;
+
+                float Fn, Fp;
+                int Wn = 0, Wp = 0;
+                switch(which_axis_larger){
+                case 2:
+                    //unpack_tsdf(*(pos1 + volume1.step/sizeof(short2)), Fn, Wn);
+                    unpack_tsdf (*(pos1 + elem_step), Fn, Wn);
+                    unpack_tsdf (*(pos1 - elem_step), Fp, Wp); //二邻域都取出, 以防临界情况时, 某邻域未初始化; @2018-8-27 17:20:53
+                                                                 //走到这里不存在二邻域均未初始化情形
+                    break;
+
+                case 1:
+                    unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                    unpack_tsdf (*(pos1 - volume1.step/sizeof(short2) ), Fp, Wp);
+                    break;
+
+                case 0:
+                    unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                    unpack_tsdf (*(pos1 - 1), Fp, Wp);
+                    break;
+                }
+                if(0 == (Wn >> 1)) //v19.6.6: 若邻域无效, 则用 t-curr, 排除无效邻域 @2018-9-9 20:07:49
+                    Fn = tsdf_curr;
+                else if(0 == (Wp >> 1))
+                    Fp = tsdf_curr;
+
+                sn_prev_dir = Fn - Fp; //确实是 n-p, 与表面前正后负一致
+
+                if(doDbgPrint)
+                    printf("\t【【sn_curr_dir, sn_prev_dir: %f, %f; prod:= %f\n", sn_curr_dir, sn_prev_dir, sn_curr_dir * sn_prev_dir);
+
+                if(sn_curr_dir * sn_prev_dir < 0){ //单轴顺逆判定
+
+#elif 1 //v19.7.5: 改用三轴判定顺逆, 单轴不稳定
+                //↓--from @tsdf23normal_hack
+                const float qnan = numeric_limits<float>::quiet_NaN();
+                float3 vox_normal = make_float3(qnan, qnan, qnan); //隐函数梯度做法向
+
+                float Fn, Fp;
+                int Wn = 0, Wp = 0;
+                unpack_tsdf (*(pos1 + elem_step), Fn, Wn);
+                unpack_tsdf (*(pos1 - elem_step), Fp, Wp);
+
+                const int W_NBR_TH = 4;
+                if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                    vox_normal.z = (Fn - Fp)/cell_size.z;
+
+                unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                unpack_tsdf (*(pos1 - volume1.step/sizeof(short2) ), Fp, Wp);
+
+                if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                    vox_normal.y = (Fn - Fp)/cell_size.y;
+
+                unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                unpack_tsdf (*(pos1 - 1), Fp, Wp);
+
+                if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                    vox_normal.x = (Fn - Fp)/cell_size.x;
+
+                if(doDbgPrint){ //一般值如: (55.717842, 82.059792, 71.134979), 
+                    printf("vox_normal.xyz: %f, %f, %f\n", vox_normal.x, vox_normal.y, vox_normal.z);
+                    //printf("vnx==qnan: %d\n", vox_normal.x == qnan);
+                }
+
+                bool setup_cluster2 = false; //背面观测标志位 
+                float cluster_margin_th = 0.8; //v19.8.8: 二类判定阈值之一 @2018-9-16 00:40:13
+
+                if(sdf < tranc_dist_real){ //v19.7.6: 增加 sdf < td 判定 //移到最外面, 因 19.8.4 也用 @2018-9-12 18:36:55
+                    //if (vox_normal.x != qnan && vox_normal.y != qnan && vox_normal.z != qnan){ //错 qnan 不能用 != 比较
+                    if (!isnan(vox_normal.x) && !isnan(vox_normal.y) && !isnan(vox_normal.z)){
+                        if(doDbgPrint)
+                            printf("vox_normal VALID\n");
+
+                        float vox_norm2 = dot(vox_normal, vox_normal);
+                        if (vox_norm2 >= 1e-10)
+                        {
+                            vox_normal *= rsqrt(vox_norm2); //归一化
+
+                            float cos_sn_c_p = dot(snorm_curr_g, vox_normal);
+                            if(doDbgPrint)
+                                printf("\tcos_sn_c_p: %f\n", cos_sn_c_p);
+
+                            //if(cos_sn_c_p < COS120){
+                            //if(cos_sn_c_p < COS120 && sdf < tranc_dist_real){ //v19.7.6: 增加 sdf < td 判定
+                            //if(abs(tsdf_prev1 - tsdf_curr) - cos_sn_c_p > 1 && sdf < tranc_dist_real){ //19.8.7: 若 ①|tp-tc|越大 ②cos越负, 则越可能 setup-2nd @2018-9-15 13:05:01
+                            if(sdf < tranc_dist_real  //19.8.8: @2018-9-15 23:37:55
+                                && (abs(tsdf_prev1 - tsdf_curr) > cluster_margin_th || cos_sn_c_p < COS120) 
+                                )
+                            {
+                                if(doDbgPrint)
+                                    printf("setup_cluster2, cos_sn_c_p, %f\n", cos_sn_c_p);
+                                setup_cluster2 = true; //否则默认 false: 当 ① vox_n 不够稳定 (各邻域 W<16), 或② vox_norm2 太小, 或③夹角小于 COS120
+                            }
+                        }
+                    }
+                    //↓--v19.8.4 很差, 因未考虑初始时刻, 所有 vox w都很小 @2018-9-12 18:33:50
+                    else{ //说明 vox 及其邻域在观测"边缘" 很少被扫到, 尚未稳定
+                        if(doDbgPrint)
+                            printf("vox_normal has qnan\n");
+
+                        //if(abs(tsdf_prev1 - tsdf_curr) > 0.5){
+                        if(abs(tsdf_prev1 - tsdf_curr) > cluster_margin_th){
+                             if(doDbgPrint)
+                                 printf("setup_cluster2, |tp-tc|>: %f, tp: %f, tc: %f\n", abs(tsdf_prev1 - tsdf_curr), tsdf_prev1, tsdf_curr);
+                             setup_cluster2 = true;
+                         }
+
+                    }
+                }
+                else{
+                    if(doDbgPrint)
+                        printf("NOT if(sdf < tranc_dist_real)\n");
+                }
+
+                if(setup_cluster2){
+                //if(setup_cluster2 || 0 != weight_prev2nd){ //逻辑错, 非常差 @2018-9-17 10:50:10
+#endif
+                    if(doDbgPrint)
+                        printf("weight_prev2nd %s 0\n", 0 == weight_prev2nd ? "====" : ">>>>");
+
+                    if(0 == weight_prev2nd){ //vol-2nd 尚未初始化
+
+                        pack_tsdf (tsdf_curr, Wrk, *pos2nd);
+                    }
+                    else{ //wp2nd > 0; 若 vol-2nd 已初始化
+                        //二类聚类
+                        //float tsdf_1_2_mid = (tsdf_prev1 + tsdf_prev2nd) * 0.5;
+
+                        //↓--v19.3.2: 假设两个高斯 sigma 一样宽, 不考虑已累积权重
+                        float tsdf_new_tmp;
+                        int weight_new_tmp;
+                        if(abs(tsdf_curr - tsdf_prev1) < abs(tsdf_curr - tsdf_prev2nd)){
+                            if(doDbgPrint)
+                                printf("\t<<<tcurr~~~tp1\n");
+
+                            tsdf_new_tmp = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                            weight_new_tmp = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                            //pack 前, 最后 w_new 要加上标记位:    //放在 if之后
+                            //weight_new_tmp = (weight_new1 << 1) + non_edge_near0;
+                            weight_new_tmp = (weight_new_tmp << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1; 【注: 且之前误用变量 weight_new1
+                            pack_tsdf (tsdf_new_tmp, weight_new_tmp, *pos1);
+                        }
+                        else{ //if-tc near tp2nd 
+                            if(doDbgPrint)
+                                printf("\t<<<tcurr~~~tp2nd\n");
+
+                            tsdf_new_tmp = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                            weight_new_tmp = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+
+                            if(doDbgPrint)
+                                printf("\twnew2nd: %d; weight_confid_th: %d\n", weight_new_tmp, weight_confid_th);
+
+                            //v19.3.2: 只要 w2>th 就交换 pos1, pos2nd 存储值
+                            //|--即使结合 v19.3.3 仍不稳定, 【放弃】。 效果见: https://i.stack.imgur.com/1dd18.png @2018-8-27 00:54:48
+                            //if(weight_new_tmp > weight_confid_th){
+
+                            //v19.5.1: 尝试 w2>w1 就交换 @2018-8-28 10:36:40
+                            //if(weight_new_tmp > weight_prev1){
+
+                            //19.6.8: w1 & w2 >th, 且仅当 abs-F2 小才交换 @2018-9-9 21:52:50
+                            if(weight_new_tmp > weight_prev1 && abs(tsdf_new_tmp) < abs(tsdf_prev1) ){
+                                if(doDbgPrint)
+                                    printf("【【【【【Exchanging... w2>w1 and |t2|<|t1|\n");
+
+                                pack_tsdf (tsdf_prev1, weight_prev1, *pos2nd); //(t1,w1)=>pos2
+
+                                weight_new_tmp = (weight_new_tmp << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                                pack_tsdf (tsdf_new_tmp, weight_new_tmp, *pos1); //(tnew, wnew)=>pos1
+                            }
+                            else{
+                                pack_tsdf (tsdf_new_tmp, weight_new_tmp, *pos2nd); //v19.6.7: 忘了pack-pos2, 补上, 结合 19.5.1, 变坏了 @2018-9-9 21:45:41
+                            }
+                        }//if-tc near tp2nd 
+                    }//if-wp2nd > 0
+
+                    continue; //结束本次循环, 下面不执行
+                }//if-(setup_cluster2)
+                else{ //否则, 若同侧视角
+                    if(doDbgPrint)
+                        //printf("】】sn_curr_dir * sn_prev_dir >= 0\n");
+                        printf("NOT setup_cluster2\n");
+
+                    //v19.7.1: 若法线负方向, 邻域-p>>+c, 则跳过, 不融合
+                    //v19.7.3: 难兼顾对抗噪声, 注掉 @2018-9-10 02:21:07
+                    if(tsdf_curr > 0 && tsdf_prev1 < 0){ //-p>>+c
+                        //int snorm_x_sgn = snorm_curr_g.x > 0 ? 1 : -1,
+                        //    snorm_y_sgn = snorm_curr_g.y > 0 ? 1 : -1,
+                        //    snorm_z_sgn = snorm_curr_g.z > 0 ? 1 : -1;
+                        int snorm_x_sgn_neg = snorm_curr_g.x > 0 ? -1 : +1,
+                            snorm_y_sgn_neg = snorm_curr_g.y > 0 ? -1 : +1,
+                            snorm_z_sgn_neg = snorm_curr_g.z > 0 ? -1 : +1;
+
+                        //                     unpack_tsdf (*(pos1 + elem_step), Fn, Wn); //仅参考下
+                        //                     unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                        //                     unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                        short2* pos1_nbr_forward = pos1 
+                            + snorm_z_sgn_neg * elem_step 
+                            + snorm_y_sgn_neg * volume1.step/sizeof(short2) 
+                            + snorm_x_sgn_neg * 1;
+
+                        float F_nbr;
+                        int W_nbr = 0;
+                        unpack_tsdf(*(pos1_nbr_forward), F_nbr, W_nbr);
+                        if(F_nbr > 0)
+                            continue; //不融合
+                    }//-p>>+c
+                }//else if-not setup_cluster2
+            }//if-(P & C non-edge)
+            tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+            weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+            //v19.3.3: 若上面没 continue 跳出, 这里对 2nd 衰减 @2018-8-27 00:32:26
+            //v19.7.2: 既然已有二类, 不要衰减, @2018-9-10 01:35:12
+            //if(weight_prev2nd > 0){
+            if(weight_prev2nd > 0 && weight_prev2nd < weight_confid_th){ //v19.8.6: 若 w2 不稳定时才衰减 @2018-9-14 22:37:38
+                /*printf()*/
+                float tsdf_new2nd = tsdf_prev2nd;
+                int wnew2nd = max(weight_prev2nd - Wrk, 0);
+                if(0 == wnew2nd){
+                    tsdf_new2nd = 0;
+
+                    if(doDbgPrint)
+                        printf("################RESET vox2nd\n");
+                }
+
+                pack_tsdf (tsdf_new2nd, wnew2nd, *pos2nd);
+            }
+
+            if(doDbgPrint){
+                printf("【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+            }
+
+          }//if-(Dp_scaled != 0 && sdf >= -tranc_dist) 
+          //else if(Dp_scaled != 0 && non_edge_near0 && !is_curr_edge_wide
+          //else if(Dp_scaled != 0 && non_edge_ccnt > 0 && !is_curr_edge_wide //v19.8.2
+          else if(Dp_scaled != 0 && !is_curr_edge_wide //v19.8.3
+              //&& sdf > -4*tranc_dist_real
+              //&& sdf > -4*tranc_dist    //good
+              && sdf > -shrink_dist_th   //good
+            )
+          {
+              //要不要 if-- tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH 条件？待定 @2018-8-24 01:08:46
+              //v19.2: 要, 
+              const int POS_VALID_WEIGHT_TH = 30; //30帧≈一秒
+              if(tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //或, 若 t_p 正值但是尚不稳定
+              //if(weight_prev1 < POS_VALID_WEIGHT_TH) //v19.8.5: 去掉 tp+ 判定， +-一律衰减 @2018-9-12 20:00:24
+              {
+                  weight_new1 = max(0, weight_new1-1); //v18.22
+                  if(weight_new1 == 0)
+                      tsdf_new1 = 0; //严谨点, 避免调试绘制、marching cubes意外
+
+                  if(doDbgPrint)
+                      printf("】】tsdf_new1: %f,, W1-UNSTABLE SHRINK, weight_new1-=1: %d;\n", tsdf_new1, weight_new1);
+              }
+
+          }//elif-(-4*td < sdf < -td)
+#endif  //切换 tsdf-orig & v19
+
+          //pack 前, 最后 w_new 要加上标记位:    //放在 if之后
+          //weight_new1 = (weight_new1 << 1) + non_edge_near0;
+          weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+          pack_tsdf (tsdf_new1, weight_new1, *pos1);
+
+        }//if- 0 < (x,y) < (cols,rows)
+      }// for(int z = 0; z < VOLUME_Z; ++z)
+    }//tsdf23_v19
+
+    __global__ void
+    tsdf23_v20 (const PtrStepSz<float> depthScaled, PtrStep<short2> volume1, 
+        PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, const PtrStepSz<unsigned char> incidAngleMask,
+        const PtrStep<float> nmap_curr_g, const PtrStep<float> nmap_model_g,
+        /*↑--实参顺序: volume2nd, flagVolume, surfNormVolume, incidAngleMask, nmap_g,*/
+        const PtrStep<float> weight_map, //v11.4
+        const PtrStepSz<ushort> depthModel,
+        const PtrStepSz<short> diff_dmap, //v12.1
+        const float tranc_dist, const Mat33 Rcurr_inv, const float3 tcurr, const Intr intr, const float3 cell_size
+        , int3 vxlDbg)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x >= VOLUME_X || y >= VOLUME_Y)
+          return;
+
+      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+
+      float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
+
+      float v_x = (Rcurr_inv.data[0].x * v_g_x + Rcurr_inv.data[0].y * v_g_y + Rcurr_inv.data[0].z * v_g_z) * intr.fx;
+      float v_y = (Rcurr_inv.data[1].x * v_g_x + Rcurr_inv.data[1].y * v_g_y + Rcurr_inv.data[1].z * v_g_z) * intr.fy;
+      float v_z = (Rcurr_inv.data[2].x * v_g_x + Rcurr_inv.data[2].y * v_g_y + Rcurr_inv.data[2].z * v_g_z);
+
+      float z_scaled = 0;
+
+      float Rcurr_inv_0_z_scaled = Rcurr_inv.data[0].z * cell_size.z * intr.fx;
+      float Rcurr_inv_1_z_scaled = Rcurr_inv.data[1].z * cell_size.z * intr.fy;
+
+      float tranc_dist_inv = 1.0f / tranc_dist;
+      float pendingFixThresh = cell_size.x * tranc_dist_inv * 3; //v13.4+ 用到: 暂定 3*vox 厚度; //值是相对于 tranc_dist 归一化过的
+
+      short2* pos1 = volume1.ptr (y) + x;
+      int elem_step = volume1.step * VOLUME_Y / sizeof(short2);
+
+      short2* pos2nd = volume2nd.ptr (y) + x;
+
+//#pragma unroll
+      for (int z = 0; z < VOLUME_Z;
+           ++z,
+           v_g_z += cell_size.z,
+           z_scaled += cell_size.z,
+           v_x += Rcurr_inv_0_z_scaled,
+           v_y += Rcurr_inv_1_z_scaled,
+           pos1 += elem_step
+           ,pos2nd += elem_step
+
+           )
+      {
+        bool doDbgPrint = false;
+        if(x > 0 && y > 0 && z > 0 //参数默认 000, 做无效值, 所以增加此检测
+            && vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+            doDbgPrint = true;
+
+        float inv_z = 1.0f / (v_z + Rcurr_inv.data[2].z * z_scaled);
+        if(doDbgPrint)
+            printf("inv_z:= %f\n", inv_z);
+
+        if (inv_z < 0)
+            continue;
+
+        // project to current cam
+        int2 coo =
+        {
+          __float2int_rn (v_x * inv_z + intr.cx),
+          __float2int_rn (v_y * inv_z + intr.cy)
+        };
+
+        if(doDbgPrint)
+            printf("coo.xy:(%d, %d)\n", coo.x, coo.y);
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
+        {
+          float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+
+          float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          if(doDbgPrint){
+              printf("Dp_scaled, sdf, tranc_dist, %f, %f, %f\n", Dp_scaled, sdf, tranc_dist);
+          }
+
+          float weiFactor = weight_map.ptr(coo.y)[coo.x];
+          float tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v18.4: 边缘可能 w_factor=0, 
+
+          //↓--v18.20: 放在 sdf >= -tranc_dist_real 之前, @2018-8-13 16:21:48
+          const float W_FACTOR_EDGE_THRESH = 0.99f;
+          bool is_curr_edge_wide = weiFactor < W_FACTOR_EDGE_THRESH;
+          is_curr_edge_wide = weiFactor < 0.3;//W_FACTOR_EDGE_THRESH;
+          //↑--v19.6.3: 去掉 v19.6.2, 并重新用 0.3, wide 实际边 narrow @2018-9-6 15:56:23
+          //is_curr_edge_wide = weiFactor < 0.1;//W_FACTOR_EDGE_THRESH;
+          //↑--v19.6.9: 改 0.1 @2018-9-9 22:12:29
+          bool is_curr_edge_narrow = weiFactor < 0.3; //v19.2.2: 阈值 0.6~0.8 都不行, 0.3 凑合 @2018-8-25 11:33:56
+
+          float3 snorm_curr_g;
+          snorm_curr_g.x = nmap_curr_g.ptr(coo.y)[coo.x];
+          float3 snorm_prev_g;
+          snorm_prev_g.x = nmap_model_g.ptr(coo.y)[coo.x];
+
+          if(isnan(snorm_curr_g.x) && isnan(snorm_prev_g.x)){
+              if(doDbgPrint)
+                  printf("+++++++++++++++isnan(snorm_curr_g.x) && isnan(snorm_prev_g.x), weiFactor: %f\n", weiFactor);
+
+              //return;    //内循环, 每次都要走遍 z轴, 不该 跳出
+              continue;    //v18.2
+          }
+
+          bool sn_curr_valid = false,
+               sn_prev_valid = false; //如果没有 continue 跳出, 走到下面至少有一个 true
+
+          if(!isnan(snorm_curr_g.x) ){
+              snorm_curr_g.y = nmap_curr_g.ptr(coo.y + depthScaled.rows)[coo.x];
+              snorm_curr_g.z = nmap_curr_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+              sn_curr_valid = true;
+          }
+          else{
+              if(doDbgPrint)
+                  printf("+++++++++++++++isnan(snorm_curr_g.x), weiFactor: %f\n", weiFactor);
+          }
+
+          if(!isnan(snorm_prev_g.x)){
+              snorm_prev_g.y = nmap_model_g.ptr(coo.y + depthScaled.rows)[coo.x];
+              snorm_prev_g.z = nmap_model_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+              sn_prev_valid = true;
+          }
+          else{
+              if(doDbgPrint)
+                  printf("\t+++++isnan(snorm_prev_g.x), weiFactor\n", weiFactor);
+          }
+
+          float3 vray;
+          vray.x = v_g_x;
+          vray.y = v_g_y;
+          vray.z = v_g_z;
+          //float vray_norm = norm(vray);
+          float3 vray_normed = normalized(vray); //单位视线向量
+
+          float cos_vray_norm_curr = -11;
+          if(sn_curr_valid){
+              cos_vray_norm_curr = dot(snorm_curr_g, vray_normed);
+              if(cos_vray_norm_curr > 0){ //当做assert, 要求必须: 夹角>90°, 即法向必须朝向相机这头
+                  //printf("ERROR+++++++++++++++cos_vray_norm > 0");
+
+                  //假设不保证外部已正确预处理：
+                  snorm_curr_g.x *= -1;
+                  snorm_curr_g.y *= -1;
+                  snorm_curr_g.z *= -1;
+
+                  cos_vray_norm_curr *= -1;
+              }
+          }
+
+          float cos_vray_norm_prev = -11; //-11 作为无效标记(有效[-1~+1]); 到这里 c/p 至少有一个有效
+          if(sn_prev_valid){
+              cos_vray_norm_prev = dot(snorm_prev_g, vray_normed);
+              if(cos_vray_norm_prev > 0){ //当做assert, 要求必须: 夹角>90°, 即法向必须朝向相机这头
+                  //printf("ERROR+++++++++++++++cos_vray_norm > 0");
+
+                  //假设不保证外部已正确预处理：
+                  snorm_prev_g.x *= -1;
+                  snorm_prev_g.y *= -1;
+                  snorm_prev_g.z *= -1;
+
+                  cos_vray_norm_prev *= -1;
+              }
+          }
+
+          //v19.1: 以 c/p 较大夹角（较小 abs-cos）为准
+          float cos_abs_min = min(-cos_vray_norm_curr, -cos_vray_norm_prev);
+          float cos_factor = max(COS75, abs(cos_abs_min));
+
+          //float sdf_cos = abs(cos_vray_norm_curr) * sdf;
+          float sdf_cos = cos_factor * sdf; //v18.3: 乘数因子不许小于 COS75
+          //float sdf_cos = max(COS75, min(abs(cos_abs_min), weiFactor) ) * sdf; //v19.5.2 并不好, 不应 @2018-9-3 01:39:02 
+
+          if(doDbgPrint){
+              printf("sn_c, sn_p, vray_normed = [%f, %f, %f], [%f, %f, %f], [%f, %f, %f]\n", 
+                  snorm_curr_g.x, snorm_curr_g.y, snorm_curr_g.z, 
+                  snorm_prev_g.x, snorm_prev_g.y, snorm_prev_g.z, vray_normed.x, vray_normed.y, vray_normed.z);
+              printf("sdf-orig: %f,, cos_vray_norm_curr: %f,, sdf_cos: %f\n", sdf, cos_abs_min, sdf_cos);
+              printf("\ttranc_dist_real, weiFactor: %f, %f\n", tranc_dist_real, weiFactor);
+          }
+
+          float tsdf_prev1;
+          int weight_prev1;
+          unpack_tsdf (*pos1, tsdf_prev1, weight_prev1);
+          //↓-原 prev_always_edge  //v19.1: 语义变为: 非边缘区域(即使)标记, 当 "大入射角全反射/突变/curr边缘"时, 加锁保护, 避免噪声导致碎片 @2018-8-23 11:12:35
+          //bool non_edge_near0 = weight_prev1 % 2;
+
+          //v19.8.1: 改使用 NON_EDGE_TH 检测 “稳定” 的non-edge-area, 暂用 3bits @2018-9-11 13:13:55
+          int non_edge_ccnt = weight_prev1 % VOL1_FLAG_TH;
+          bool non_edge_near0 = (non_edge_ccnt + 1 == VOL1_FLAG_TH);
+          weight_prev1 = weight_prev1 >> VOL1_FLAG_BIT_CNT;
+          if(doDbgPrint){
+              printf("non_edge_ccnt: %d, NON_EDGE_TH: %d\n", non_edge_ccnt, VOL1_FLAG_TH);
+              printf("non_edge_near0: %d, is_curr_edge: %d, tsdf_prev1: %f,, weight_prev1: %d\n", non_edge_near0, is_curr_edge_wide, tsdf_prev1, weight_prev1);
+          }
+
+          const float shrink_dist_th = 0.02; //20mm
+          //v19.3
+          //const int WEIGHT_CONFID_TH = 60; //改放到 internal.h 中 @2018-9-30 15:03:13
+
+          //sdf = sdf_cos; //v18~19.5
+
+          //↓--v19.6.1 sdf & tdist 都根据是否边缘调整 @2018-9-6 01:47:59
+          if(!non_edge_near0){ //必然一直是 edge //改了: 语义为: non_edge_ccnt 未达到 NON_EDGE_TH
+              if(doDbgPrint)
+                  printf("if(!non_edge_near0)\n");
+
+              //v19.8.1: 
+              //if(!is_curr_edge_wide && abs(sdf) < 4 * tranc_dist)
+              if(!is_curr_edge_wide && abs(sdf) < shrink_dist_th)
+                  non_edge_ccnt = min(7, non_edge_ccnt + 1);
+              else
+                  non_edge_ccnt = max(0, non_edge_ccnt - 1);
+
+              //v20.1.16: 这里先写入, 以免后面漏掉
+              int weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1; 【注: 且之前误用变量 weight_new1
+              pack_tsdf(tsdf_prev1, weight_new_tmp, *pos1);
+
+              if(doDbgPrint)
+                  printf("\tAFTER-non_edge_ccnt: %d\n", non_edge_ccnt);
+
+              //边缘上： 希望既用小 tdist 避免棱边膨大, 又不会bias导致腐蚀
+              if(sdf < 0)   //v20.1.4: 试试; 逻辑: 尽管边缘, 仍仅希望 负值*cos @2018-9-21 00:14:58
+                  sdf = sdf_cos;
+              tranc_dist_real = tranc_dist * cos_factor;
+              //tranc_dist_real = tranc_dist; //v19.6.5 对比上面, 不好 @2018-9-8 01:23:46
+          }
+          else{ //non_edge_near0, 确认非contour
+//               if(-tranc_dist * 1.2 < sdf && sdf < -tranc_dist){  【错，放弃】 @2018-9-17 11:17:59
+//                   if(doDbgPrint)
+//                       printf("")
+//                   continue;
+//               }
+              //if(0 == weight_prev1 && sdf > tranc_dist * 1.2){ //v19.8.9: non-edge & wp==0 说明之前是背面 -td~-shrink_dist_th 区域, 现在 sdf>某th, 则不要 fuse @2018-9-18 17:49:31
+              if(0 == weight_prev1 && sdf > +shrink_dist_th){ //v19.8.10: 背面法向误判可解决, 其他问题无解 @2018-9-18 17:51:32
+                  if(doDbgPrint)
+                      printf("non-edge, p<-td, c>td*factor, DONT fuse\n");
+
+                  continue;
+              }
+
+              if(is_curr_edge_wide){ //但当前是edge
+                  //tranc_dist_real = tranc_dist * cos_factor;
+                  //tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v19.6.2: 尝试更小的 //没大区别
+                  tranc_dist_real = tranc_dist; //v20.1.13: P-nonedge, 但 C-edge, 则 c不稳定, 希望降低其干扰 @2018-9-26 17:03:53
+              }
+              else{//且当前在内部
+                  if(sdf < 0) //v19.6.4, good @2018-9-8 19:39:56
+                  //v19.7.4 试试去掉上面↑ 19.6.4, 变厚, 19.7.3 的破碎解决, 凹凸噪点未解决 @2018-9-10 07:01:21
+                      sdf = sdf_cos;
+                  tranc_dist_real = tranc_dist;
+              }
+          }
+
+          if(doDbgPrint)
+              printf("AFTER-sdf: %f, tranc_dist_real: %f; sdf>-td: %s\n", sdf, tranc_dist_real, sdf > -tranc_dist_real ? "sdfTTT": "sdfFFF");
+
+          //v19.3: 尝试二类,单维度,聚类(类比混合高斯) binary-gmm
+          float tsdf_prev2nd = -123;
+          int weight_prev2nd = -233;
+          unpack_tsdf (*pos2nd, tsdf_prev2nd, weight_prev2nd);
+
+          //weight_prev2nd = weight_prev2nd >> VOL1_FLAG_BIT_CNT;
+          const float min_thickness = max(0.003, cell_size.x*1.11); //薄壁最小可表征厚度>=3mm,
+          float tsdf_mut_thresh = min_thickness * tranc_dist_inv; //mutation-threshold, 归一化的突变阈值, 
+
+          float tsdf_new1 = tsdf_prev1; //放在 if之前
+          int weight_new1 = weight_prev1;
+          if(doDbgPrint){
+              printf("【【tsdf_prev1: %f,, weight_prev1: %d;\n", tsdf_prev1, weight_prev1);
+              printf("\t【【tsdf_prev2nd: %f,, weight_prev2nd: %d;\n", tsdf_prev2nd, weight_prev2nd);
+
+              if(01){ //输出到外部文件, 调试 @2018-8-30 09:54:53
+                  //暂不
+              }
+          }//if-(doDbgPrint)
+
+//#if TSDF_ORIG //暂不
+
+                    //if (Dp_scaled != 0 && sdf >= -tranc_dist) //v19.5.3 棱边膨大严重, 不可取 @2018-9-4 19:26:57
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v18.4
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist * cos_factor) //meters //v19.5.4 棱边膨大 @2018-9-6 00:21:27
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist * (non_edge_near0 ? 1 : cos_factor)) //meters //v19.5.5 @2018-9-6 00:21:27
+          if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v19.6
+          {
+            float tsdf_curr = fmin (1.0f, sdf * tranc_dist_inv);
+            int Wrk = 1;
+            short diff_c_p = diff_dmap.ptr(coo.y)[coo.x]; //mm, curr-prev, +正值为当前更深
+            ushort depth_prev = depthModel.ptr(coo.y)[coo.x];
+
+            //const int diff_c_p_thresh = 20; //20mm    //v20 改用 shrink_dist_th @2018-9-20 21:35:40
+            if(doDbgPrint){
+                printf("【【tsdf_curr: %f,, Wrk: %d; \n", tsdf_curr, Wrk);
+                printf("depth_prev: %u; diff_c_p: %d\n", depth_prev, diff_c_p);
+            }
+
+            //v20.1.2: 发现有必要, 加回来; 逻辑: 薄带区p非边缘,c边缘, 若深度突变,很可能是噪声(全反射,or边缘高不确定性) @2018-9-20 22:44:02
+            if(non_edge_near0 && is_curr_edge_wide 
+                && depth_prev > 0 && diff_c_p > shrink_dist_th * 1e3 //m2mm
+                )
+            {
+                if(doDbgPrint)
+                    printf("P-non-edge & C-edge & d_prev+ & diff_cp > TH\n");
+
+                //if(164 == x && 60 == y && 112 == z)
+                //    printf("【【@(%d, %d, %d):P-non-edge & C-edge & d_prev+ & diff_cp > TH\n\n", x, y, z);
+
+                //Wrk = 0;
+                continue;
+            }
+            else if(doDbgPrint)
+                printf("non_edge_near0: %d, is_curr_edge_wide: %d, depth_prev>0?:= %d, diff_c_p>th?:= %d\n", non_edge_near0, is_curr_edge_wide, depth_prev > 0, diff_c_p > shrink_dist_th * 1e3);
+
+            //↓--v19.7.1: 主要修复超薄穿透问题, 沿视线检测过零点-p>>+c @2018-9-9 19:18:37
+            //if(non_edge_near0 && !is_curr_edge_wide) //prev是内部, 且curr也非边缘 【【存疑, 看看能否去掉 @2018-9-19 18:25:40  //v20.1.7: 需要有
+            if(non_edge_near0) //P-non_edge //v20.1.17: 改用嵌套 if-if @2018-9-27 16:26:45
+            {
+                if(!is_curr_edge_wide){ //P & C-non_edge
+                    if(doDbgPrint){
+                        printf("】】】】 non_edge_near0 && !is_curr_edge_wide; tsdf_curr: %f\n", tsdf_curr);
+                        printf("\tw2nd: %d\n", weight_prev2nd);
+                    }
+
+                    //#elif 1 //v19.7.5: 改用三轴判定顺逆, 单轴不稳定
+                    //↓--from @tsdf23normal_hack
+                    const float qnan = numeric_limits<float>::quiet_NaN();
+                    float3 vox_normal = make_float3(qnan, qnan, qnan); //隐函数梯度做法向
+                    //const int W_NBR_CONFID_TH = 4;
+                    const int W_NBR_CONFID_TH = WEIGHT_CONFID_TH / 2; //@v20.1.5 nbr-confid-th 太小不稳定, 改了有效果 @2018-9-24 17:23:27
+
+                    float Fn, Fp;
+                    int Wn = 0, Wp = 0;
+
+#if 0   //v19 旧的
+                    unpack_tsdf (*(pos1 + elem_step), Fn, Wn);
+                    unpack_tsdf (*(pos1 - elem_step), Fp, Wp);
+
+                    if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                        vox_normal.z = (Fn - Fp)/cell_size.z;
+
+                    unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                    unpack_tsdf (*(pos1 - volume1.step/sizeof(short2) ), Fp, Wp);
+
+                    if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                        vox_normal.y = (Fn - Fp)/cell_size.y;
+
+                    unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                    unpack_tsdf (*(pos1 - 1), Fp, Wp);
+
+                    if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                        vox_normal.x = (Fn - Fp)/cell_size.x;
+
+#else   //v20.1.3 改为, 若某nbr 无效, 则用中心点本身
+                    unpack_tsdf (*(pos1 + elem_step), Fn, Wn);
+                    unpack_tsdf (*(pos1 - elem_step), Fp, Wp);
+                    Wn >>= VOL1_FLAG_BIT_CNT;
+                    Wp >>= VOL1_FLAG_BIT_CNT;
+
+                    if (Wn > W_NBR_CONFID_TH && Wp > W_NBR_CONFID_TH) 
+                        vox_normal.z = (Fn - Fp)/(2*cell_size.z);
+                    else if(Wn > W_NBR_CONFID_TH) //but Wp <th
+                        vox_normal.z = (Fn - tsdf_prev1)/cell_size.z;
+                    else if(Wp > W_NBR_CONFID_TH) //but Wn <th
+                        vox_normal.z = (tsdf_prev1 - Fp)/cell_size.z;
+
+                    unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                    unpack_tsdf (*(pos1 - volume1.step/sizeof(short2) ), Fp, Wp);
+                    Wn >>= VOL1_FLAG_BIT_CNT;
+                    Wp >>= VOL1_FLAG_BIT_CNT;
+
+                    if (Wn > W_NBR_CONFID_TH && Wp > W_NBR_CONFID_TH) 
+                        vox_normal.y = (Fn - Fp)/(2*cell_size.y);
+                    else if(Wn > W_NBR_CONFID_TH) //but Wp <th
+                        vox_normal.y = (Fn - tsdf_prev1)/cell_size.y;
+                    else if(Wp > W_NBR_CONFID_TH) //but Wn <th
+                        vox_normal.y = (tsdf_prev1 - Fp)/cell_size.y;
+
+                    unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                    unpack_tsdf (*(pos1 - 1), Fp, Wp);
+                    Wn >>= VOL1_FLAG_BIT_CNT;
+                    Wp >>= VOL1_FLAG_BIT_CNT;
+
+                    if (Wn > W_NBR_CONFID_TH && Wp > W_NBR_CONFID_TH) 
+                        vox_normal.x = (Fn - Fp)/(2*cell_size.x);
+                    else if(Wn > W_NBR_CONFID_TH) //but Wp <th
+                        vox_normal.x = (Fn - tsdf_prev1)/cell_size.x;
+                    else if(Wp > W_NBR_CONFID_TH) //but Wn <th
+                        vox_normal.x = (tsdf_prev1 - Fp)/cell_size.x;
+
+#endif
+
+                    if(doDbgPrint){ //一般值如: (55.717842, 82.059792, 71.134979), 
+                        printf("vox_normal.xyz: %f, %f, %f\n", vox_normal.x, vox_normal.y, vox_normal.z);
+                        //printf("vnx==qnan: %d\n", vox_normal.x == qnan);
+                    }
+
+                    bool setup_cluster2 = false; //背面观测标志位 
+
+                    //if(0 < weight_prev2nd){ //w2≠0 本身作为一个 FLAG
+                    if(0 < weight_prev2nd && weight_prev2nd < WEIGHT_CONFID_TH){ //v20.1.13: 改为: ①w2∈某区间, 就要一直 c2=true; 且②: 达到阈值后 w2 不清空  @2018-9-26 20:13:53
+                        if(doDbgPrint)
+                            printf("setup_cluster2; ++++w2>0\n");
+                        setup_cluster2 = true;
+                    }
+                    else if(!isnan(vox_normal.x) && !isnan(vox_normal.y) && !isnan(vox_normal.z)){
+                        //else if(sdf < shrink_dist_th && !isnan(vox_normal.x) && !isnan(vox_normal.y) && !isnan(vox_normal.z)){ //v20.1.10: 单看 cos120, 当远表面的norm干扰时, 影响cos判定, 所以改: 先判定 sdf<th @2018-9-25 20:20:14
+                        if(doDbgPrint)
+                            printf("vox_normal VALID\n");
+
+                        if(sdf < shrink_dist_th){ //v20.1.10: 改放内部
+                            float vox_norm2 = dot(vox_normal, vox_normal);
+                            //if (vox_norm2 >= 1e-10)
+                            //if (vox_norm2 >= 10) //v20.1.11: 因求 vox-norm 时用的 m量纲分母, 值应较大, 所以增大此阈值, 避免噪声 @2018-9-25 21:59:07
+                            if (vox_norm2 >= 2500) //v20.1.12: 因为是 norm^2, 希望至少存在某轴 >50, 因为假设 cell-size 2mm, 希望至少存在某轴 nbr-diff > 0.1 @2018-9-26 11:10:20
+                            {
+                                vox_normal *= rsqrt(vox_norm2); //归一化
+
+                                float cos_sn_c_p = dot(snorm_curr_g, vox_normal);
+                                if(doDbgPrint)
+                                    printf("\tcos_sn_c_p: %f\n", cos_sn_c_p);
+
+                                //if(cos_sn_c_p < COS120)
+                                if(cos_sn_c_p < COS150) //v20.1.11: 并且改用 cos150 @2018-9-26 10:07:37
+                                {
+                                    if(doDbgPrint)
+                                        printf("setup_cluster2, cos_sn_c_p <cos120: %f\n", cos_sn_c_p);
+
+                                    //if(164 == x && 60 == y && 112 == z)
+                                    //    printf("【【@(%d, %d, %d): setup_cluster2, cos_sn_c_p <cos120: %f\n", x, y, z, cos_sn_c_p);
+
+                                    setup_cluster2 = true; //否则默认 false: 当 ① vox_n 不够稳定 (各邻域 W<16), 或② vox_norm2 太小, 或③夹角小于 COS120
+                                }
+                                else if(weight_prev1 >= WEIGHT_CONFID_TH && weight_prev2nd >= WEIGHT_CONFID_TH){
+                                    //v20.1.15: 即便 cos > COS150, 但因 w1, w2 都 confid了, 所以直接 true, 走分类流程 @2018-9-26 22:02:26
+                                    if(doDbgPrint)
+                                        printf("setup_cluster2, w1_w2_confid: %f\n", cos_sn_c_p);
+
+                                    setup_cluster2 = true;
+                                }
+                                else{
+                                    if(doDbgPrint)
+                                        printf("\tNO-setup_cluster2, cos_sn_c_p>cos120\n");
+                                }
+                            }
+                        }
+                    }//if-vox_normal VALID
+                    //else if(weight_prev1 > weight_confid_th){ //若 w1 稳定了, 但是 vox 邻域在观测"边缘" 很少被扫到, 尚未稳定, 且 w2==0
+                    else if(weight_prev1 > WEIGHT_CONFID_TH && abs(tsdf_curr - tsdf_prev1) > 0.5){ //v20.1.14: 改: 20.1.13 之后, w∈某区间策略之后, 这里也要对应改 @2018-9-26 21:56:46
+                        if(doDbgPrint)
+                            printf("setup_cluster2; w1>th & w2==0 & vox_normal INVALID: xyz: %d, %d, %d\n", x, y, z);
+
+                        //if(164 == x && 60 == y && 112 == z)
+                        //    printf("【【@(%d, %d, %d): setup_cluster2; w1>th & w2==0 & vox_normal INVALID\n", x, y, z);
+
+                        setup_cluster2 = true;
+                    }
+
+                    float tsdf_new_tmp;
+                    int weight_new_tmp;
+
+                    if(setup_cluster2){
+                        //                     if(0 == weight_prev2nd){ //vol-2nd 尚未初始化
+                        // 
+                        //                         pack_tsdf (tsdf_curr, Wrk, *pos2nd);
+                        //                     }
+                        //                     else{ //wp2nd > 0; 若 vol-2nd 已初始化
+                        //                     }
+                        if(weight_prev2nd < WEIGHT_CONFID_TH){ //v20.1.1: 策略改为: 只要
+                            if(doDbgPrint)
+                                printf("w2<CONFID\n");
+
+                            tsdf_new_tmp = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                            weight_new_tmp = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+                            pack_tsdf (tsdf_new_tmp, weight_new_tmp, *pos2nd);
+
+                            if(doDbgPrint)
+                                printf("\twnew2nd: %d; weight_confid_th: %d\n", weight_new_tmp, WEIGHT_CONFID_TH);
+                        }
+                        else{ //w2>th
+                            if(doDbgPrint)
+                                printf("w2>=CONFID\n");
+
+                            if(abs(tsdf_curr - tsdf_prev1) < abs(tsdf_curr - tsdf_prev2nd)){
+                                if(doDbgPrint)
+                                    printf("\t<<<tcurr~~~tp1; w1+++\n");
+
+                                tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                                weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                                weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                                pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+                            }
+                            else{ //if-tc near tp2nd 
+                                if(doDbgPrint)
+                                    printf("\t<<<tcurr~~~tp2nd; w2+++\n");
+
+                                tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                                weight_prev2nd = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+                                pack_tsdf (tsdf_prev2nd, weight_prev2nd, *pos2nd);
+                            }
+
+                            //默认 vol1 存的 abs-t 应较小, 若不然, 则交换:
+                            if(abs(tsdf_prev2nd) < abs(tsdf_prev1)){
+                                if(doDbgPrint)
+                                    printf("【【【【【Exchanging... |t2|<|t1|: tp1:= %f, tp2:= %f\n", tsdf_prev1, tsdf_prev2nd);
+
+                                pack_tsdf (tsdf_prev1, weight_prev1, *pos2nd); //(t1,w1)=>pos2
+                                //↑--v20.1.13: 重新启用交换策略, 暂放弃置零策略 @2018-9-26 20:19:31
+
+                                weight_new_tmp = (weight_prev2nd << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                                pack_tsdf (tsdf_prev2nd, weight_new_tmp, *pos1); //(tnew, wnew)=>pos1
+                            }
+
+                            //pack_tsdf (0, 0, *pos2nd); //pos2, 置零
+                        }//elif-(w2 >= confid_th)
+
+                        //if(164 == x && 60 == y && 112 == z)
+                        //    printf("【【@(%d, %d, %d): if-setup_cluster2\n", x, y, z);
+
+                        //continue; //v20.1.4: 只要setup_cluster2, 无论 w2++ or 交换, 都跳出, 不管 w1    @2018-9-21 00:08:55
+                        //↑-v20.1.16: 去掉 continue, 分支分别写, 逻辑清晰一点 @2018-9-27 10:42:12
+                    }//if-(setup_cluster2)
+                    else{ //NO-setup_cluster2
+                        //v20.1.16: 重复代码:
+                        tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                        weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                        if(doDbgPrint){
+                            printf("P_C_non_edge_setup_cluster2_false:【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+                        }
+
+                        weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                        pack_tsdf (tsdf_new1, weight_new1, *pos1);
+
+                    }
+                }//if=!is_curr_edge_wide
+                else{ //P-non_edge & C-edge
+                    //DONT FUSE!! @2018-9-27 16:29:52
+                    if(doDbgPrint)
+                        printf("P_non_edge_C_edge_DONT_FUSE\n");
+                }
+            }//if=non_edge_near0
+            else{ //P-edge
+                //v20.1.16: w2不稳, 或 w1/2都稳定且视线夹角较小(因既是edge又视线夹角大时,噪声太大)
+                //if(weight_prev2nd < weight_confid_th || (weight_prev2nd >= weight_confid_th && cos_abs_min >= COS60)){
+//                 if(weight_prev2nd < weight_confid_th || cos_abs_min >= COS60){ //合并简化
+//                     tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+//                     weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+//                     if(doDbgPrint){
+//                         printf("【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+//                     }
+// 
+//                     weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+//                     pack_tsdf (tsdf_new1, weight_new1, *pos1);
+//                 }
+//                 else{
+//                     if(doDbgPrint){
+//                         printf("P_C_edge && w2>th && cos<cos60\n");
+//                     }
+//                 }
+
+                //v20.1.17: 前面逻辑改成 if=non_edge_near0 单判定
+                tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+                if(doDbgPrint){
+                    printf("P_edge: 【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+                }
+
+                weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                pack_tsdf (tsdf_new1, weight_new1, *pos1);
+            }
+            //if(164 == x && 60 == y && 112 == z)
+            //    printf("【【@(%d, %d, %d):tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", x, y, z, tsdf_new1, weight_new1, non_edge_near0);
+
+          }//if-(Dp_scaled != 0 && sdf >= -tranc_dist) 
+          //else if(Dp_scaled != 0 && !is_curr_edge_wide //v19.8.3
+          else if(Dp_scaled != 0 //v20.1.8: curr-edge 判定移到下面, 因为 w2-shrink 不需要此判定 @2018-9-25 11:02:09
+              //&& sdf > -4*tranc_dist_real
+              //&& sdf > -4*tranc_dist    //good
+              && sdf > -shrink_dist_th   //good
+              )
+          {
+              //要不要 if-- tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH 条件？待定 @2018-8-24 01:08:46
+              //v19.2: 要, 
+              const int POS_VALID_WEIGHT_TH = 30; //30帧≈一秒
+              //if(tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //或, 若 t_p 正值但是尚不稳定
+              if(!is_curr_edge_wide && tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //v20.1.8: curr-edge 判定移到这里 @2018-9-25 11:02:51
+                  //if(weight_prev1 < POS_VALID_WEIGHT_TH) //v19.8.5: 去掉 tp+ 判定， +-一律衰减 @2018-9-12 20:00:24
+              {
+                  weight_new1 = max(0, weight_new1-1); //v18.22
+                  if(weight_new1 == 0)
+                      tsdf_new1 = 0; //严谨点, 避免调试绘制、marching cubes意外
+
+                  if(doDbgPrint)
+                      printf("】】tsdf_new1: %f,, W1-UNSTABLE SHRINK, weight_new1-=1: %d;\n", tsdf_new1, weight_new1);
+
+                  //v20.1.16:
+                  weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                  pack_tsdf (tsdf_new1, weight_new1, *pos1);
+              }
+
+//               if(weight_prev2nd > 0){ //即 setup_cluster2 仍在
+//                   //v20.1.6: v20 连续 w2 赋值的策略下, 若负值临界区域, 扫不到就断断续续递增 w2, 转过面之后会造成误判, 因此改成断续就衰减 @2018-9-25 00:16:04
+//                   //weight_prev2nd = max(0, weight_prev2nd-1);
+//                   weight_prev2nd --;
+//                   if(weight_prev2nd == 0)
+//                       tsdf_prev2nd = 0;
+//                   pack_tsdf(tsdf_prev2nd, weight_prev2nd, *pos2nd);
+// 
+//                   if(doDbgPrint)
+//                       printf("】】】w2-SHRINK, tsdf_prev2nd: %f, weight_prev2nd-1: %d\n", tsdf_prev2nd, weight_prev2nd);
+
+              if(0 < weight_prev2nd && weight_prev2nd < WEIGHT_CONFID_TH){ //即 setup_cluster2 仍在
+
+                  //v20.1.9: 上面负值断续就衰减,不好用, 改成: 即使断续, 只要在薄带范围内, 就以 t2=-1 递增 w2  @2018-9-25 17:15:59
+                  tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + (-1)) / (weight_prev2nd + 1);
+                  weight_prev2nd = min (weight_prev2nd + 1, Tsdf::MAX_WEIGHT);
+                  pack_tsdf(tsdf_prev2nd, weight_prev2nd, *pos2nd);
+                  if(doDbgPrint)
+                      printf("】】】w2+++, sdf<-TH, tsdf_prev2nd: %f, weight_prev2nd: %d\n", tsdf_prev2nd, weight_prev2nd);
+              }
+          }//elif-(-4*td < sdf < -td)
+
+          //weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+          //pack_tsdf (tsdf_new1, weight_new1, *pos1);
+          //↑--v20.1.16: 之前放外面, 主要是为了 任何条件下确保 non_edge_ccnt 写入; 但因逻辑难看清, 暂去掉, 在各分支内操作 @2018-9-27 11:28:19
+
+        }//if- 0 < (x,y) < (cols,rows)
+      }// for(int z = 0; z < VOLUME_Z; ++z)
+    }//tsdf23_v20
+
+
+    __global__ void
+    tsdf23_v21 (const PtrStepSz<float> depthScaled, PtrStep<short2> volume1, 
+        PtrStep<short2> volume2nd, PtrStep<bool> flagVolume, PtrStep<char4> surfNormVolume, PtrStep<char4> vrayPrevVolume, const PtrStepSz<unsigned char> incidAngleMask,
+        const PtrStep<float> nmap_curr_g, const PtrStep<float> nmap_model_g,
+        /*↑--实参顺序: volume2nd, flagVolume, surfNormVolume, incidAngleMask, nmap_g,*/
+        const PtrStep<float> weight_map, //v11.4
+        const PtrStepSz<ushort> depth_not_scaled, //v21.4: 用没 scale的 dmap (mm)
+        const PtrStepSz<ushort> depthModel,
+        const PtrStepSz<short> diff_dmap, //v12.1
+        const PtrStepSz<ushort> depthModel_vol2, //v21.6.0: 核心是, 在 vol2 上 rcast 求 sdf_forward, 而非用 dcurr 瞬时结果 @2018-11-29 17:54:01
+        //const PtrStepSz<ushort> rc_flag_map, //v21
+        const PtrStepSz<short> rc_flag_map, //v21
+        const float tranc_dist, const Mat33 Rcurr_inv, const float3 tcurr, const Intr intr, const float3 cell_size
+        , int3 vxlDbg)
+    {
+      int x = threadIdx.x + blockIdx.x * blockDim.x;
+      int y = threadIdx.y + blockIdx.y * blockDim.y;
+
+      if (x >= VOLUME_X || y >= VOLUME_Y)
+          return;
+
+      float v_g_x = (x + 0.5f) * cell_size.x - tcurr.x;
+      float v_g_y = (y + 0.5f) * cell_size.y - tcurr.y;
+      float v_g_z = (0 + 0.5f) * cell_size.z - tcurr.z;
+
+      float v_g_part_norm = v_g_x * v_g_x + v_g_y * v_g_y;
+
+      float v_x = (Rcurr_inv.data[0].x * v_g_x + Rcurr_inv.data[0].y * v_g_y + Rcurr_inv.data[0].z * v_g_z) * intr.fx;
+      float v_y = (Rcurr_inv.data[1].x * v_g_x + Rcurr_inv.data[1].y * v_g_y + Rcurr_inv.data[1].z * v_g_z) * intr.fy;
+      float v_z = (Rcurr_inv.data[2].x * v_g_x + Rcurr_inv.data[2].y * v_g_y + Rcurr_inv.data[2].z * v_g_z);
+
+      float z_scaled = 0;
+
+      float Rcurr_inv_0_z_scaled = Rcurr_inv.data[0].z * cell_size.z * intr.fx;
+      float Rcurr_inv_1_z_scaled = Rcurr_inv.data[1].z * cell_size.z * intr.fy;
+
+      float tranc_dist_inv = 1.0f / tranc_dist;
+      float pendingFixThresh = cell_size.x * tranc_dist_inv * 3; //v13.4+ 用到: 暂定 3*vox 厚度; //值是相对于 tranc_dist 归一化过的
+
+      short2* pos1 = volume1.ptr (y) + x;
+      int elem_step = volume1.step * VOLUME_Y / sizeof(short2);
+
+      short2* pos2nd = volume2nd.ptr (y) + x;
+
+//#pragma unroll
+      for (int z = 0; z < VOLUME_Z;
+           ++z,
+           v_g_z += cell_size.z,
+           z_scaled += cell_size.z,
+           v_x += Rcurr_inv_0_z_scaled,
+           v_y += Rcurr_inv_1_z_scaled,
+           pos1 += elem_step
+           ,pos2nd += elem_step
+
+           )
+      {
+        bool doDbgPrint = false;
+        if(x > 0 && y > 0 && z > 0 //参数默认 000, 做无效值, 所以增加此检测
+            && vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+            doDbgPrint = true;
+
+        float v_z_real = (v_z + Rcurr_inv.data[2].z * z_scaled);
+        float inv_z = 1.0f / v_z_real;
+        if(doDbgPrint)
+            printf("inv_z:= %f\n", inv_z);
+
+        if (inv_z < 0)
+            continue;
+
+        // project to current cam
+        int2 coo =
+        {
+          __float2int_rn (v_x * inv_z + intr.cx),
+          __float2int_rn (v_y * inv_z + intr.cy)
+        };
+
+        if(doDbgPrint)
+            printf("coo.xy:(%d, %d)\n", coo.x, coo.y);
+
+        if (coo.x >= 0 && coo.y >= 0 && coo.x < depthScaled.cols && coo.y < depthScaled.rows)         //6
+        {
+          float Dp_scaled = depthScaled.ptr (coo.y)[coo.x]; //meters
+          ushort Dp_not_scaled = depth_not_scaled.ptr (coo.y)[coo.x]; //mm
+
+          float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm);
+
+          if(doDbgPrint){
+              printf("Dp_scaled, sdf, tranc_dist, %f, %f, %f\n", Dp_scaled, sdf, tranc_dist);
+          }
+
+          float weiFactor = weight_map.ptr(coo.y)[coo.x];
+          float tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v18.4: 边缘可能 w_factor=0, 
+
+          //↓--v18.20: 放在 sdf >= -tranc_dist_real 之前, @2018-8-13 16:21:48
+          const float W_FACTOR_EDGE_THRESH = 0.99f;
+          bool is_curr_edge_wide = weiFactor < W_FACTOR_EDGE_THRESH;
+          //is_curr_edge_wide = weiFactor < 0.3;//W_FACTOR_EDGE_THRESH;
+          //↑--v19.6.3: 去掉 v19.6.2, 并重新用 0.3, wide 实际边 narrow @2018-9-6 15:56:23
+          //is_curr_edge_wide = weiFactor < 0.1;//W_FACTOR_EDGE_THRESH;
+          //↑--v19.6.9: 改 0.1 @2018-9-9 22:12:29
+          //↑--v21.3.7: wide 就用 0.99    @2018-10-21 23:20:40
+          //is_curr_edge_wide = weiFactor < 0.3;//W_FACTOR_EDGE_THRESH;
+          //↑--v21.3.7.d: 因 v21.3.7.bc 在 cup6down1c 不够平滑, 为了排查错误, 尝试此 @2018-11-19 20:03:32
+          bool is_curr_edge_narrow = weiFactor < 0.3; //v19.2.2: 阈值 0.6~0.8 都不行, 0.3 凑合 @2018-8-25 11:33:56
+
+          float3 snorm_curr_g;
+          snorm_curr_g.x = nmap_curr_g.ptr(coo.y)[coo.x];
+          float3 snorm_prev_g;
+          snorm_prev_g.x = nmap_model_g.ptr(coo.y)[coo.x];
+
+          if(isnan(snorm_curr_g.x) && isnan(snorm_prev_g.x)){
+              if(doDbgPrint)
+                  printf("+++++++++++++++isnan(snorm_curr_g.x) && isnan(snorm_prev_g.x), weiFactor: %f\n", weiFactor);
+
+              //return;    //内循环, 每次都要走遍 z轴, 不该 跳出
+              continue;    //v18.2
+          }
+
+          bool sn_curr_valid = false,
+               sn_prev_valid = false; //如果没有 continue 跳出, 走到下面至少有一个 true
+
+          if(!isnan(snorm_curr_g.x) ){
+              snorm_curr_g.y = nmap_curr_g.ptr(coo.y + depthScaled.rows)[coo.x];
+              snorm_curr_g.z = nmap_curr_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+              sn_curr_valid = true;
+          }
+          else{
+              if(doDbgPrint)
+                  printf("+++++++++++++++isnan(snorm_curr_g.x), weiFactor: %f\n", weiFactor);
+          }
+
+          if(!isnan(snorm_prev_g.x)){
+              snorm_prev_g.y = nmap_model_g.ptr(coo.y + depthScaled.rows)[coo.x];
+              snorm_prev_g.z = nmap_model_g.ptr(coo.y + 2 * depthScaled.rows)[coo.x];
+
+              sn_prev_valid = true;
+          }
+          else{
+              if(doDbgPrint)
+                  printf("\t+++++isnan(snorm_prev_g.x), weiFactor\n", weiFactor);
+          }
+
+          float3 vray;
+          vray.x = v_g_x;
+          vray.y = v_g_y;
+          vray.z = v_g_z;
+          //float vray_norm = norm(vray);
+          float3 vray_normed = normalized(vray); //单位视线向量
+
+          float cos_vray_norm_curr = -11;
+          if(sn_curr_valid){
+              cos_vray_norm_curr = dot(snorm_curr_g, vray_normed);
+              if(cos_vray_norm_curr > 0){ //当做assert, 要求必须: 夹角>90°, 即法向必须朝向相机这头
+                  //printf("ERROR+++++++++++++++cos_vray_norm > 0");
+
+                  //假设不保证外部已正确预处理：
+                  snorm_curr_g.x *= -1;
+                  snorm_curr_g.y *= -1;
+                  snorm_curr_g.z *= -1;
+
+                  cos_vray_norm_curr *= -1;
+              }
+          }
+
+          float cos_vray_norm_prev = -11; //-11 作为无效标记(有效[-1~+1]); 到这里 c/p 至少有一个有效
+          if(sn_prev_valid){
+              cos_vray_norm_prev = dot(snorm_prev_g, vray_normed);
+              if(cos_vray_norm_prev > 0){ //当做assert, 要求必须: 夹角>90°, 即法向必须朝向相机这头
+                  //printf("ERROR+++++++++++++++cos_vray_norm > 0");
+
+                  //假设不保证外部已正确预处理：
+                  snorm_prev_g.x *= -1;
+                  snorm_prev_g.y *= -1;
+                  snorm_prev_g.z *= -1;
+
+                  cos_vray_norm_prev *= -1;
+              }
+          }
+
+          //v19.1: 以 c/p 较大夹角（较小 abs-cos）为准
+          float cos_abs_min = min(-cos_vray_norm_curr, -cos_vray_norm_prev);
+          float cos_factor = max(COS75, abs(cos_abs_min));
+
+          //float sdf_cos = abs(cos_vray_norm_curr) * sdf;
+          float sdf_cos = cos_factor * sdf; //v18.3: 乘数因子不许小于 COS75
+          //float sdf_cos = max(COS75, min(abs(cos_abs_min), weiFactor) ) * sdf; //v19.5.2 并不好, 不应 @2018-9-3 01:39:02 
+
+          if(doDbgPrint){
+              printf("sn_c, sn_p, vray_normed = [%f, %f, %f], [%f, %f, %f], [%f, %f, %f]\n", 
+                  snorm_curr_g.x, snorm_curr_g.y, snorm_curr_g.z, 
+                  snorm_prev_g.x, snorm_prev_g.y, snorm_prev_g.z, vray_normed.x, vray_normed.y, vray_normed.z);
+              printf("sdf-orig: %f,, cos_vray_norm_curr: %f,, sdf_cos: %f\n", sdf, cos_abs_min, sdf_cos);
+              printf("\ttranc_dist_real, weiFactor: %f, %f\n", tranc_dist_real, weiFactor);
+          }
+
+          float tsdf_prev1;
+          int weight_prev1;
+          unpack_tsdf (*pos1, tsdf_prev1, weight_prev1);
+          //↓-原 prev_always_edge  //v19.1: 语义变为: 非边缘区域(即使)标记, 当 "大入射角全反射/突变/curr边缘"时, 加锁保护, 避免噪声导致碎片 @2018-8-23 11:12:35
+          //bool non_edge_near0 = weight_prev1 % 2;
+
+          //v19.8.1: 改使用 NON_EDGE_TH 检测 “稳定” 的non-edge-area, 暂用 3bits @2018-9-11 13:13:55
+          const int non_edge_ccnt_max = VOL1_FLAG_TH - 1;
+          int non_edge_ccnt = weight_prev1 % VOL1_FLAG_TH;
+          bool non_edge_near0 = (non_edge_ccnt == non_edge_ccnt_max);
+          weight_prev1 = weight_prev1 >> VOL1_FLAG_BIT_CNT;
+          if(doDbgPrint){
+              printf("non_edge_ccnt: %d, NON_EDGE_TH: %d\n", non_edge_ccnt, VOL1_FLAG_TH);
+              printf("non_edge_near0: %d, is_curr_edge: %d, tsdf_prev1: %f,, weight_prev1: %d\n", non_edge_near0, is_curr_edge_wide, tsdf_prev1, weight_prev1);
+          }
+
+          int Wrk = 1; //v21.6.0.a: 移到前面, 根据 C-in/edge 变化   @2018-12-2 19:36:08
+
+          const float shrink_dist_th = 0.02; //20mm
+          //v19.3
+          //const int WEIGHT_CONFID_TH = 60; //改放到 internal.h 中 @2018-9-30 15:03:13
+
+          //sdf = sdf_cos; //v18~19.5
+
+          //↓--v19.6.1 sdf & tdist 都根据是否边缘调整 @2018-9-6 01:47:59
+          if(!non_edge_near0){ //必然一直是 edge //改了: 语义为: non_edge_ccnt 未达到 NON_EDGE_TH
+              if(doDbgPrint)
+                  printf("if(!non_edge_near0)\n");
+
+              //v19.8.1: 
+              //if(!is_curr_edge_wide && abs(sdf) < 4 * tranc_dist)
+              //if(!is_curr_edge_wide && abs(sdf) < shrink_dist_th)
+              if(!is_curr_edge_wide && abs(sdf_cos) < shrink_dist_th) //v21.2.2: 改用 sdf_cos 作比较 @2018-10-8 10:58:57
+                  non_edge_ccnt = min(non_edge_ccnt_max, non_edge_ccnt + 1);
+              else
+                  non_edge_ccnt = max(0, non_edge_ccnt - 1);
+
+              //v20.1.16: 这里先写入, 以免后面漏掉
+              int weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1; 【注: 且之前误用变量 weight_new1
+              pack_tsdf(tsdf_prev1, weight_new_tmp, *pos1);
+
+              if(doDbgPrint)
+                  printf("\tAFTER-non_edge_ccnt: %d\n", non_edge_ccnt);
+          }
+          else{ //non_edge_near0, 确认非contour
+              //               if(-tranc_dist * 1.2 < sdf && sdf < -tranc_dist){  【错，放弃】 @2018-9-17 11:17:59
+              //                   if(doDbgPrint)
+              //                       printf("")
+              //                   continue;
+              //               }
+              //if(0 == weight_prev1 && sdf > tranc_dist * 1.2){ //v19.8.9: non-edge & wp==0 说明之前是背面 -td~-shrink_dist_th 区域, 现在 sdf>某th, 则不要 fuse @2018-9-18 17:49:31
+              if(0 == weight_prev1 && sdf > +shrink_dist_th){ //v19.8.10: 背面法向误判可解决, 其他问题无解 @2018-9-18 17:51:32
+                  if(doDbgPrint)
+                      printf("non-edge, p<-td, c>td*factor, DONT fuse\n");
+
+                  continue;
+              }
+          }
+
+#if 0   //< v21, 之前希望 sdf<0 时用 cos; >0时用 orig, 保持薄壁, 但是可能有偏差
+          if(!non_edge_near0){
+              //边缘上： 希望既用小 tdist 避免棱边膨大, 又不会bias导致腐蚀
+              if(sdf < 0)   //v20.1.4: 试试; 逻辑: 尽管边缘, 仍仅希望 负值*cos @2018-9-21 00:14:58
+                  sdf = sdf_cos;
+              //tranc_dist_real = tranc_dist * cos_factor;
+              //tranc_dist_real = tranc_dist; //v19.6.5 对比上面, 不好 @2018-9-8 01:23:46
+          }
+          else{ //non_edge_near0, 确认非contour
+
+              if(is_curr_edge_wide){ //但当前是edge
+                  //tranc_dist_real = tranc_dist * cos_factor;
+                  //tranc_dist_real = max(0.3, weiFactor) * tranc_dist; //v19.6.2: 尝试更小的 //没大区别
+                  tranc_dist_real = tranc_dist; //v20.1.13: P-nonedge, 但 C-edge, 则 c不稳定, 希望降低其干扰 @2018-9-26 17:03:53
+              }
+              else{//且当前在内部
+                  if(sdf < 0) //v19.6.4, good @2018-9-8 19:39:56
+                  //v19.7.4 试试去掉上面↑ 19.6.4, 变厚, 19.7.3 的破碎解决, 凹凸噪点未解决 @2018-9-10 07:01:21
+                      sdf = sdf_cos;
+                  tranc_dist_real = tranc_dist;
+              }
+          }
+#elif 0 //v21.3.4 回到最初, sdf乘以cos, tdist用原本的     @2018-10-10 20:22:38
+          sdf = sdf_cos; //v18~19.5
+
+//           if(!(non_edge_near0 && is_curr_edge_wide)){ //v21.4.2 当 P-in & C-edge 时, sdf用 orig; 其他时候才 *cos    @2018-10-15 02:47:54
+//               sdf = sdf_cos; 
+//           }
+
+          tranc_dist_real = tranc_dist; //td-real 本来与 weiMap 相关, 这里不管 wmap, 用 orig
+#elif 0 //v21.3.5
+          if(is_curr_edge_wide){ //C-edge
+              //sdf.orig
+              //tdist∝ wmap
+
+              //↓-v21.3.6: 稍改,      @2018-10-18 11:00:31
+              //逻辑: C-edge 情形下, ① P-in, 就 td∝wmap, 小截断, 避免棱边膨大 ② P-edge, 说明一直 edge, 就 td.orig, 使纯边缘不要变成尖锐锯齿
+              if(!non_edge_near0) //P-edge:
+                  tranc_dist_real = tranc_dist; //td.orig
+          }
+          else{ //C-in
+              sdf = sdf_cos; 
+              tranc_dist_real = tranc_dist; //td.orig
+          }
+#elif 10 //v21.3.7   重新理一遍
+          if(is_curr_edge_narrow){ //C-edge-narrow,
+              if(non_edge_near0){ //P-in-wide
+                  //sdf.orig
+                  //tdist∝ wmap
+              }
+              else{ //P-edge-wide
+                  //sdf.orig
+                  tranc_dist_real = tranc_dist; //td.orig
+
+                  //↓--v21.3.7.c: 只要sdf_cos在 td 范围之内, 就用 sdf_cos; 目的: 使 cup6down1c 在 v21.3.7 也能把手连续不断开 @2018-11-19 16:43:29
+                  //结果: 能达到"把手连续不断开", 但是表面不如 v21.3.7 光滑
+                  if(sdf_cos < tranc_dist)
+                  if(sdf > tranc_dist && sdf_cos < tranc_dist) //v21.3.7.f: 前面 v21.3.7.c 逻辑瑕疵: 即P&C-edge时, 希望 sdf_cos 是"替补", 而不是优先用
+                      sdf = sdf_cos;
+              }
+          }
+          else{ //C-in-narrow,
+              //if(non_edge_near0) //v21.3.8: 仅当 P-in, 采用 sdf-cos
+                  sdf = sdf_cos; 
+              //↑--v21.3.9：试验：完全去掉 sdf-cos, 只用 orig, 会怎样？ 答：
+              tranc_dist_real = tranc_dist; //td.orig
+
+              Wrk = 2; //v21.6.0.a
+          }
+#elif 0 //v21.3.11: 尝试改成回到 v21.3.4, 一律用 sdf-cos, 但 td 策略等同 v21.3.7 根据 P-in & C-edge 调整
+          //考虑: cup6down1c 数据, 试图让"杯子把手" 连续, 但 cluster策略的 if(abs(sdf_forward) < abs(sdf_backward)) 策略不行, 见 mesh-v21.3.11.ply
+          //v21.3.12: 启用 v21.3.10, 即 cluster 再暂改成 if(1) //不如 v21.3.10, 【【【【说明 v21.3.11 并不好 @2018-10-22 17:12:12
+          sdf = sdf_cos; 
+          if(non_edge_near0 && is_curr_edge_narrow){
+              //tdist∝ wmap
+          }
+          else{
+              tranc_dist_real = tranc_dist; //td.orig
+          }
+#endif
+
+          if(doDbgPrint)
+              printf("AFTER-sdf: %f, tranc_dist_real: %f; sdf>-td: %s\n", sdf, tranc_dist_real, sdf > -tranc_dist_real ? "sdfTTT": "sdfFFF");
+
+          //v19.3: 尝试二类,单维度,聚类(类比混合高斯) binary-gmm
+          float tsdf_prev2nd = -123;
+          int weight_prev2nd = -233;
+          unpack_tsdf (*pos2nd, tsdf_prev2nd, weight_prev2nd);
+
+          //weight_prev2nd = weight_prev2nd >> VOL1_FLAG_BIT_CNT;
+          //const float min_thickness = max(0.003, cell_size.x*1.11); //薄壁最小可表征厚度>=3mm,
+          //float tsdf_mut_thresh = min_thickness * tranc_dist_inv; //mutation-threshold, 归一化的突变阈值, 
+
+          float tsdf_new1 = tsdf_prev1; //放在 if之前
+          int weight_new1 = weight_prev1;
+
+          int rc_flag = rc_flag_map.ptr(coo.y)[coo.x]; //v21.1.1  //ushort->int @2018-10-3 22:19:06
+                                                          //v21.3.3 改成了 正负深度值, rcast ->+ 过零点才终止 @2018-10-14 20:11:56
+          //if(rc_flag != 0)
+          //    printf("【【rc_flag: %u; coo.xy: (%d, %d)\n", rc_flag, coo.x, coo.y);
+
+          if(doDbgPrint){
+              printf("【【rc_flag: %d; coo.xy: (%d, %d)\n", rc_flag, coo.x, coo.y);
+              printf("【【tsdf_prev1: %f,, weight_prev1: %d;\n", tsdf_prev1, weight_prev1);
+              printf("\t【【tsdf_prev2nd: %f,, weight_prev2nd: %d;\n", tsdf_prev2nd, weight_prev2nd);
+
+              if(01){ //输出到外部文件, 调试 @2018-8-30 09:54:53
+                  //暂不
+              }
+          }//if-(doDbgPrint)
+
+//#if TSDF_ORIG //暂不
+
+                    //if (Dp_scaled != 0 && sdf >= -tranc_dist) //v19.5.3 棱边膨大严重, 不可取 @2018-9-4 19:26:57
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v18.4
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist * cos_factor) //meters //v19.5.4 棱边膨大 @2018-9-6 00:21:27
+          //if (Dp_scaled != 0 && sdf >= -tranc_dist * (non_edge_near0 ? 1 : cos_factor)) //meters //v19.5.5 @2018-9-6 00:21:27
+          if (Dp_scaled != 0 && sdf >= -tranc_dist_real) //meters //v19.6
+          {
+            float tsdf_curr = fmin (1.0f, sdf * tranc_dist_inv);
+            //float tsdf_curr = fmin (1.0f, sdf_cos * tranc_dist_inv); //v21.5.10: buddhahead 数据上, 佛头因为P-edge-wide, C-edge-narrow, sdf负值较大, 导致偏差, 产生凹凸噪声 //其他数据并不好 (如 box-small数据)
+            //int Wrk = 1; //v21.6.0.a: 改移到前面, if 外面
+            short diff_c_p = diff_dmap.ptr(coo.y)[coo.x]; //mm, curr-prev, +正值为当前更深
+            ushort depth_prev = depthModel.ptr(coo.y)[coo.x];
+
+            //const int diff_c_p_thresh = 20; //20mm    //v20 改用 shrink_dist_th @2018-9-20 21:35:40
+            if(doDbgPrint){
+                printf("【【tsdf_curr: %f,, Wrk: %d; \n", tsdf_curr, Wrk);
+                printf("depth_prev: %u; diff_c_p: %d\n", depth_prev, diff_c_p);
+            }
+
+#if 0   //v21.1: 继承自 v20.x, 按 p-in/edge & c-in/edge 分四类, 仅在 p&c-in 块内处理 setup_c2, @2018-10-4 21:59:00
+            //v20.1.2: 发现有必要, 加回来; 逻辑: 薄带区p非边缘,c边缘, 若深度突变,很可能是噪声(全反射,or边缘高不确定性) @2018-9-20 22:44:02
+            if(non_edge_near0 && is_curr_edge_wide 
+                && depth_prev > 0 && diff_c_p > shrink_dist_th * 1e3 //m2mm
+                )
+            {
+                if(doDbgPrint)
+                    printf("P-non-edge & C-edge & d_prev+ & diff_cp > TH\n");
+
+                //if(164 == x && 60 == y && 112 == z)
+                //    printf("【【@(%d, %d, %d):P-non-edge & C-edge & d_prev+ & diff_cp > TH\n\n", x, y, z);
+
+                //Wrk = 0;
+                continue;
+            }
+            else if(doDbgPrint)
+                printf("non_edge_near0: %d, is_curr_edge_wide: %d, depth_prev>0?:= %d, diff_c_p>th?:= %d\n", non_edge_near0, is_curr_edge_wide, depth_prev > 0, diff_c_p > shrink_dist_th * 1e3);
+
+            //↓--v19.7.1: 主要修复超薄穿透问题, 沿视线检测过零点-p>>+c @2018-9-9 19:18:37
+            //if(non_edge_near0 && !is_curr_edge_wide) //prev是内部, 且curr也非边缘 【【存疑, 看看能否去掉 @2018-9-19 18:25:40  //v20.1.7: 需要有
+            if(non_edge_near0) //P-non_edge //v20.1.17: 改用嵌套 if-if @2018-9-27 16:26:45
+            {
+                if(!is_curr_edge_wide){ //P & C-non_edge
+                    if(doDbgPrint){
+                        printf("】】】】 non_edge_near0 && !is_curr_edge_wide; tsdf_curr: %f\n", tsdf_curr);
+                        printf("\tw2nd: %d\n", weight_prev2nd);
+                    }
+
+                    //#elif 1 //v19.7.5: 改用三轴判定顺逆, 单轴不稳定
+                    //↓--from @tsdf23normal_hack
+                    const float qnan = numeric_limits<float>::quiet_NaN();
+                    float3 vox_normal = make_float3(qnan, qnan, qnan); //隐函数梯度做法向
+                    //const int W_NBR_CONFID_TH = 4;
+                    const int W_NBR_CONFID_TH = WEIGHT_CONFID_TH / 2; //@v20.1.5 nbr-confid-th 太小不稳定, 改了有效果 @2018-9-24 17:23:27
+
+                    float Fn, Fp;
+                    int Wn = 0, Wp = 0;
+
+#if 0   //v19 旧的
+                    unpack_tsdf (*(pos1 + elem_step), Fn, Wn);
+                    unpack_tsdf (*(pos1 - elem_step), Fp, Wp);
+
+                    if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                        vox_normal.z = (Fn - Fp)/cell_size.z;
+
+                    unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                    unpack_tsdf (*(pos1 - volume1.step/sizeof(short2) ), Fp, Wp);
+
+                    if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                        vox_normal.y = (Fn - Fp)/cell_size.y;
+
+                    unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                    unpack_tsdf (*(pos1 - 1), Fp, Wp);
+
+                    if ((Wn >> VOL1_FLAG_BIT_CNT) > W_NBR_TH && (Wp >> VOL1_FLAG_BIT_CNT) > W_NBR_TH) 
+                        vox_normal.x = (Fn - Fp)/cell_size.x;
+
+#else   //v20.1.3 改为, 若某nbr 无效, 则用中心点本身
+                    unpack_tsdf (*(pos1 + elem_step), Fn, Wn);
+                    unpack_tsdf (*(pos1 - elem_step), Fp, Wp);
+                    Wn >>= VOL1_FLAG_BIT_CNT;
+                    Wp >>= VOL1_FLAG_BIT_CNT;
+
+                    if (Wn > W_NBR_CONFID_TH && Wp > W_NBR_CONFID_TH) 
+                        vox_normal.z = (Fn - Fp)/(2*cell_size.z);
+                    else if(Wn > W_NBR_CONFID_TH) //but Wp <th
+                        vox_normal.z = (Fn - tsdf_prev1)/cell_size.z;
+                    else if(Wp > W_NBR_CONFID_TH) //but Wn <th
+                        vox_normal.z = (tsdf_prev1 - Fp)/cell_size.z;
+
+                    unpack_tsdf (*(pos1 + volume1.step/sizeof(short2) ), Fn, Wn);
+                    unpack_tsdf (*(pos1 - volume1.step/sizeof(short2) ), Fp, Wp);
+                    Wn >>= VOL1_FLAG_BIT_CNT;
+                    Wp >>= VOL1_FLAG_BIT_CNT;
+
+                    if (Wn > W_NBR_CONFID_TH && Wp > W_NBR_CONFID_TH) 
+                        vox_normal.y = (Fn - Fp)/(2*cell_size.y);
+                    else if(Wn > W_NBR_CONFID_TH) //but Wp <th
+                        vox_normal.y = (Fn - tsdf_prev1)/cell_size.y;
+                    else if(Wp > W_NBR_CONFID_TH) //but Wn <th
+                        vox_normal.y = (tsdf_prev1 - Fp)/cell_size.y;
+
+                    unpack_tsdf (*(pos1 + 1), Fn, Wn);
+                    unpack_tsdf (*(pos1 - 1), Fp, Wp);
+                    Wn >>= VOL1_FLAG_BIT_CNT;
+                    Wp >>= VOL1_FLAG_BIT_CNT;
+
+                    if (Wn > W_NBR_CONFID_TH && Wp > W_NBR_CONFID_TH) 
+                        vox_normal.x = (Fn - Fp)/(2*cell_size.x);
+                    else if(Wn > W_NBR_CONFID_TH) //but Wp <th
+                        vox_normal.x = (Fn - tsdf_prev1)/cell_size.x;
+                    else if(Wp > W_NBR_CONFID_TH) //but Wn <th
+                        vox_normal.x = (tsdf_prev1 - Fp)/cell_size.x;
+
+#endif
+
+                    if(doDbgPrint){ //一般值如: (55.717842, 82.059792, 71.134979), 
+                        printf("vox_normal.xyz: %f, %f, %f\n", vox_normal.x, vox_normal.y, vox_normal.z);
+                        //printf("vnx==qnan: %d\n", vox_normal.x == qnan);
+                    }
+
+                    bool setup_cluster2 = false; //背面观测标志位 
+
+                    int rc_flag = rc_flag_map.ptr(coo.y)[coo.x]; //v21.1.1  //ushort->int @2018-10-3 22:19:06
+
+                    if(0 < weight_prev2nd){ //w2≠0 本身作为一个 FLAG
+                    //if(0 < weight_prev2nd && weight_prev2nd < WEIGHT_CONFID_TH){ //v20.1.13: 改为: ①w2∈某区间, 就要一直 c2=true; 且②: 达到阈值后 w2 不清空  @2018-9-26 20:13:53
+                        if(doDbgPrint)
+                            printf("setup_cluster2; ++++w2>0\n");
+                        setup_cluster2 = true;
+                    }
+                    else if(rc_flag == 127){
+                        if(doDbgPrint)
+                            printf("setup_cluster2; rc_flag_127\n");
+
+                        setup_cluster2 = true;
+                    }
+
+                    float tsdf_new_tmp;
+                    int weight_new_tmp;
+
+                    if(setup_cluster2){
+                        //                     if(0 == weight_prev2nd){ //vol-2nd 尚未初始化
+                        // 
+                        //                         pack_tsdf (tsdf_curr, Wrk, *pos2nd);
+                        //                     }
+                        //                     else{ //wp2nd > 0; 若 vol-2nd 已初始化
+                        //                     }
+                        if(doDbgPrint)
+                            printf("w2_le_CONFID\n");
+
+                        tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                        weight_prev2nd = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+                        pack_tsdf (tsdf_prev2nd, weight_prev2nd, *pos2nd);
+
+                        if(doDbgPrint)
+                            printf("\twnew2nd: %d; weight_confid_th: %d\n", weight_prev2nd, WEIGHT_CONFID_TH);
+                        
+                        if(weight_prev2nd > WEIGHT_CONFID_TH){ //v20.1.1: 策略改为: 只要
+                            if(doDbgPrint)
+                                printf("w2_gt_CONFID\n");
+
+                            if(abs(tsdf_curr - tsdf_prev1) < abs(tsdf_curr - tsdf_prev2nd)){
+                                if(doDbgPrint)
+                                    printf("\t<<<tcurr_near_tp1; w1+++\n");
+
+                                tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                                weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                                weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                                pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+                            }
+                            else{ //if-tc near tp2nd 
+                                if(doDbgPrint)
+                                    printf("\t<<<tcurr_near_tp2nd; w2+++\n");
+
+                                tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                                weight_prev2nd = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+                                pack_tsdf (tsdf_prev2nd, weight_prev2nd, *pos2nd);
+                            }
+
+                            //默认 vol1 存的 abs-t 应较小, 若不然, 则交换:
+                            if(abs(tsdf_prev2nd) < abs(tsdf_prev1)){
+                                if(doDbgPrint)
+                                    printf("【【【【【Exchanging... |t2|<|t1|: tp1:= %f, tp2:= %f\n", tsdf_prev1, tsdf_prev2nd);
+
+                                pack_tsdf (tsdf_prev1, weight_prev1, *pos2nd); //(t1,w1)=>pos2
+                                //↑--v20.1.13: 重新启用交换策略, 暂放弃置零策略 @2018-9-26 20:19:31
+
+                                weight_new_tmp = (weight_prev2nd << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                                pack_tsdf (tsdf_prev2nd, weight_new_tmp, *pos1); //(tnew, wnew)=>pos1
+                            }
+
+                            //pack_tsdf (0, 0, *pos2nd); //pos2, 置零
+                        }//elif-(w2 >= confid_th)
+
+                        //if(164 == x && 60 == y && 112 == z)
+                        //    printf("【【@(%d, %d, %d): if-setup_cluster2\n", x, y, z);
+
+                        //continue; //v20.1.4: 只要setup_cluster2, 无论 w2++ or 交换, 都跳出, 不管 w1    @2018-9-21 00:08:55
+                        //↑-v20.1.16: 去掉 continue, 分支分别写, 逻辑清晰一点 @2018-9-27 10:42:12
+                    }//if-(setup_cluster2)
+                    else{ //NO-setup_cluster2
+                        //v20.1.16: 重复代码:
+                        tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                        weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+                        weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                        pack_tsdf (tsdf_new1, weight_new1, *pos1);
+
+                        if(doDbgPrint){
+                            printf("P_C_non_edge_setup_cluster2_false:【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+                        }
+                    }
+                }//P & C-non_edge
+                else{ //P-non_edge & C-edge
+                    //DONT FUSE!! @2018-9-27 16:29:52
+                    if(doDbgPrint)
+                        printf("P_non_edge_C_edge_DONT_FUSE\n");
+                }
+            }//if=non_edge_near0
+            else{ //P-edge
+                //v20.1.16: w2不稳, 或 w1/2都稳定且视线夹角较小(因既是edge又视线夹角大时,噪声太大)
+                //if(weight_prev2nd < weight_confid_th || (weight_prev2nd >= weight_confid_th && cos_abs_min >= COS60)){
+//                 if(weight_prev2nd < weight_confid_th || cos_abs_min >= COS60){ //合并简化
+//                     tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+//                     weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+//                     if(doDbgPrint){
+//                         printf("【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+//                     }
+// 
+//                     weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+//                     pack_tsdf (tsdf_new1, weight_new1, *pos1);
+//                 }
+//                 else{
+//                     if(doDbgPrint){
+//                         printf("P_C_edge && w2>th && cos<cos60\n");
+//                     }
+//                 }
+
+                //v20.1.17: 前面逻辑改成 if=non_edge_near0 单判定
+                tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+                weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                pack_tsdf (tsdf_new1, weight_new1, *pos1);
+                if(doDbgPrint){
+                    printf("P_edge: 【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+                }
+            }
+#elif 0 //v21.2: 改成: setup-c2 仅以 rcFlag 为判定指标 @2018-10-4 21:59:48
+        //且 setup_cluster2 语义改为: c2 保护标志位, 即 w2<th时, 仅 w2++, 不分类; w2>th后才分类
+
+//             if(!non_edge_near0){ //P-edge: 包括: 1, P确实一直边缘, 2, 或 P的 ccnt 尚未累积达到阈值
+//                 tsdf_new1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+//                 weight_new1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+//                 weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+//                 pack_tsdf (tsdf_new1, weight_new1, *pos1);
+//                 if(doDbgPrint){
+//                     printf("P_edge: 【【tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", tsdf_new1, weight_new1, non_edge_near0);
+//                 }
+//             }
+//             else if(is_curr_edge_wide){ //P-in, C-edge
+//                 if(doDbgPrint)
+//                     printf("P_non_edge_C_edge_DONT_FUSE\n");
+//                 continue;
+//             }
+
+            //if(non_edge_near0 && is_curr_edge_wide){ //P-in, C-edge
+            //    continue;
+
+            //    if(doDbgPrint)
+            //        printf("P_non_edge_C_edge_DONT_FUSE\n");
+            //}
+            //↑--此逻辑不对, 不要随便跳过, 会导致 in/edge 交界处, tsdf 偏差!! 实际前面 v19.8.10已经正确处理过了    @2018-10-9 00:29:37
+
+            bool setup_cluster2 = false; //背面观测标志位 
+
+            float tsdf_new_tmp;
+            int weight_new_tmp;
+
+            //int rc_flag = rc_flag_map.ptr(coo.y)[coo.x]; //v21.1.1  //ushort->int @2018-10-3 22:19:06
+            //if(doDbgPrint)
+            //    printf("【【rc_flag: %u", rc_flag);
+
+            //if(rc_flag == 127 || rc_flag == 128 || rc_flag == 130){ //v21.1~3
+            rc_flag + Dp_scaled * 1000
+            if(rc_flag)
+//                 if(doDbgPrint)
+//                     printf("setup_cluster2; rc_flag_127\n");
+
+                //setup_cluster2 = true;
+
+                if(non_edge_near0){ //P-in
+                    tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                    weight_prev2nd = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+                    pack_tsdf (tsdf_prev2nd, weight_prev2nd, *pos2nd);
+
+                    if(doDbgPrint)
+                        printf("rc_flag_127-P_in-【【w2++; t2_new: %f, w2_new: %d\n", tsdf_prev2nd, weight_prev2nd);
+
+                    if(weight_prev2nd > WEIGHT_CONFID_TH 
+                        && abs(tsdf_prev2nd) < abs(tsdf_prev1)) //默认 vol1 存的 abs-t 应较小, 若不然, 则交换 exch
+                    {
+
+                        if(doDbgPrint)
+                            printf("【【【【【Exchanging... w2_gt_TH && |t2|<|t1|: tp1:= %f, tp2:= %f\n", tsdf_prev1, tsdf_prev2nd);
+
+                        pack_tsdf (tsdf_prev1, weight_prev1, *pos2nd); //(t1,w1)=>pos2
+                        //↑--v20.1.13: 重新启用交换策略, 暂放弃置零策略 @2018-9-26 20:19:31
+
+                        weight_new_tmp = (weight_prev2nd << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                        pack_tsdf (tsdf_prev2nd, weight_new_tmp, *pos1); //(tnew, wnew)=>pos1
+                    }
+
+                }
+                else{ //P-edge
+                    tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                    weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                    weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                    pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+
+                    if(doDbgPrint)
+                        printf("rc_flag_127-P_edge-【w1++; t1_new: %f, w1_new: %d\n", tsdf_prev1, weight_new_tmp);
+
+                }
+            }
+            else{ //rc_flag 顺, 或新, 或已经交换
+                if(weight_prev2nd == 0){ //w2 无, 说明 rc 顺
+                    tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                    weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                    weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                    pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+
+                    if(doDbgPrint)
+                        printf("【rc_flag_forward-w2_eq_0: %d, pack1, t1_new: %f, w1_new: %d\n", rc_flag, tsdf_prev1, weight_prev1);
+                }
+                else{ //判定 w2>0 or >th？？【【待定
+                    if(doDbgPrint){
+                        printf("【【rc_flag_forward-w2_gt_0: %d, cluster\n", rc_flag);
+
+                        if(weight_prev2nd < WEIGHT_CONFID_TH)
+                            printf("【【【【【【【w2_le_TH: %d, ERRORRRRRRRRRRRRRR\n", weight_prev2nd);
+                    }
+
+                    if(abs(tsdf_curr - tsdf_prev1) < abs(tsdf_curr - tsdf_prev2nd)){
+                        if(doDbgPrint)
+                            printf("\t<<<tcurr_near_tp1; w1+++\n");
+
+                        tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                        weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                        weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                        pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+                    }
+                    else{ //if-tc near tp2nd 
+                        if(doDbgPrint)
+                            printf("\t<<<tcurr_near_tp2nd; w2+++\n");
+
+                        tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                        weight_prev2nd = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+                        pack_tsdf (tsdf_prev2nd, weight_prev2nd, *pos2nd);
+                    }
+                }
+            }
+            //↓-【放弃，改仅以 rc_flag 为判定标志, 当 w2>th, exch 之后, rc_flag 自然重置 @2018-10-5 17:03:20
+//             //if(0 < weight_prev2nd){ //w2≠0 本身作为一个 FLAG
+//             if(0 < weight_prev2nd && weight_prev2nd < WEIGHT_CONFID_TH){ //v20.1.13: 改为: ①w2∈某区间, 就要一直 c2=true; 且②: 达到阈值后 w2 不清空  @2018-9-26 20:13:53
+//                 if(doDbgPrint)
+//                     printf("setup_cluster2; ++++w2>0\n");
+// 
+//                 setup_cluster2 = true;
+//             }
+//             else if(weight_prev2nd > WEIGHT_CONFID_TH){
+//                 if(doDbgPrint)
+//                     printf("DONT_setup_cluster2_w2_gt_CONFID\n");
+// 
+//                 setup_cluster2 = false;
+//             }
+
+
+//             if(setup_cluster2){
+//                 if(doDbgPrint)
+//                     printf("w2_le_CONFID--pack2\n");
+// 
+//                 tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+//                 weight_prev2nd = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+//                 pack_tsdf (tsdf_new_tmp, weight_prev2nd, *pos2nd);
+//                 continue;
+//             }
+//             else{} 
+
+//             if(abs(tsdf_curr - tsdf_prev1) < abs(tsdf_curr - tsdf_prev2nd)){
+//                 if(doDbgPrint)
+//                     printf("\t<<<tcurr_near_tp1; w1+++\n");
+// 
+//                 tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+//                 weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+// 
+//                 weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+//                 pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+//             }
+//             else{ //if-tc near tp2nd 
+//                 if(doDbgPrint)
+//                     printf("\t<<<tcurr_near_tp2nd; w2+++\n");
+// 
+//                 tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+//                 weight_prev2nd = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+//                 pack_tsdf (tsdf_prev2nd, weight_prev2nd, *pos2nd);
+//             }
+
+#elif 1 //v21.4.1   @2018-10-14 19:32:37
+            int fuse_method = FUSE_KF_AVGE; //默认原策略
+            if(rc_flag >= 0){// && depthScaled > 0) //去掉, 因为此大 if内本来就 d_curr >0 
+                if(doDbgPrint)
+                    printf("FUSE_KF_AVGE:=rc_flag_ge_0: rc_flag: %d\n", rc_flag);
+
+                //v21.5.11: 以 long1-jlong-c为例, 内部碎片原因: F~-0.8, w1~30 时, 斜视大正值, 变成正值, 且权重增大, 后面无法衰减 @2018-10-27 21:34:08
+                float cos_p_c = dot(snorm_curr_g, snorm_prev_g);
+                float cos_abs_min3 = min(abs(cos_p_c), cos_abs_min);
+                if(tsdf_prev1 < -0.5 && non_edge_near0 && cos_abs_min3 < COS80){
+                    fuse_method = FUSE_IGNORE_CURR;
+                }
+            }
+            else{ //if-rc<0 背面过零点了
+                //float diff = Dp_scaled + rc_flag * 1e-3; //in meters //rc 本来是 short 毫米尺度
+                float diff = (Dp_not_scaled + rc_flag) * 1e-3; //meters, 改用非 scale 值
+                if(doDbgPrint)
+                    printf("diff: %f, Dp_not_scaled + rc_flag: %d, %d\n", diff, Dp_not_scaled, rc_flag);
+
+                //const float MIN_THICKNESS = 0.010; //-cell_size.x; //in meters
+                const float MIN_THICKNESS = 0.001; //v21.3.7.e: 改 ≈0；//cup6down1c 把手断掉跟这里有关吗？ @2018-11-20 01:26:13
+                //const float MIN_THICKNESS = shrink_dist_th; //v21.5.7.1.2: 不好, 太薄, 穿透
+                //const float MIN_THICKNESS = cell_size.x * 4; //v21.5.7.1.3
+                if(diff >= MIN_THICKNESS){ //c 甚至比 p背面过零点还要深, 
+#if 10   //dc>inv_dp 时,一律 IGN
+                    fuse_method = FUSE_IGNORE_CURR;
+                    if(doDbgPrint)
+                        printf("diff_gt_MIN_THICKNESS==FUSE_IGNORE_CURR\n");
+#elif 1 //v21.3.7.g: 加判定: 仅当 P-in 时, 才根据diff 做 IGN, 若一直P-edge, 就仍默认 AVG, 确保细物体边缘光滑, 如cup6down1c @2018-11-20 11:16:11
+                    if(non_edge_near0){
+                        fuse_method = FUSE_IGNORE_CURR;
+                        if(doDbgPrint)
+                            printf("diff_gt_MIN_THICKNESS==FUSE_IGNORE_CURR--if_P_in\n");
+                    }
+#elif 0   //v21.4.5 实验: IGN 再换成 AVG
+                    //fuse_method = FUSE_IGNORE_CURR;
+                    //↑--v21.4.5: 去掉 diff>TH 时的 IGN 判定 @2018-10-16 10:16:14
+                    //边缘 +>- 搞定, 但薄片孔洞, 破损重新出现; 怎么区分边缘、薄片？【未解决】 @2018-10-16 10:17:05
+                    if(doDbgPrint)
+                        //printf("diff_gt_MIN_THICKNESS==FUSE_IGNORE_CURR\n");
+                        printf("diff_gt_MIN_THICKNESS==still_FUSE_KF_AVGE\n");
+#elif 0 //实验: 因边缘 和斜视(2D img上也检出为边缘) 难以区分, 所以 c+ 在背面视角如何判定很难, 要么破碎, 要么边缘难圆滑
+                    //① 思路一: 以 WEIGHT_CONFID_TH 区分, 粗暴, 可能有错 @2018-10-16 19:59:07
+                    //不行, 例子: box [149,54,96,1] 调试点, 在 f464 第一次 diff>TH, 但 w1 已经很高, 只会判定 IGN, 所以 w1 不可靠
+                    if(weight_prev1 > WEIGHT_CONFID_TH){ //类似 21.4.4
+                        fuse_method = FUSE_IGNORE_CURR;
+                        if(doDbgPrint)
+                            printf("diff_gt_MIN_THICKNESS==FUSE_IGNORE_CURR\n");
+                    }
+                    else{
+                        if(doDbgPrint)
+                            printf("diff_gt_MIN_THICKNESS==still_FUSE_KF_AVGE\n");
+                    }
+#elif 1 //尝试在 dmap_model 上做边缘检测, 然后 2D dist-transform, 再判定 3D vxl 到边缘真实距离, 作为
+
+
+#endif
+                }
+                else if(diff <= - shrink_dist_th){ //c 很浅
+                    fuse_method = FUSE_KF_AVGE;
+                    if(doDbgPrint)
+                        printf("FUSE_KF_AVGE:=diff∈(-∞, -shrink_dist_th]\n");
+                }
+                else{ //diff∈(-shrink_dist_th, MIN_THICKNESS)
+                    fuse_method = FUSE_CLUSTER;
+                    if(doDbgPrint)
+                        printf("FUSE_CLUSTER:=diff∈(-shrink_dist_th, MIN_THICKNESS)\n");
+                }
+            }//if-rc<0 
+
+            //v21.4.3: rc 判定之后, 再以 in-edge 判定边缘情况, 直接覆盖前面决策
+            //效果很差, 因为 C-edge 判定, 在临界区域, 非常不稳定!!    @2018-10-15 05:40:33
+//             if(!non_edge_near0){ //若 一直边缘
+//                 if(doDbgPrint){
+//                     if(FUSE_IGNORE_CURR == fuse_method)
+//                         printf("FUSE_IGNORE_CURR_2_FUSE_KF_AVGE+++++++++++++++\n");
+//                     else if(FUSE_CLUSTER == fuse_method)
+//                         printf("FUSE_CLUSTER_2_FUSE_KF_AVGE+++++++++++++++\n");
+//                 }
+// 
+//                 fuse_method = FUSE_KF_AVGE;
+//             }
+//             else if(is_curr_edge_wide){ //P-in, C-edge
+//                 if(weight_prev1 > WEIGHT_CONFID_TH){ //v21.4.4
+//                     if(doDbgPrint){
+//                         if(FUSE_KF_AVGE == fuse_method)
+//                             printf("FUSE_KF_AVGE_2_FUSE_IGNORE_CURR==========\n");
+//                         else if(FUSE_CLUSTER == fuse_method)
+//                             printf("FUSE_CLUSTER_2_FUSE_IGNORE_CURR==========\n");
+//                     }
+//                     fuse_method = FUSE_IGNORE_CURR;
+//                 }
+//                 else{
+//                     if(doDbgPrint)
+//                         printf("P_in_C_edge_weight_prev1: %f\n", weight_prev1);
+// 
+//                     fuse_method = FUSE_KF_AVGE;
+//                 }
+//             }
+
+            float tsdf_new_tmp;
+            int weight_new_tmp;
+
+            if(FUSE_KF_AVGE == fuse_method){
+                tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+            }
+            if(FUSE_CLUSTER == fuse_method){
+                //纯以 rc 正负深度判定, 不以 tsdf 值正负、大小判定 @2018-10-14 21:11:25
+                //float sdf = Dp_scaled - sqrtf (v_g_z * v_g_z + v_g_part_norm); //参考
+                //float v_g_z_mm = v_g_z * 1e3; //mm, z本是米, 转毫米也未必整数
+                float v_c_z_mm = v_z_real * 1e3; //mm, z本是米, 转毫米也未必整数
+#if 10   //v21.6 之前
+                float sdf_forward = Dp_not_scaled - v_c_z_mm;
+#elif 1   //v21.6.x
+                ushort Dp_not_scaled_vol2 = depthModel_vol2.ptr (coo.y)[coo.x]; //mm
+                float sdf_forward = Dp_not_scaled_vol2 - v_c_z_mm;
+#endif
+
+                float sdf_backward = v_c_z_mm + rc_flag;
+                if(doDbgPrint){
+                    printf("FUSE_CLUSTER:=sdf_forward: %f, sdf_backward: %f; //Dp_not_scaled, v_c_z_mm, rc_flag: %f, %f, %f\n", sdf_forward, sdf_backward, (float)Dp_not_scaled, v_c_z_mm, (float)rc_flag);
+                    printf("Dp_not_scaled, v_c_z_mm, rc_flag: %u, %f, %d\n", Dp_not_scaled, v_c_z_mm, rc_flag);
+                }
+
+#if 01   //v21.3.7 ~ v21.3.12 “怂二分类”, 
+                //在 cup6up1c 数据上, 不如 v21.5.3 @2018-10-23 13:54:48
+                //if(abs(sdf_forward) < abs(sdf_backward)){ //离正面近
+                if(abs(sdf_forward) < abs(sdf_backward) || !non_edge_near0){ //离正面近 //v21.3.7.b: 同时要判定是否边缘	@2018-11-19 09:47:57
+                //if(1){ //v21.3.10: 在 v21.3.7 基础上, 暂去掉 cluster 逻辑;   //在马克杯 cup6down1c 数据上不错, 杯子把手连贯 (v21.3.7 断了) @2018-10-22 15:42:13
+                    //仍是 w1++
+                    //Wrk = 2; //v21.4.3: cluster 时提高权重, 使 c更容易冲掉 p   @2018-10-15 04:12:16
+                    //↑-并不好, 类似潜在导致 bias 的操作都不好 @2018-10-21 21:24:38
+                    tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                    weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                    weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                    pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+                    if(doDbgPrint)
+                        printf("FUSE_CLUSTER__sdf_forward<<<<<sdf_backward\n");
+                }
+                else{ //离背面近
+                    if(doDbgPrint)
+                        printf("FUSE_CLUSTER__ignore...\n");
+                }
+#elif 1 //v21.5.x
+                if(weight_prev2nd < WEIGHT_CONFID_TH){
+                    tsdf_new_tmp = (tsdf_prev2nd * weight_prev2nd + tsdf_curr * Wrk) / (weight_prev2nd + Wrk);
+                    weight_new_tmp = min (weight_prev2nd + Wrk, Tsdf::MAX_WEIGHT);
+                    pack_tsdf (tsdf_new_tmp, weight_new_tmp, *pos2nd);
+                    if(doDbgPrint)
+                        printf("【【w2++:: t2_new, w2_new: %f, %d, \n", tsdf_new_tmp, weight_new_tmp);
+                }
+                else{
+#if 0   //v21.5.1
+                    float floor_p = 0.2; //记号: flrp
+#elif 0 //v21.5.2: 若曾 P-in, 则钟形曲线形如 "_/\_"
+                    float floor_p = 1.0; //记号: flrp
+                    if(non_edge_near0)
+                        floor_p = 0.2;
+
+                    float p1 = max(floor_p, 1 - abs(tsdf_prev1)),
+                        p2 = max(floor_p, 1 - abs(tsdf_prev2nd));
+
+#elif 0 //v21.5.4: 仍然要考虑 (t)sdf forward、backward 关系, 以决定 flrp 下限
+                    float floor_p = 0.0; //记号: flrp
+                    //if(abs(sdf_forward) < abs(sdf_backward)){ //不好, 如果 vox 甚至在 sdf-back 之后(即此vox在背面曾在表面外) 怎么办?
+                    if(sdf_forward > sdf_backward){
+                        floor_p = 1.0;
+                        if(doDbgPrint)
+                            printf("sdf_forward_near, floor_p_UUUUUUUUUUUUP\n");
+                    }
+                    float p1 = max(floor_p, 1 - abs(tsdf_prev1)),
+                        p2 = max(floor_p, 1 - abs(tsdf_prev2nd));
+#elif 0 //v21.5.5   @2018-10-24 10:49:44
+                    float p1 = 1.f,
+                        p2 = 1.f;
+                    if(!is_curr_edge_narrow){ //C-in-narrow 时候, 才操纵 p2; 一直边缘时候(比如细把手、铅笔) 不操纵 p2
+                        if(sdf_forward < sdf_backward){
+                            //p2 = 0.1; //暂不置零
+                            p2 = 0.f; //置零
+
+                        }
+                    }
+#elif 0 //v21.5.6: 考虑 ①, 不用 C-in/edge 判定; ②, sdf forw-backw 判定时, 也应影响 p1    @2018-10-24 19:18:14
+                    float p1 = 1.f,
+                        p2 = 1.f;
+                    float floor_p = 0.0; //记号: flrp
+
+                    if(sdf_forward < sdf_backward){ //离背面近
+                        p2 = floor_p;
+                    }
+                    else{ //离正面近
+                        if(tsdf_prev1 < -0.5) //且 t1 确实“很负”, 可能较大“背面观测”成分
+                            p1 = floor_p;
+                    }
+
+#elif 1 //v21.6.0: 核心是, 在 vol2 上 rcast 求 sdf_forward, 而非用 dcurr 瞬时结果 @2018-11-29 17:54:01
+                    float sdf_forward_le0 = min(0.f, sdf_forward); //取非正 <=0 部分
+                    float sdf_backward_le0 = min(0.f, sdf_backward);
+                    float p1 = sdf_backward_le0 / (sdf_forward_le0 + sdf_backward_le0); //trick: 分子分母都负值, 所以无所谓
+                    float p2 = 1 - p1;
+#endif
+
+
+                    //tsdf_new_tmp = (weight_prev1 * p1 * tsdf_prev1 + weight_prev2nd * p2 * tsdf_prev2nd) / (weight_prev1 + weight_prev2nd);
+                    tsdf_new_tmp = (weight_prev1 * p1 * tsdf_prev1 + weight_prev2nd * p2 * tsdf_prev2nd) / (weight_prev1 * p1 + weight_prev2nd * p2); //v21.5.3: 上面分母有错, 导致偏差, 凹凸噪声; 【已修正，已验证 @2018-10-23 12:26:20
+                    //weight_new_tmp = min(weight_prev1 + weight_prev2nd, Tsdf::MAX_WEIGHT);
+                    weight_new_tmp = min(int(weight_prev1 * p1 + weight_prev2nd * p2), Tsdf::MAX_WEIGHT); //v21.5.6: w_new 计算时带上 p1, p2
+                    if(doDbgPrint)
+                        printf("【【w2_fuse_w1: w1: %d, p1: %f, t1: %f; 【【w2: %d, p2: %f, t1: %f; w_new: %d, t_new: %f\n", 
+                        weight_prev1, p1, tsdf_prev1, weight_prev2nd, p2, tsdf_prev2nd, weight_new_tmp, tsdf_new_tmp);
+
+                    weight_new_tmp = (weight_new_tmp << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                    pack_tsdf (tsdf_new_tmp, weight_new_tmp, *pos1);
+
+                    pack_tsdf (0, 0, *pos2nd); //pos2 重置清空
+                }
+#endif //二分类落实哪种策略
+            }
+#endif //v21.1~ v21.2~ v21.4.x
+
+
+            //if(164 == x && 60 == y && 112 == z)
+            //    printf("【【@(%d, %d, %d):tsdf_new1: %f,, weight_new1: %d;;; non_edge_near0: %d\n", x, y, z, tsdf_new1, weight_new1, non_edge_near0);
+
+          }//if-(Dp_scaled != 0 && sdf >= -tranc_dist) 
+#if 0   //v19.x~v20.x
+          //else if(Dp_scaled != 0 && !is_curr_edge_wide //v19.8.3
+          else if(Dp_scaled != 0 //v20.1.8: curr-edge 判定移到下面, 因为 w2-shrink 不需要此判定 @2018-9-25 11:02:09
+              //&& sdf > -4*tranc_dist_real
+              //&& sdf > -4*tranc_dist    //good
+              && sdf > -shrink_dist_th   //good
+              )
+          {
+              //要不要 if-- tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH 条件？待定 @2018-8-24 01:08:46
+              //v19.2: 要, 
+              const int POS_VALID_WEIGHT_TH = 30; //30帧≈一秒
+              //if(tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //或, 若 t_p 正值但是尚不稳定
+              if(!is_curr_edge_wide && tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //v20.1.8: curr-edge 判定移到这里 @2018-9-25 11:02:51
+                  //if(weight_prev1 < POS_VALID_WEIGHT_TH) //v19.8.5: 去掉 tp+ 判定， +-一律衰减 @2018-9-12 20:00:24
+              {
+                  weight_new1 = max(0, weight_new1-1); //v18.22
+                  if(weight_new1 == 0)
+                      tsdf_new1 = 0; //严谨点, 避免调试绘制、marching cubes意外
+
+                  if(doDbgPrint)
+                      printf("】】tsdf_new1: %f,, W1-UNSTABLE SHRINK, weight_new1-=1: %d;\n", tsdf_new1, weight_new1);
+
+                  //v20.1.16:
+                  weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                  pack_tsdf (tsdf_new1, weight_new1, *pos1);
+              }
+
+//               if(weight_prev2nd > 0){ //即 setup_cluster2 仍在
+//                   //v20.1.6: v20 连续 w2 赋值的策略下, 若负值临界区域, 扫不到就断断续续递增 w2, 转过面之后会造成误判, 因此改成断续就衰减 @2018-9-25 00:16:04
+//                   //weight_prev2nd = max(0, weight_prev2nd-1);
+//                   weight_prev2nd --;
+//                   if(weight_prev2nd == 0)
+//                       tsdf_prev2nd = 0;
+//                   pack_tsdf(tsdf_prev2nd, weight_prev2nd, *pos2nd);
+// 
+//                   if(doDbgPrint)
+//                       printf("】】】w2-SHRINK, tsdf_prev2nd: %f, weight_prev2nd-1: %d\n", tsdf_prev2nd, weight_prev2nd);
+
+              //v20.1.9: 上面负值断续就衰减,不好用, 改成: 即使断续, 只要在薄带范围内, 就以 t2=-1 递增 w2  @2018-9-25 17:15:59
+//               if(0 < weight_prev2nd && weight_prev2nd < WEIGHT_CONFID_TH){ //即 setup_cluster2 仍在
+//                   tsdf_prev2nd = (tsdf_prev2nd * weight_prev2nd + (-1)) / (weight_prev2nd + 1);
+//                   weight_prev2nd = min (weight_prev2nd + 1, Tsdf::MAX_WEIGHT);
+//                   pack_tsdf(tsdf_prev2nd, weight_prev2nd, *pos2nd);
+//                   if(doDbgPrint)
+//                       printf("】】】w2+++, sdf<-TH, tsdf_prev2nd: %f, weight_prev2nd: %d\n", tsdf_prev2nd, weight_prev2nd);
+//               }
+          }//elif-(-4*td < sdf < -td)
+#elif 1 //稍微整理一下, 改嵌套 if-if, 以便兼容 v21.5.x
+          else if(Dp_scaled != 0){
+              //if(sdf > -shrink_dist_th){
+              if(non_edge_near0){ //v21.5.8: owl2 全反射导致cu内部噪声, 原 sdf>-TH 判定无法解决, 尝试此法   @2018-10-25 03:26:26
+              //if(1){ //v21.5.9: tooth1 上 v21.5.8 仍不行, 所以尝试 always-true @2018-10-25 04:24:59
+                  //要不要 if-- tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH 条件？待定 @2018-8-24 01:08:46
+                  //v19.2: 要, 
+                  const int POS_VALID_WEIGHT_TH = 30; //30帧≈一秒
+                  //if(tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //或, 若 t_p 正值但是尚不稳定
+                  //if(!is_curr_edge_wide && tsdf_prev1 > 0 && weight_prev1 < POS_VALID_WEIGHT_TH) //v20.1.8: curr-edge 判定移到这里 @2018-9-25 11:02:51
+                  if(!is_curr_edge_wide /*&& tsdf_prev1 > 0*/ && weight_prev1 < POS_VALID_WEIGHT_TH) //v20.1.8: curr-edge 判定移到这里 @2018-9-25 11:02:51
+                      //if(weight_prev1 < POS_VALID_WEIGHT_TH) //v19.8.5: 去掉 tp+ 判定， +-一律衰减 @2018-9-12 20:00:24
+                  {
+                      //weight_new1 = max(0, weight_new1-1); //v18.22
+                      weight_new1 = max(0, weight_new1-Wrk); //v21.6.0.a
+                      if(weight_new1 == 0)
+                          tsdf_new1 = 0; //严谨点, 避免调试绘制、marching cubes意外
+
+                      if(doDbgPrint)
+                          printf("】】tsdf_new1: %f,, W1-UNSTABLE SHRINK, weight_new1-=1: %d;\n", tsdf_new1, weight_new1);
+
+                      //v20.1.16:
+                      weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+                      pack_tsdf (tsdf_new1, weight_new1, *pos1);
+                  }
+
+                  //v21.5.11
+//                   if(tsdf_prev1 < -0.5 /*&& non_edge_near0 */ && sdf >= -1.2 * tranc_dist_real) //meters 
+//                   {
+//                       const float tsdf_curr = -1;
+//                       const int Wrk = 1;
+//                       tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+//                       weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+// 
+//                       weight_new1 = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+//                       pack_tsdf (tsdf_prev1, weight_new1, *pos1);
+// 
+//                       if(doDbgPrint)
+//                           printf("tp1_neg_AND_P_in_AND_sdf_gt_1.5th: 【【t1_new: %f, w1_new: %d\n", tsdf_prev1, weight_prev1);
+//                   }
+              }//if-(non_edge_near0)
+
+              //v21.5.7: 接上面 v21.5.x (~v21.5.6): 考虑: 若二分类, w2<TH 时, 突然视角已过, w2++停下了, 怎么处理?
+              //问题: v21.5.6 当w2 终止后, 转过大圈, 又见到正面时, 结果误判 w2 冲掉 w1, 导致凹凸噪声
+              //总体思路: 扔掉 w2; 或找机会强制刷新; //终止时常见情形: ① diff 规则导致 IGN 【diff_gt_MIN_THICKNESS==FUSE_IGNORE_CURR】 ② sdf <tdist导致 【sdfFFF】, sdfFFF又分 >or< shrink_dist_th 情形
+              //① 无效区域, w2--; ② 暂无
+
+              //v21.5.7.1: 只要 dp!=0, 不管 shrink_dist_th, 直接 w2--; 其实雷同 v20.1.6 
+              if(weight_prev2nd > 0){ //即 setup_cluster2 仍在
+                  //v20.1.6: v20 连续 w2 赋值的策略下, 若负值临界区域, 扫不到就断断续续递增 w2, 转过面之后会造成误判, 因此改成断续就衰减 @2018-9-25 00:16:04
+                  //weight_prev2nd = max(0, weight_prev2nd-1);
+                  //weight_prev2nd --;
+                  weight_prev2nd -= Wrk;
+
+                  if(weight_prev2nd == 0)
+                      tsdf_prev2nd = 0;
+                  pack_tsdf(tsdf_prev2nd, weight_prev2nd, *pos2nd);
+
+                  if(doDbgPrint)
+                      printf("】】】w2-SHRINK, tsdf_prev2nd: %f, weight_prev2nd-1: %d\n", tsdf_prev2nd, weight_prev2nd);
+              }
+          }//if-(Dp_scaled != 0)
+#endif
+
+#if 0   //v21.4.6: 专门处理 v21.4.5 的问题, 思路: 当 depthModel 有值, 但 d_curr 无效, 很可能是斜视、结构光边缘导致; 
+          //希望在远离表面处, 若 d_mod 有值, 就 t1=+1; 这里判定相当于先 interpmax_xy, 再xxxxxx   @2018-10-17 09:53:44
+          //【暂放弃, 缺点：①下面代码没有真用到 interpmax_xy; 而是取自 depthModel 的值, 若model上边缘噪声, 再用自身,导致无解
+          //②就算用 interpmax_xy, 也不好, 深度无效区域并不总是结构光视差导致, 随便用插值深度值作参考, 导致误判 @2018-10-24 22:19:24
+          else if(Dp_scaled == 0){
+              if(doDbgPrint)
+                  printf("Dp_scaled_eq_0:=");
+
+              ushort depth_prev = depthModel.ptr(coo.y)[coo.x];
+              if(depth_prev > 0){
+                  float v_c_z_mm = v_z_real * 1e3; //mm, z本是米, 转毫米也未必整数
+                  //float sdf_forward = Dp_not_scaled - v_c_z_mm; //错, d_curr 已是0, 该用 d_prev
+                  float sdf_forward = depth_prev - v_c_z_mm; //
+
+                  if(doDbgPrint)
+                      printf("depth_prev_gt_0:=sdf_forward: %f; //depth_prev, v_c_z_mm, rc_flag: %u, %f, %d\n", sdf_forward, depth_prev, v_c_z_mm, rc_flag);
+
+                  if(sdf_forward > shrink_dist_th * 1e3){ //远离表面处
+                      float tsdf_curr = +1.f;
+                      int Wrk = 1;
+
+                      float tsdf_new_tmp;
+                      int weight_new_tmp;
+
+                      tsdf_prev1 = (tsdf_prev1 * weight_prev1 + tsdf_curr * Wrk) / (weight_prev1 + Wrk);
+                      weight_prev1 = min (weight_prev1 + Wrk, Tsdf::MAX_WEIGHT);
+
+                      weight_new_tmp = (weight_prev1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt;
+                      pack_tsdf (tsdf_prev1, weight_new_tmp, *pos1);
+
+                      if(doDbgPrint)
+                          printf("sdf_forward_gt_shrink_dist_th; 【【tsdf_new1: %f\n", tsdf_prev1);
+                  }
+                  else{ //近表面处, 不 fuse
+                      if(doDbgPrint)
+                          printf("sdf_forward_LEEEEEEE_shrink_dist_th\n");
+                  }
+                  //weight_prev1
+              }
+              else{ //d_prev ==0
+                  if(doDbgPrint)
+                      printf("depth_prev_EQQQQQ_0\n");
+              }
+          }//if-(Dp_scaled == 0)
+#endif
+#if 1   
+        
+        
+        
+#endif 
+
+          //weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
+          //pack_tsdf (tsdf_new1, weight_new1, *pos1);
+          //↑--v20.1.16: 之前放外面, 主要是为了 任何条件下确保 non_edge_ccnt 写入; 但因逻辑难看清, 暂去掉, 在各分支内操作 @2018-9-27 11:28:19
+
+        }//if- 0 < (x,y) < (cols,rows)
+      }// for(int z = 0; z < VOLUME_Z; ++z)
+    }//tsdf23_v21
 
     __global__ void
     tsdf23normal_hack (const PtrStepSz<float> depthScaled, PtrStep<short2> volume,
@@ -4953,7 +7581,7 @@ pcl::device::integrateTsdfVolume (const PtrStepSz<ushort>& depth, const Intr& in
 
 void
 pcl::device::integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const Intr& intr,
-    const float3& volume_size, const Mat33& Rcurr_inv, const float3& tcurr, const float3& volume000_gcoo, float tranc_dist, float eta,
+    const float3& volume_size, const Mat33& Rcurr_inv, const float3& tcurr, const float3& volume000_gcoo, float tranc_dist, float eta, bool use_eta_trunc,
     PtrStep<short2> volume, DeviceArray2D<float>& depthScaled, int3 vxlDbg) //zc: 调试
 {
     //depthScaled.create (depth.rows, depth.cols);
@@ -4975,7 +7603,7 @@ pcl::device::integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const 
     dim3 grid (divUp (VOLUME_X, block.x), divUp (VOLUME_Y, block.y));
 
     //tsdf23<<<grid, block>>>(depthScaled, volume, tranc_dist, Rcurr_inv, tcurr, intr, cell_size, *buffer);    
-    tsdf23_s2s<<<grid, block>>>(depthScaled, volume, tranc_dist, eta,
+    tsdf23_s2s<<<grid, block>>>(depthScaled, volume, tranc_dist, eta, use_eta_trunc,
         Rcurr_inv, tcurr, volume000_gcoo, intr, cell_size, vxlDbg);    
 
     //  for ( int i = 0; i < 100; i++ )
@@ -5135,6 +7763,9 @@ pcl::device::integrateTsdfVolume_v18 (const PtrStepSz<ushort>& depth, const Intr
     const MapArr &weight_map, //v11.4
     const PtrStepSz<ushort>& depth_model,
     DeviceArray2D<short>& diffDmap,
+    const PtrStepSz<ushort>& depth_model_vol2, //v21.6.0: 核心是, 在 vol2 上 rcast 求 sdf_forward, 而非用 dcurr 瞬时结果 @2018-11-29 17:54:01
+    //const PtrStepSz<ushort>& rc_flag_map,
+    const PtrStepSz<short>& rc_flag_map,
     DeviceArray2D<float>& depthScaled, int3 vxlDbg)
 {
     depthScaled.create (depth.rows, depth.cols);
@@ -5171,13 +7802,56 @@ pcl::device::integrateTsdfVolume_v18 (const PtrStepSz<ushort>& depth, const Intr
     //tsdf23_v16<<<grid, block>>>(depthScaled, volume,  //测试 tranc_dist_real 用的
     //tsdf23_v17<<<grid, block>>>(depthScaled, volume,  //长短 tdist, 晶格独立存 tdist
     //test_kernel<<<grid, block>>>(vxlDbg); //v18.2
-    tsdf23_v18<<<grid, block>>>(depthScaled, volume,  
+    //tsdf23_v18<<<grid, block>>>(depthScaled, volume,  
+    //tsdf23_v19<<<grid, block>>>(depthScaled, volume,  
+//     tsdf23_v20<<<grid, block>>>(depthScaled, volume,  
+//         volume2nd, flagVolume, surfNormVolume, vrayPrevVolume, incidAngleMask, 
+//         nmap_curr_g, nmap_model_g,
+//         weight_map,
+//         depth_model, //v18.5, 新增形参, 主要判定 isnan
+//         diffDmap,
+//         tranc_dist, Rcurr_inv, tcurr, intr, cell_size, vxlDbg);    
+    tsdf23_v21<<<grid, block>>>(depthScaled, volume,  
         volume2nd, flagVolume, surfNormVolume, vrayPrevVolume, incidAngleMask, 
         nmap_curr_g, nmap_model_g,
         weight_map,
+        depth, //新增, 因为 rc_flag_map, depth_model 等都是没 scale的, 所以 kernel 中 rc_flag 处理逻辑统一不 scale
         depth_model, //v18.5, 新增形参, 主要判定 isnan
         diffDmap,
+        depth_model_vol2, //v21.6.0: 核心是, 在 vol2 上 rcast 求 sdf_forward, 而非用 dcurr 瞬时结果 @2018-11-29 17:54:01
+        rc_flag_map,
         tranc_dist, Rcurr_inv, tcurr, intr, cell_size, vxlDbg);    
+
+    cudaSafeCall (cudaDeviceSynchronize ());
+
+//     static std::ofstream fout("kf-dbg-log.txt");
+//     //if(!fout.good())
+//     float sdf_orig_host;
+//     float cos_host;
+//     float sdf_cos_host;
+//     float tdist_real_host;
+//     bool snorm_oppo_host;
+//     bool is_curr_edge_host;
+//     bool is_non_edge_near0_host;
+//     short depth_curr_host;
+//     short depth_prev_host;
+//     short diff_cp_host;
+//     cudaSafeCall(cudaMemcpyFromSymbol(&sdf_orig_host, sdf_orig_dev, sizeof(sdf_orig_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&cos_host, cos_dev, sizeof(cos_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&sdf_cos_host, sdf_cos_dev, sizeof(sdf_cos_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&tdist_real_host, tdist_real_dev, sizeof(tdist_real_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&snorm_oppo_host, snorm_oppo_dev, sizeof(snorm_oppo_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&is_curr_edge_host, is_curr_edge_dev, sizeof(is_curr_edge_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&is_non_edge_near0_host, is_non_edge_near0_dev, sizeof(is_non_edge_near0_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&depth_curr_host, depth_curr_dev, sizeof(depth_curr_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&depth_prev_host, depth_prev_dev, sizeof(depth_prev_host)) );
+//     cudaSafeCall(cudaMemcpyFromSymbol(&diff_cp_host, diff_cp_dev, sizeof(diff_cp_host)) );
+// 
+//     fout << sdf_orig_host << ',' << cos_host << ',' << sdf_cos_host 
+//          << ',' << tdist_real_host << ',' << snorm_oppo_host
+//          << ',' << is_curr_edge_host << ',' << is_non_edge_near0_host 
+//          << ',' << depth_curr_host << ',' << depth_prev_host << ',' << diff_cp_host 
+//          << std::endl;
 }//integrateTsdfVolume_v18
 
 
@@ -5462,7 +8136,7 @@ calcWmapKernel(int rows, int cols, const PtrStep<float> vmapLocal, const PtrStep
 
 //@param[in] vmapLocal, 其实只要个 dmap 就行, 暂不改, 与之前 calcWmapKernel 保持一致
 __global__ void
-edge2wmapKernel(int rows, int cols, const PtrStep<float> vmapLocal, const PtrStepSz<float> edgeDistMap, float fxy, PtrStepSz<float> wmap_out){
+edge2wmapKernel(int rows, int cols, const PtrStep<float> vmapLocal, const PtrStepSz<float> edgeDistMap, float fxy, float maxEdgeDist, PtrStepSz<float> wmap_out){
     int x = threadIdx.x + blockIdx.x * blockDim.x,
         y = threadIdx.y + blockIdx.y * blockDim.y;
 
@@ -5480,7 +8154,7 @@ edge2wmapKernel(int rows, int cols, const PtrStep<float> vmapLocal, const PtrSte
     vray.y = vmapLocal.ptr(y + rows)[x];
     vray.z = vmapLocal.ptr(y + 2 * rows)[x]; //meters
 
-    const float maxEdgeDist = 10; //in mm //30mm 太长
+    //const float maxEdgeDist = 10; //in mm //30mm 太长 //改为函数形参 @2018-8-17 17:39:15
     float edgeDistMm = edgeDistMap.ptr(y)[x] / fxy * vray.z * 1e3; //in mm
 
     float edgeDistFactor = min(1.f, edgeDistMm / maxEdgeDist);
@@ -5517,7 +8191,7 @@ void calcWmap(const MapArr &vmapLocal, const MapArr &nmapLocal, const DeviceArra
     //cudaSafeCall(cudaDeviceSynchronize()); //tmp, 暂时企图避免阻塞 @2017-12-6 22:03:13
 }//calcWmap
 
-void edge2wmap(const MapArr &vmapLocal, const DeviceArray2D<float> &edgeDistMap, const float fxy, MapArr &wmap_out){
+void edge2wmap(const MapArr &vmapLocal, const DeviceArray2D<float> &edgeDistMap, const float fxy, float maxEdgeDist, MapArr &wmap_out){
     int cols = vmapLocal.cols(),
         rows = vmapLocal.rows() / 3;
 
@@ -5526,7 +8200,7 @@ void edge2wmap(const MapArr &vmapLocal, const DeviceArray2D<float> &edgeDistMap,
     dim3 block(32, 8);
     dim3 grid(divUp(cols, block.x), divUp(rows, block.y));
 
-    edge2wmapKernel<<<grid, block>>>(rows, cols, vmapLocal, edgeDistMap, fxy, wmap_out);
+    edge2wmapKernel<<<grid, block>>>(rows, cols, vmapLocal, edgeDistMap, fxy, maxEdgeDist, wmap_out);
 
     cudaSafeCall(cudaGetLastError());
 

@@ -69,6 +69,7 @@ pcl::gpu::TsdfVolume::TsdfVolume(const Vector3i& resolution) : resolution_(resol
 
 void
 pcl::gpu::TsdfVolume::create_init_cu_volume(){
+	printf("in create_init_cu_volume()\n");
 	int volume_x = resolution_(0);
 	int volume_y = resolution_(1);
 	int volume_z = resolution_(2);
@@ -93,8 +94,11 @@ pcl::gpu::TsdfVolume::create_init_s2s_volume(){
 	int volume_z = resolution_(2);
 
 	volume2nd_.create(volume_y * volume_z, volume_x);
+	volume3rd_proxy_.create(volume_y * volume_z, volume_x);
 
 	device::initVrayPrevVolume(volume2nd_);
+	device::initVrayPrevVolume(volume3rd_proxy_);
+	printf("device::initVrayPrevVolume(volume3rd_proxy_)\n");
 }//create_init_s2s_volume
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////

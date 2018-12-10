@@ -234,7 +234,7 @@ namespace pcl
     //@param[in] fix_axis=0/1/2(x/y/z), 想要固定的轴向, 例如固定x轴, 则切片平面为 yz轴
     //@param[in/out] dbgMat, 以 (x,y,z)为中心, 邻域内 21x21 切片, 放大到 525x525 图像 (25倍)
     //@return RESxRES 尺寸, 贯穿整个 vol 的切片图
-    cv::Mat slice2D(int xcen, int ycen, int zcen, int fix_axis, cv::OutputArray dbgMat = cv::noArray(), bool doDbg = false);
+    cv::Mat slice2D(int xcen, int ycen, int zcen, int fix_axis, cv::OutputArray weiMat = cv::noArray(), cv::OutputArray dbgMat = cv::noArray(), bool doDbg = false);
 
     /** \brief Converts the volume to a surface representation via a point cloud */
   //  void

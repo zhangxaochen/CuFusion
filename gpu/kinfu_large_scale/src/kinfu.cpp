@@ -637,6 +637,13 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	s2s_beta_ = 0.5f; //inc step
 	s2s_eta_ = 0.01f; //10mm
 	s2s_f2m_ = true;
+
+	dbgFid_ = -1;
+	dbgLvlIdx_ = -1;
+	dbgIter_ = -1;
+	dbgV2_18_ = -1;
+
+	is_integrate_ = true;
 }//KinfuTracker-ctor
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -795,6 +802,9 @@ void
 	vmap_g_model_.create(rows * 3, cols);
 	nmap_g_model_.create(rows * 3, cols);
 
+	vmap_g_model_vol2_.create(rows * 3, cols);
+	nmap_g_model_vol2_.create(rows * 3, cols);
+
 	coresps_.resize (LEVELS);
 
 	for (int i = 0; i < LEVELS; ++i)
@@ -816,6 +826,8 @@ void
 		coresps_[i].create (pyr_rows, pyr_cols);
 	}  
 	depthRawScaled_.create (rows, cols);
+	depthRawScaled_prev_.create (rows, cols);
+
 	// see estimate tranform for the magic numbers
 	//gbuf_.create (27, 20*60);
 	gbuf_.create( 27, 640*480 );
@@ -1008,7 +1020,10 @@ bool
 	{
 		// POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
 		//ScopeTime time( ">>> transformation based on raycast" );
-		Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
+		//Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
+		Matrix3frm R_iden;
+		R_iden = Eigen::Matrix3f::Identity ();
+		Mat33&  rotation_id = device_cast<Mat33> (R_iden); /// Identity Rotation Matrix
 		float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
 
 		//~ PCL_INFO ("Raycasting with cube origin at %f, %f, %f\n", cube_origin.x, cube_origin.y, cube_origin.z);
@@ -1068,7 +1083,10 @@ bool
 			MapArr& nmap_g_prev = nmaps_g_prev_[level_index];
 
 			// We need to transform the maps from global to the local coordinates
-			Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); // Identity Rotation Matrix. Because we only need translation
+			//Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
+			Matrix3frm R_iden;
+			R_iden = Eigen::Matrix3f::Identity ();
+			Mat33&  rotation_id = device_cast<Mat33> (R_iden); /// Identity Rotation Matrix
 			float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
 			cube_origin.x = -cube_origin.x;
 			cube_origin.y = -cube_origin.y;
@@ -1441,7 +1459,64 @@ cv::Mat pcl::gpu::KinfuTracker::bdrodometry_interpmax( cv::Mat depth )
 		}
 	}
 	return result;
-}
+}//bdrodometry_interpmax
+
+cv::Mat pcl::gpu::KinfuTracker::interpmax_xy( cv::Mat depth )
+{
+	float depth_inf = 10.0f;
+	cv::Mat result = depth.clone();
+	int rr = depth.rows,
+		cc = depth.cols;
+
+	for ( int i = 0; i < rr; i++ ) {
+		result.at< float >( i, 0 ) = depth_inf;
+		result.at< float >( i, cc-1) = depth_inf;
+		int marker = -1;
+		for ( int j = 0; j < cc; j++ ) {
+			if ( marker == -1 ) {
+				if ( result.at< float >( i, j ) == 0.0f ) {
+					marker = j - 1;
+				}
+			} else {
+				if ( result.at< float >( i, j ) > 0.0f ) {
+					float x = __max( result.at< float >( i, j ), result.at< float >( i, marker ) );
+					for ( int k = marker + 1; k < j; k++ ) {
+						result.at< float >( i, k ) = x;
+					}
+					marker = -1;
+				}
+			}
+		}
+	}//for-i
+
+	cv::Mat interp_y_mat = depth.clone();
+
+	for ( int j = 0; j < cc; j++ ) {
+		interp_y_mat.at< float >( 0, j ) = depth_inf;
+		interp_y_mat.at< float >( rr-1, j ) = depth_inf;
+		int marker = -1;
+		//for ( int j = 0; j < 640; j++ ) {
+		for ( int i = 0; i < rr; i++ ) {
+			if ( marker == -1 ) {
+				if ( interp_y_mat.at< float >( i, j ) == 0.0f ) {
+					marker = i - 1;
+				}
+			} else {
+				if ( interp_y_mat.at< float >( i, j ) > 0.0f ) {
+					float x = __max( interp_y_mat.at< float >( i, j ), interp_y_mat.at< float >( marker, j ) );
+					for ( int k = marker + 1; k < i; k++ ) {
+						interp_y_mat.at< float >( k, j ) = x;
+					}
+					marker = -1;
+				}
+			}
+		}
+	}//for-i
+
+	//return result;
+	//return interp_y_mat;
+	return cv::max(result, interp_y_mat);
+}//interpmax_xy
 
 cv::Mat pcl::gpu::KinfuTracker::bdrodometry_getOcclusionBoundary( cv::Mat depth, float dist_threshold )
 {
@@ -1496,6 +1571,7 @@ cv::Mat pcl::gpu::KinfuTracker::edge_from_dmap(cv::Mat depth, cv::Mat &edge_map_
 		{ 1, 1 }
 	};
 
+#if 0	//1-for-loop
 	for ( int i = 30; i < 460; i++ ) {
 		for ( int j = 20; j < 580; j++ ) {
 			if ( depth.at< float >( i, j ) > 0.0f ) { //当前 px 要有效
@@ -1512,6 +1588,33 @@ cv::Mat pcl::gpu::KinfuTracker::edge_from_dmap(cv::Mat depth, cv::Mat &edge_map_
 			}
 		}
 	}
+#elif 1	//2-for-loops
+	for ( int i = 30; i < 460; i++ ) {
+		for ( int j = 20; j < 580; j++ ) {
+			if ( depth.at< float >( i, j ) > 0.0f ) { //当前 px 要有效
+				for ( int k = 0; k < 8; k++ ) {
+					if ( depth_max.at< float >( i + nbr[ k ][ 0 ], j + nbr[ k ][ 1 ] ) - depth.at< float >( i, j ) > dist_threshold ) {
+						mask.at< unsigned char >( i, j ) = 255;
+						break;
+					}
+				}
+			}
+		}
+	}
+	for ( int i = 1; i < 479; i++ ) {
+		for ( int j = 1; j < 639; j++ ) {
+			if ( depth.at< float >( i, j ) > 0.0f ) { //当前 px 要有效
+				for ( int k = 0; k < 8; k++ ) {
+					if ( abs(depth.at< float >( i + nbr[ k ][ 0 ], j + nbr[ k ][ 1 ] ) - depth.at< float >( i, j ) ) > dist_threshold ) { //注意 abs(depth...) 非 depth_max
+						edge_map_whole.at< unsigned char >( i, j ) = 255;
+						//不break
+					}
+				}
+			}
+		}
+	}
+
+#endif
 	return mask;
 
 }//edge_from_dmap
@@ -1647,7 +1750,14 @@ bool
 	{
 		// POST-PROCESSING: We need to transform the newly raycasted maps into the global space.
 		//ScopeTime time( ">>> transformation based on raycast" );
+
+#if 0   //bdr.orig, 若指定 r3t3, 则此逻辑有错 @2018-11-14 01:54:12
 		Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
+#else   //从 kf.operator() 拷过来
+		Matrix3frm R_iden;
+		R_iden = Eigen::Matrix3f::Identity ();
+		Mat33&  rotation_id = device_cast<Mat33> (R_iden); /// Identity Rotation Matrix
+#endif
 		float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
 
 		//~ PCL_INFO ("Raycasting with cube origin at %f, %f, %f\n", cube_origin.x, cube_origin.y, cube_origin.z);
@@ -1834,7 +1944,15 @@ bool
 			MapArr& nmap_g_prev = nmaps_g_prev_[level_index];
 
 			// We need to transform the maps from global to the local coordinates
-			Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); // Identity Rotation Matrix. Because we only need translation
+
+#if 0   //bdr.orig, 若指定 r3t3, 则此逻辑有错 @2018-11-14 01:54:12
+			Mat33&  rotation_id = device_cast<Mat33> (rmats_[0]); /// Identity Rotation Matrix. Because we only need translation
+#else   //从 kf.operator() 拷过来
+			Matrix3frm R_iden;
+			R_iden = Eigen::Matrix3f::Identity ();
+			Mat33&  rotation_id = device_cast<Mat33> (R_iden); /// Identity Rotation Matrix
+#endif
+
 			float3 cube_origin = (getCyclicalBufferStructure ())->origin_metric;
 			cube_origin.x = -cube_origin.x;
 			cube_origin.y = -cube_origin.y;
@@ -1870,6 +1988,7 @@ bool
 				pcl::transformPointCloud( *maskedpts, *transformed, aff );
 				std::vector<int> pointIdxNKNSearch(1);
 				std::vector<float> pointNKNSquaredDistance(1);
+				const float kdtreeDistTh = e2c_dist_; //5cm	跟 cuOdo 公用同一个命令行参数 @2018-11-14 09:57:55
 
 				float rr = 0.0f;
 				int ll = 0;
@@ -1889,7 +2008,9 @@ bool
 						cout << vmappcd->points[ pointIdxNKNSearch[ 0 ] ] << endl;
 					}
 					*/
-					if ( pointNKNSquaredDistance[ 0 ] < 0.1 * 0.1 ) {
+					//if ( pointNKNSquaredDistance[ 0 ] < 0.1 * 0.1 ) {
+					if(pointNKNSquaredDistance[0] < kdtreeDistTh * kdtreeDistTh){
+
 						Eigen::Vector3f nn( vmappcd->points[ pointIdxNKNSearch[ 0 ] ].normal_x, vmappcd->points[ pointIdxNKNSearch[ 0 ] ].normal_y, vmappcd->points[ pointIdxNKNSearch[ 0 ] ].normal_z );
 						Eigen::Vector3f qq( vmappcd->points[ pointIdxNKNSearch[ 0 ] ].x, vmappcd->points[ pointIdxNKNSearch[ 0 ] ].y, vmappcd->points[ pointIdxNKNSearch[ 0 ] ].z );
 						Eigen::Vector3f pp( transformed->points[ l ].x, transformed->points[ l ].y, transformed->points[ l ].z );
@@ -1920,8 +2041,35 @@ bool
 				//printf("bdr-vmaptree.nearestKSearch: "); tt0.toc_print();
 				//zc: 这里nearestKSearch比我们程序中快 8倍, 没懂; 输出见: http://codepad.org/AkP2y8z7
 
-				//cout << vmappcd->size() << " : " << transformed->size() << " --> " << ll << endl;
+				cout << "vmappcd_size: " << vmappcd->size() << " : transformed: " << transformed->size() 
+					<< " -->ll: " << ll << "; e2c_dist_: " << e2c_dist_ << endl;
 				//cout << rr << endl;
+
+				/*调试输出, 用 py 3D 绘制观察
+				from mpl_toolkits.mplot3d import axes3d
+				import matplotlib.pyplot as plt
+				from matplotlib import cm
+				fig = plt.figure()
+				ax = fig.add_subplot(111, projection='3d')
+				xs, ys, zs = corresp_pts.T
+				xxs, yys, zzs = edge_pts.T
+				ax.scatter(xs, ys, zs, 'b')
+				ax.scatter(xxs, yys, zzs, 'r')
+				*/
+
+				//printf("corresp_pts=np.array([\n");
+				//for(size_t i = 0; i < vmappcd->size(); i++){
+				//	Eigen::Vector3f qq( vmappcd->points[ i ].x, vmappcd->points[ i ].y, vmappcd->points[ i ].z );
+				//	printf("[%f, %f, %f],\n", qq.x(), qq.y(), qq.z());
+				//}
+				//printf("])\n");
+
+				//printf("edge_pts=np.array([\n");
+				//for(size_t i = 0; i < transformed->size(); i++){
+				//	Eigen::Vector3f pp( transformed->points[ i ].x, transformed->points[ i ].y, transformed->points[ i ].z );
+				//	printf("[%f, %f, %f],\n", pp.x(), pp.y(), pp.z());
+				//}
+				//printf("])\n");
 
 				/*
 				if ( global_time_ + 1 == 950 )
@@ -1964,6 +2112,10 @@ bool
 				//Eigen::Matrix<float, 6, 1> result = A_.llt ().solve (b_).cast<float>();
 
 				//if ( global_time_ + 1 == 173 && level_index == 0 ) {
+// 				Eigen::Matrix<float, 6, 1> result = ( A_ /*+ amplifier * AA_*/ ).llt ().solve ( b_ /*+ amplifier * bb_*/ ).cast<float>();
+// 				cout << "lvl, iter: " << level_index << ", " << iter << result.transpose() << endl
+// 					<< "A_:\n" << A_ << "\nb_:\n" << b_.transpose() << endl
+// 					;
 				Eigen::Matrix<float, 6, 1> result = ( A_ + amplifier * AA_ ).llt ().solve ( b_ + amplifier * bb_ ).cast<float>();
 				//}
 				//Eigen::Matrix<float, 6, 1> result = AA_.llt ().solve (bb_).cast<float>();
@@ -2131,10 +2283,23 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 	m_filt.convertTo( md, CV_32FC1, 1.0 / 1000.0, 0.0 );
 	//md_mask = bdrodometry_getOcclusionBoundary( md );
-	md_mask = edge_from_dmap(md, edge_whole_mask); 	//tsdf-v18.16
+	md_mask = edge_from_dmap(md, edge_whole_mask, 0.01); 	//tsdf-v18.16
+
+	tt3.tic();
+	cv::Mat md_interp_xy = interpmax_xy(md);
+	printf("md_interp_xy "); tt3.toc_print();
+	//cout << md_interp_xy(cv::Rect(260, 320, 10, 10)) << endl; //in meters
 
 	//cv::imshow( "md_mask", md_mask );
-	m8u.setTo(UCHAR_MAX, md_mask);
+	if(!isTsdfVer(18))
+		m8u.setTo(UCHAR_MAX, md_mask);
+	else{
+		m8u.setTo(UCHAR_MAX, edge_whole_mask);
+
+		cv::Mat md_interp_xy8u;
+		md_interp_xy.convertTo(md_interp_xy8u, CV_8UC1, UCHAR_MAX/3.);
+		cv::imshow("md_interp_xy8u", md_interp_xy8u);
+	}
 	cv::cvtColor(m8u, m8uc3, cv::COLOR_GRAY2BGR);
 
 	//cv::imshow( "m8u", m8u );
@@ -2176,6 +2341,11 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	//can't perform more on first frame
 	if (global_time_ == 0)
 	{
+		//↓--v21.6.0.1 参考 slac, 借用此 buf 给我的 ghost vol2 用 @2018-11-30 00:24:23
+		//cyclical2_.resetBuffer ( tsdf_volume2_ );
+		cyclical2_.resetBuffer_inner ( tsdf_volume_->volume2nd_ );
+		printf("AFTER-cyclical2_.resetBuffer_inner\n"); //应在 create_init_cu_volume() 之后, 否则逻辑错误, buffer 空指针 @2018-12-4 11:29:47
+
 		Matrix3frm initial_cam_rot = rmats_[0]; //  [Ri|ti] - pos of camera, i.e.
 		Matrix3frm initial_cam_rot_inv = initial_cam_rot.inverse ();
 		Vector3f   initial_cam_trans = tvecs_[0]; //  transform from camera to global coo space for (i-1)th camera pose
@@ -2561,20 +2731,36 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	// Ray casting //icp 之前先做了, 仿 bdrOdometry 规矩, 与原来 kinfu 不同 @2017-4-5 17:10:59
 	{
 	//ScopeTime time("ray-cast-all"); //11ms, 这么慢? @2018-3-26 00:58:34
+	tt1.tic();
 	raycast (intr, device_Rprev, device_tprev, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
+	printf("raycast-orig "); tt1.toc_print(); //0ms
+	//DepthMap depthRcast;
+	//generateDepth(device_Rprev_inv, device_tprev, vmaps_g_prev_[0], depthRcast);
+	//int c;
+	//vector<unsigned short> depthRcast_host_data;
+	//depthRcast.download(depthRcast_host_data, c);
+	//cv::Mat depthRcast_host16u( 480, 640, CV_16UC1, (void *)&depthRcast_host_data[0] );
+	//cv::Mat depthRcast_host8u;
+	//depthRcast_host16u.convertTo(depthRcast_host8u, CV_8U, UCHAR_MAX/1500.);
+	//cv::imshow("depthRcast@before_icp", depthRcast_host8u);
+	//cv::Rect roi_tmp(340, 200, 10, 10);
+	//cout<<depthRcast_host16u(roi_tmp)<<endl;
+
 	for (int i = 1; i < LEVELS; ++i)
 	{
 		resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
 		resizeNMap (nmaps_g_prev_[i-1], nmaps_g_prev_[i]);
 	}
 	//pcl::device::sync ();
-	}
+	}//ray-cast-all
 
 
 	Matrix3frm Rcurr = Rprev; // tranform to global coo for ith camera pose
 	Vector3f   tcurr = tprev;
 	{
+        tt1.tic();
 	ScopeTime time(">>> icp-all");
+	bool doLvlIterBreak = false;
 	for (int level_index = LEVELS-1; level_index>=0; --level_index){
 		int iter_num = icp_iterations_[level_index];
 
@@ -2860,11 +3046,28 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			Eigen::Matrix3f Rinc = (Eigen::Matrix3f)AngleAxisf (gamma, Vector3f::UnitZ ()) * AngleAxisf (beta, Vector3f::UnitY ()) * AngleAxisf (alpha, Vector3f::UnitX ());
 			Vector3f tinc = result.tail<3> ();
 
+			//if(global_time_ == 144){ //dbg tsdf-v18 Kinect_Bunny_Handheld
+			if(global_time_ == dbgFid_){
+				printf("global_time_:= %d;... (level_index, iter):= (%d, %d); det_f2mod, %f\n", global_time_, level_index, iter, det_f2mod);
+				cout<<"A_f2mod_:"<<A_f2mod_<<endl;
+				cout<<"a,b,gamma: "<<alpha<<", "<<beta<<", "<<gamma<<"; "
+					<<"tinc: "<<tinc.transpose()<<endl;
+
+				//if(level_index == 0 && iter > 5)
+				if(level_index == dbgLvlIdx_ && iter == dbgIter_){
+					doLvlIterBreak = true;
+					break;
+				}
+			}
+
 			//compose
 			tcurr = Rinc * tcurr + tinc;
 			Rcurr = Rinc * Rcurr;
 		}//iter
+		if(doLvlIterBreak)
+			break;
 	}//level_index
+    printf("ScopeTime-icp-all "); tt1.toc_print();
 	}//ScopeTime-icp-all
 
 	//save tranform
@@ -2882,7 +3085,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			cubeCamAA.drawContour(m8uc3, fx_, fy_, cx_, cy_, cv::Scalar(0,0,255)); //红色轮廓图
 			cv::imshow("m8uc3", m8uc3);
 
-			if(dbgKf_ >= 2){
+			if(dbgKf_ == 2){
 				char fnBuf[80] = {0};
 				sprintf(fnBuf, "m8uc3-%04d.png", callCnt_);
 				cv::imwrite(fnBuf, m8uc3);
@@ -3075,6 +3278,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	bool integrate = (rnorm + alpha * tnorm)/2 >= integration_metric_threshold_;  
 	//zc: 调试, 总是融合:
 	integrate = true;
+	integrate = is_integrate_;
 
 	///////////////////////////////////////////////////////////////////////////////////////////
 	// Volume integration
@@ -3083,14 +3287,71 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	Mat33&  device_Rcurr = device_cast<Mat33> (Rcurr);
 	Mat33&  device_Rcurr_inv = device_cast<Mat33> (Rcurr_inv);
 	float3& device_tcurr = device_cast<float3> (tcurr);
+
+	//zc: 调试观察: @2018-9-30 10:09:30
+	//1, 配准后生成的 dmap 是否与 d-curr 吻合? 对!
+	//2, rcFlag 什么样子
+
+	//定点调试观察某体素:
+	int3 vxlPos;
+	vxlPos.x = vxlDbg_[0];
+	vxlPos.y = vxlDbg_[1];
+	vxlPos.z = vxlDbg_[2];
+
+// 	tt1.tic();
+// 	//DepthMap rcFlagMap_;
+// 	rcFlagMap_.create(rows_, cols_);
+// 	raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), 
+// 		getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, wmap_, rcFlagMap_, vxlPos);
+// 	printf("raycast_rcFlagMap_: "); tt1.toc_print(); //0ms
+// 	tt1.tic();
+// 	cv::Mat rcFlag16s(480, 640, CV_16S);
+// 	cv::Mat rcFlag8uc3(480, 640, CV_8UC3, cv::Scalar(0));
+// 	rcFlagMap_.download(rcFlag16s.data, rcFlagMap_.colsBytes());
+// #if 0 //rcFlagMap_ 确实存几个 flag 的情形
+// 	//rcFlag16s.convertTo(rcFlag8u, CV_8U);
+// 	//cv::imshow("rcFlag8u", rcFlag8u);
+// 	rcFlag8uc3.setTo(cv::Scalar(255, 255, 255), rcFlag16s == 255);
+// 	rcFlag8uc3.setTo(cv::Scalar(255, 0, 0), rcFlag16s == 127);	//蓝色, ->+区域
+// 	rcFlag8uc3.setTo(cv::Scalar(0, 255, 0), rcFlag16s == 128);	//绿色, 0>-区域
+// 	rcFlag8uc3.setTo(cv::Scalar(0, 0, 255), rcFlag16s == 129);	//红色, ->0区域
+// 	rcFlag8uc3.setTo(cv::Scalar(255, 0, 255), rcFlag16s == 130);	//洋红色, 0>->0区域
+// #elif 1 //rcFlagMap_ 改存正负深度值后
+// 	cv::Mat rcFlag8u_posi(rcFlag16s.size(), CV_8U, cv::Scalar(0));
+// 	cv::Mat rcFlag8u_nega(rcFlag16s.size(), CV_8U, cv::Scalar(0));
+// 	cv::Mat tmp16s = rcFlag16s.clone();
+// 	tmp16s.setTo(0, tmp16s < 0);
+// 	tmp16s.convertTo(rcFlag8u_posi, CV_8U, UCHAR_MAX/1500.);
+// 
+// 	tmp16s = rcFlag16s.clone() * -1; //取反
+// 	tmp16s.setTo(0, tmp16s < 0);
+// 	tmp16s.convertTo(rcFlag8u_nega, CV_8U, UCHAR_MAX/1500.);
+// 	
+// 	cv::Mat tmp_channel3[3] = {cv::Mat::zeros(rcFlag16s.size(), CV_8U), rcFlag8u_posi, rcFlag8u_nega};
+// 	cv::merge(tmp_channel3, 3, rcFlag8uc3);
+// 
+// 	char filename[ 1024 ];
+// 	std::sprintf( filename, "image/rcFlag/%06d.png", global_time_ + 1 );
+// 	cv::imwrite(filename, rcFlag8uc3);
+// #endif
+// 	cv::imshow("rcFlag8uc3", rcFlag8uc3);
+// 	printf("rcFlag8uc3 "); tt1.toc_print(); //~21ms
+// 
+// 	tt1.tic();
+// 	//DepthMap depthRcast_;
+// 	generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_, dmapModel_);
+// 	vector<unsigned short> depthRcast_host_data;
+// 	int c;
+// 	dmapModel_.download(depthRcast_host_data, c);
+// 	cv::Mat depthRcast_host16u( 480, 640, CV_16UC1, (void *)&depthRcast_host_data[0] );
+// 	cv::Mat depthRcast_host8u;
+// 	depthRcast_host16u.convertTo(depthRcast_host8u, CV_8U, UCHAR_MAX/1500.);
+// 	cv::imshow("depthRcast@after_icp", depthRcast_host8u);
+// 	printf("depthRcast_host8u "); tt1.toc_print();
+	
 	if (integrate)
 	{
 		ScopeTime time("if-integrate");
-		//定点调试观察某体素:
-		int3 vxlPos;
-		vxlPos.x = vxlDbg_[0];
-		vxlPos.y = vxlDbg_[1];
-		vxlPos.z = vxlDbg_[2];
 
 		//ScopeTime time("tsdf");
 		//integrateTsdfVolume(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tranc_dist, volume_);
@@ -3245,7 +3506,21 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			if(dbgKf_ >= 1)
 				tt3.tic();
 
-			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_);
+			//raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_);
+			//↓--rcast-through (折射+穿透) 策略提前到这里 @2018-11-29 16:59:34
+			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), 
+				getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, rcFlagMap_, vxlPos);
+
+			//再对 vol-2nd, 即 ghost volume 做 rcast.orig, 为了在 cluster 时求稳定的 sdf_forward (之前用 dcurr 求, 但是 dcurr 是瞬时的, 本身当前时刻不可靠)	@2018-11-29 17:30:06
+			printf("DBG【【raycast_volume2nd_\n");
+			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, 
+// 				tsdf_volume_->data(), 
+// 				getCyclicalBufferStructure(), //错, 对应的是 cyclical1_, 进而 vol1
+				tsdf_volume_->volume2nd_, 
+				cyclical2_.getBuffer(),
+				vmap_g_model_vol2_, nmap_g_model_vol2_);
+			//device::generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_vol2_, dmapModel_vol2_); //model
+			printf("DBG【【AFTER-raycast_volume2nd_\n");
 
 			if(dbgKf_ >= 1){
 				//printf("isTsdfVer(12)-raycast: "); tt3.toc_print(); //0ms
@@ -3329,7 +3604,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					cv::applyColorMap(diffDmap8u, diffDmapColormap, cv::COLORMAP_RAINBOW);
 					cv::imshow("diffDmapColormap", diffDmapColormap);
 
-					if(dbgKf_ >= 2){
+					if(dbgKf_ == 2){
 						char fnBuf[80] = {0};
 						sprintf(fnBuf, "diffDmapCmap-%04d.png", callCnt_);
 						cv::imwrite(fnBuf, diffDmapColormap);
@@ -3347,8 +3622,12 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			else //if-(isTsdfVer(18))
 				cv::distanceTransform(edge_whole_mask==0, edgeDistMap, CV_DIST_L1, 3); //tsdf v18.16
 
+			printf("DBG【【edgeDistMap_device_.upload: edgeDistMap.rows_cols: %d, %d; elemSize: %u (%%d: %d);\n", 
+				edgeDistMap.rows, edgeDistMap.cols, edgeDistMap.elemSize(), edgeDistMap.elemSize());
+
 			//DeviceArray2D<float> edgeDistMap_device_;
 			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
+			printf("DBG【【AFTER-edgeDistMap_device_.upload\n");
 			if(dbgKf_ >= 1){
 				printf("isTsdfVer(12)-distanceTransform: "); tt3.toc_print(); //4ms, 有没有 GPU上的 DistTrans 代码?
 
@@ -3454,7 +3733,64 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					depthRawScaled_, vxlPos);
 			}
 			else if(isTsdfVer(18)){
-				zc::edge2wmap(vmaps_curr_[0], edgeDistMap_device_, fx_, wmap_); //for tsdf-v18.4
+				//zc::edge2wmap(vmaps_curr_[0], edgeDistMap_device_, fx_, wmap_); //for tsdf-v18.4
+				//float maxEdgeDist = tsdf_volume_->getTsdfTruncDist() * 6e3; //in mm
+				float maxEdgeDist = 30; //in mm, 定死
+				zc::edge2wmap(vmaps_curr_[0], edgeDistMap_device_, fx_, maxEdgeDist, wmap_); //增加 maxEdgeDist 控制量, 暂定 2~3 倍 tdist @2018-8-17 17:42:08
+
+				tt1.tic();
+				//DepthMap rcFlagMap_;
+				//rcFlagMap_.create(rows_, cols_); //放到 rcast 里
+				//↓--放到前面
+// 				raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), 
+// 					getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, rcFlagMap_, vxlPos);
+// 					//getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, wmap_, rcFlagMap_, vxlPos); //放弃在 rcast 中用 wmap_ 策略 @2018-11-29 16:52:01
+				printf("raycast_rcFlagMap_: "); tt1.toc_print(); //0ms
+				tt1.tic();
+				cv::Mat rcFlag16s(480, 640, CV_16S);
+				cv::Mat rcFlag8uc3(480, 640, CV_8UC3, cv::Scalar(0));
+				rcFlagMap_.download(rcFlag16s.data, rcFlagMap_.colsBytes());
+#if 0 //rcFlagMap_ 确实存几个 flag 的情形
+				//rcFlag16s.convertTo(rcFlag8u, CV_8U);
+				//cv::imshow("rcFlag8u", rcFlag8u);
+				rcFlag8uc3.setTo(cv::Scalar(255, 255, 255), rcFlag16s == 255);
+				rcFlag8uc3.setTo(cv::Scalar(255, 0, 0), rcFlag16s == 127);	//蓝色, ->+区域
+				rcFlag8uc3.setTo(cv::Scalar(0, 255, 0), rcFlag16s == 128);	//绿色, 0>-区域
+				rcFlag8uc3.setTo(cv::Scalar(0, 0, 255), rcFlag16s == 129);	//红色, ->0区域
+				rcFlag8uc3.setTo(cv::Scalar(255, 0, 255), rcFlag16s == 130);	//洋红色, 0>->0区域
+#elif 1 //rcFlagMap_ 改存正负深度值后
+				cv::Mat rcFlag8u_posi(rcFlag16s.size(), CV_8U, cv::Scalar(0));
+				cv::Mat rcFlag8u_nega(rcFlag16s.size(), CV_8U, cv::Scalar(0));
+				cv::Mat tmp16s = rcFlag16s.clone();
+				tmp16s.setTo(0, tmp16s < 0);
+				tmp16s.convertTo(rcFlag8u_posi, CV_8U, UCHAR_MAX/1500.);
+
+				tmp16s = rcFlag16s.clone() * -1; //取反
+				tmp16s.setTo(0, tmp16s < 0);
+				tmp16s.convertTo(rcFlag8u_nega, CV_8U, UCHAR_MAX/1500.);
+
+				cv::Mat tmp_channel3[3] = {cv::Mat::zeros(rcFlag16s.size(), CV_8U), rcFlag8u_posi, rcFlag8u_nega};
+				cv::merge(tmp_channel3, 3, rcFlag8uc3);
+
+				char filename[ 1024 ];
+				std::sprintf( filename, "image/rcFlag/%06d.png", global_time_ + 1 );
+				cv::imwrite(filename, rcFlag8uc3);
+#endif
+				cv::imshow("rcFlag8uc3", rcFlag8uc3);
+				printf("rcFlag8uc3 "); tt1.toc_print(); //~21ms
+
+				tt1.tic();
+				//DepthMap depthRcast_;
+				generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_, dmapModel_);
+				vector<unsigned short> depthRcast_host_data;
+				int c;
+				dmapModel_.download(depthRcast_host_data, c);
+				cv::Mat depthRcast_host16u( 480, 640, CV_16UC1, (void *)&depthRcast_host_data[0] );
+				cv::Mat depthRcast_host8u;
+				depthRcast_host16u.convertTo(depthRcast_host8u, CV_8U, UCHAR_MAX/1500.);
+				cv::imshow("depthRcast@after_icp", depthRcast_host8u);
+				printf("depthRcast_host8u "); tt1.toc_print();
+
 				if(dbgKf_ >= 1)
 				{
 					printf("isTsdfVer(18)-edge2wmap: "); tt3.toc_print(); //0~1ms
@@ -3468,7 +3804,12 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					tt3.tic();
 				}
 
-				integrateTsdfVolume_v18
+				printf("DBG【【BEFORE-integrateTsdfVolume_v18\n");
+
+				if(dbgV2_18_ >0)
+					integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
+				else
+					integrateTsdfVolume_v18
 					(isPlFilt_ ? depthPlFilt : depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(),
 					tsdf_volume_->volume2nd_, tsdf_volume_->flagVolume_, tsdf_volume_->surfNormPrev_, tsdf_volume_->vrayPrevVolume_, 
 					largeIncidMask_total_,
@@ -3481,6 +3822,8 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					wmap_,
 					dmapModel_,
 					diffDmap_,
+					dmapModel_vol2_, //用作 sdf-forward/back 二分类, 之前用的第一形参 depth_raw (dcurr), 但是噪声大, 太不可靠 @2018-11-29 17:50:32
+					rcFlagMap_,
 					depthRawScaled_, vxlPos);
 			}
 
@@ -3508,6 +3851,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 	//scale-depth 放最外面 @2018-7-4 16:54:24
 	DeviceArray2D<float> depthFiltScaled;
+	DeviceArray2D<float> depthModelScaled;
 
 	{
 		//ScopeTime time(">>> Bilateral, pyr-down-all, create-maps-all"); //release 下 ~2ms
@@ -3556,13 +3900,16 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		cout<<"~~~~~~~~~~~(((global_time_ == 0; init-tvec: "<<tvecs_[0].transpose()
 			<<"; volume000_gcoo_: "<<volume000_gcoo_.transpose()<<endl;;
 		integrateTsdfVolume_s2s(intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, device_volume000_gcoo, //s2s-v0.2
-			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, false, tsdf_volume_->data(), depthRawScaled_, vxlPos);
 
 		for (int i = 0; i < LEVELS; ++i)
 			device::tranformMaps (vmaps_curr_[i], nmaps_curr_[i], device_initial_cam_rot, device_initial_cam_trans, vmaps_g_prev_[i], nmaps_g_prev_[i]);
 
 		if(perform_last_scan_)
 			finished_ = true;
+
+		depthRawScaled_.copyTo(depthRawScaled_prev_); //若后面 f2f, 这里要预先生成一次, 避免 fid=1 时无配准目标 @2018-11-26 18:02:14
+
 		++global_time_;
 		return (false);
 	}//if-(global_time_ == 0)
@@ -3577,6 +3924,9 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 	float3 device_volume_size = device_cast<const float3> (tsdf_volume_->getSize());
 
+	Vector3f tprev_fake = tprev - volume000_gcoo_;
+	float3& device_tprev_fake = device_cast<float3> (tprev_fake);
+
 	///////////////////////////////////////////////////////////////////////////////////////////
 	// Iterative Closest Point
 
@@ -3585,10 +3935,12 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	ScopeTime time("ray-cast-all"); //11ms, 这么慢? @2018-3-26 00:58:34
 	//raycast (intr, device_Rprev, device_tprev, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
 	//s2s-v0.2:
-	Vector3f tprev_fake = tprev - volume000_gcoo_;
-	float3& device_tprev_fake = device_cast<float3> (tprev_fake);
+// 	Vector3f tprev_fake = tprev - volume000_gcoo_; //放到外面
+// 	float3& device_tprev_fake = device_cast<float3> (tprev_fake);
 
 	raycast (intr, device_Rprev, device_tprev_fake, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmaps_g_prev_[0], nmaps_g_prev_[0]);
+	//scaleDepthDevice(vmaps_g_prev_[0], device_tprev, intr, depthModelScaled);
+
 // 	for (int i = 1; i < LEVELS; ++i)
 // 	{
 // 		resizeVMap (vmaps_g_prev_[i-1], vmaps_g_prev_[i]);
@@ -3625,7 +3977,8 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 	float avgErr_i1 = 1e3, 
 		avgErr_curr = 0;
 
-	for (int iter = 0; iter < 19; ++iter){
+	const int max_iter =30;
+	for (int iter = 0; iter < max_iter; ++iter){
 		//cout<<">>>>>>>>>>iter: "<<iter<<endl;
 		Mat33&  device_Rcurr = device_cast<Mat33> (Rcurr);
 		float3& device_tcurr = device_cast<float3>(tcurr);
@@ -3674,15 +4027,40 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 		tt3.tic();
 		initVrayPrevVolume(tsdf_volume_->volume2nd_);
+		bool use_eta_trunc = true;
+		integrateTsdfVolume_s2s(intr, device_volume_size, device_Rcurr_inv, device_tcurr,
+			device_volume000_gcoo, tsdf_volume_->getTsdfTruncDist(), s2s_eta_, use_eta_trunc, //配准时都用 eta截断, 目的是借用 beam 在边缘形成约束(抠住)
+			tsdf_volume_->volume2nd_, 
+			depthRawScaled_, 
+			//depthFiltScaled, //配准改用 bilat-filt, 不用 raw @2018-7-6 19:58:36
+			vxlPos); //这里 set vol-2
 
 		int vxlValidCnt = -1;
 		float sum_s2s_err = 0;
+
+		if(s2s_f2m_){ //f2m
+			scaleDepthDevice(vmaps_g_prev_[0], device_tprev, intr, depthModelScaled);
+			//scaleDepthDevice(vmaps_g_prev_[0], device_tprev_fake, intr, depthModelScaled); //也没差别
+			//initVrayPrevVolume(tsdf_volume_->volume3rd_proxy_); //之前【逐帧】都在 create_init_s2s_volume 初始化过, 暂不考虑在【逐循环】中reset
+			integrateTsdfVolume_s2s(intr, device_volume_size, device_Rprev_inv, device_tprev, device_volume000_gcoo,
+				tsdf_volume_->getTsdfTruncDist(), s2s_eta_, use_eta_trunc, tsdf_volume_->volume3rd_proxy_, depthModelScaled, vxlPos);
+		}
+		else{ //f2f
+			integrateTsdfVolume_s2s(intr, device_volume_size, device_Rprev_inv, device_tprev, device_volume000_gcoo,
+				tsdf_volume_->getTsdfTruncDist(), s2s_eta_, use_eta_trunc, tsdf_volume_->volume3rd_proxy_, depthRawScaled_prev_, vxlPos);
+		}
 		estimateCombined_s2s(depth_raw, intr, device_volume_size, 
-			device_Rcurr_inv, device_tcurr, device_volume000_gcoo, device_xi_curr, 
-			tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), tsdf_volume_->volume2nd_,
-			0.01, gbuf_s2s_, sumbuf_s2s_, A_s2s_.data(), b_s2s_.data(), 
-			//depthRawScaled_, 
-			depthFiltScaled, //配准改用 bilat-filt, 不用 raw @2018-7-6 19:58:36
+			device_Rcurr_inv, device_tcurr, 
+			//↓--主要用作 i, (i-1)对应点匹配(projective-association), 滤除 outlier, 因为仅 tsdf-p-c diff 根本无法判定实际 diff (sdf可解, 但是存的不是sdf, 无解) @2018-11-26 18:42:03
+			device_Rprev_inv, device_tprev, vmaps_g_prev_[0], //prev量 每帧仅更新一次, 循环内不变动
+			device_volume000_gcoo, device_xi_curr, 
+			tsdf_volume_->getTsdfTruncDist(), 
+			//tsdf_volume_->data(), 
+			tsdf_volume_->volume3rd_proxy_, //改用 vol-3rd, 可切换 f2m/f2f
+			tsdf_volume_->volume2nd_,
+			s2s_eta_, gbuf_s2s_, sumbuf_s2s_, A_s2s_.data(), b_s2s_.data(), 
+			depthRawScaled_, 
+			//depthFiltScaled, //配准改用 bilat-filt, 不用 raw @2018-7-6 19:58:36
 			vxlValidCnt, sum_s2s_err,
 			vxlPos);
 		//printf("estimateCombined_s2s, vxlValidCnt= 【【%d; sum_s2s_err: 【【%f; avg-err: 【【%f; \n"
@@ -3697,10 +4075,51 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 				vxlValidCnt,sum_s2s_err, 
 				avgErr_i1, avgErr_curr, avgErr_i1 - avgErr_curr, iter);
 
+#if 0	//f2m->f2f 切换条件放在这里不合适吧？ 改成: 若迭代到第x次不收敛 (sum_s2s_err > 5e4), 就【从头】f2f一遍
+			//增加检测: 若 sum_s2s_err > 5w, 就重新用 f2f 再配一遍	@2018-11-25 22:05:17
+			if(sum_s2s_err > 5e4){
+				scaleDepthDevice(vmaps_g_prev_[0], device_tprev, intr, depthModelScaled);
+				//scaleDepthDevice(vmaps_g_prev_[0], device_tprev_fake, intr, depthModelScaled); //也没差别
+				initVrayPrevVolume(tsdf_volume_->volume3rd_proxy_);
+				//integrateTsdfVolume_s2s(intr, device_volume_size, device_Rprev_inv, device_tprev, device_volume000_gcoo,
+				//	tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->volume3rd_proxy_, depthModelScaled, vxlPos);
+				integrateTsdfVolume_s2s(intr, device_volume_size, device_Rprev_inv, device_tprev, device_volume000_gcoo,
+					tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->volume3rd_proxy_, depthRawScaled_prev_, vxlPos);
+
+				A_s2s_.setZero();
+				b_s2s_.setZero();
+
+				estimateCombined_s2s(depth_raw, intr, device_volume_size, 
+					device_Rcurr_inv, device_tcurr, 
+					device_Rprev_inv, device_tprev, vmaps_g_prev_[0],
+					device_volume000_gcoo, device_xi_curr, 
+					tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->volume3rd_proxy_, tsdf_volume_->volume2nd_,
+					s2s_eta_, gbuf_s2s_, sumbuf_s2s_, A_s2s_.data(), b_s2s_.data(), 
+					depthRawScaled_, 
+					//depthFiltScaled, //配准改用 bilat-filt, 不用 raw @2018-7-6 19:58:36
+					vxlValidCnt, sum_s2s_err,
+					vxlPos);
+				
+				avgErr_curr = sum_s2s_err / vxlValidCnt;
+
+				printf("\t F2F:= vxlValidCnt= 【【%d; sum_s2s_err: 【【%f; avgErr_i1, avgErr_curr: %f, %f, diff: %f; iter= %d\n", 
+					vxlValidCnt,sum_s2s_err, 
+					avgErr_i1, avgErr_curr, avgErr_i1 - avgErr_curr, iter);
+			}
+			else //sum_s2s_err 够小才能结束迭代 @2018-11-26 04:07:05
+				break;
+#else
 			break;
+#endif
 		}
-		else
+		else{
+			if(iter > max_iter - 3){
+				printf("iter_gt_max_iter:: vxlValidCnt= 【【%d; sum_s2s_err: 【【%f; avgErr_i1, avgErr_curr: %f, %f, diff: %f; iter= %d\n", 
+					vxlValidCnt,sum_s2s_err, 
+					avgErr_i1, avgErr_curr, avgErr_i1 - avgErr_curr, iter);
+			}
 			avgErr_i1 = avgErr_curr;
+		}
 
 		double det_f2mod = A_s2s_.determinant();
 		if ( fabs (det_f2mod) < 1e-15 || pcl_isnan (det_f2mod) ){
@@ -3709,7 +4128,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 		}
 
 		result = A_s2s_.llt().solve(b_s2s_).cast<float>(); //twist*, 二阶导, 牛顿法
-		if(dbgKf_ > 1)
+		if(dbgKf_ == 2)
 			cout<<"A_s2s_: "<<A_s2s_<<endl
 				<<"A_s2s_(DOUBLE): "<<A_s2s_.cast<double>()<<endl
 				<<"b_s2s_: "<<b_s2s_.transpose()<<endl
@@ -3814,7 +4233,7 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 	}//for-iter
 	}//ScopeTime-icp-all
-	if(dbgKf_ > 1)
+	if(dbgKf_ == 2)
 		cout<<"tcurr,Rcurr:"<<tcurr.transpose()<<endl
 			<<Rcurr<<endl;
 
@@ -3848,19 +4267,25 @@ bool pcl::gpu::KinfuTracker::s2sOdometry( const DepthMap &depth_raw, const View 
 
 		//ScopeTime time("tsdf");
 		//integrateTsdfVolume(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tranc_dist, volume_);
-		if(isTsdfVer(2)){
+		//if(isTsdfVer(2)){
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_);
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
 			
-			if(!s2s_f2m_) //若命令行参数 f2f, 而非 f2m, 每帧清空 global volume
-				initVrayPrevVolume(tsdf_volume_->data());
+// 			if(!s2s_f2m_){ //若命令行参数 f2f, 而非 f2m, 每帧清空 global volume
+// 				initVrayPrevVolume(tsdf_volume_->data());
+// 			}
+			//↑--注释掉, 尝试启用 tsdf_volume_->volume3rd_proxy_, 主 vol 仅用作 fuse	@2018-11-26 17:40:29
+
+			bool use_eta_trunc = false; //实际 integ 时候, 仍是用 tdist, 而非 eta
 			integrateTsdfVolume_s2s(intr, device_volume_size, device_Rcurr_inv, device_tcurr, device_volume000_gcoo,
-				tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
-		}
+				tsdf_volume_->getTsdfTruncDist(), s2s_eta_, use_eta_trunc, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+		//}//if-(isTsdfVer(2))
 	}//if-(integrate)
 
 	///////////////////////////////////////////////////////////////////////////////////////////
 	// Ray casting //改调到最前面, 仿 bdrOdometry 规矩
+
+	depthRawScaled_.copyTo(depthRawScaled_prev_);
 
 	++global_time_;
 	return true;
@@ -3899,8 +4324,10 @@ bool pcl::gpu::KinfuTracker::integrateWithGtPoses( const DepthMap &depth_raw, co
 		float3 device_volume_size = device_cast<const float3>(tsdf_volume_->getSize());
 		cout<<"~~~~~~~~~~~(((global_time_ == 0; init-tvec: "<<tvecs_[0].transpose()
 			<<"; volume000_gcoo_: "<<volume000_gcoo_.transpose()<<endl;;
+
+		bool use_eta_trunc = true;
 		integrateTsdfVolume_s2s(intr, device_volume_size, device_initial_cam_rot_inv, device_initial_cam_trans, device_volume000_gcoo, //s2s-v0.2
-			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, use_eta_trunc, tsdf_volume_->data(), depthRawScaled_, vxlPos);
 
 		for (int i = 0; i < LEVELS; ++i)
 			device::tranformMaps (vmaps_curr_[i], nmaps_curr_[i], device_initial_cam_rot, device_initial_cam_trans, vmaps_g_prev_[i], nmaps_g_prev_[i]);
@@ -3965,8 +4392,10 @@ bool pcl::gpu::KinfuTracker::integrateWithGtPoses( const DepthMap &depth_raw, co
 		ScopeTime time("if-integrate");
 // 		cout<<"depthRawScaled_:"<<depthRawScaled_.cols()<<","<<depthRawScaled_.rows()<<endl	//640*480
 // 			<<"tsdf_volume_:"<<tsdf_volume_->data().cols()<<";"<<tsdf_volume_->data().rows()<<endl;	//64*4096
+
+		bool use_eta_trunc = true;
 		integrateTsdfVolume_s2s(intr, device_volume_size, device_Rcurr_inv, device_tcurr, device_volume000_gcoo,
-			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, tsdf_volume_->data(), depthRawScaled_, vxlPos);
+			tsdf_volume_->getTsdfTruncDist(), s2s_eta_, use_eta_trunc, tsdf_volume_->data(), depthRawScaled_, vxlPos);
 	}//if-(integrate)
 
 	///////////////////////////////////////////////////////////////////////////////////////////

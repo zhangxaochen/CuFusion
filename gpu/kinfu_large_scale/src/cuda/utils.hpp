@@ -77,6 +77,19 @@ namespace pcl
       return v1.x * v2.x + v1.y*v2.y + v1.z*v2.z;
     }
 
+    //zc:   @2018-10-8 11:17:05
+    __device__ __forceinline__ bool
+    operator==(const float3& v1, const float3& v2)
+    {
+      return (v1.x == v2.x) && (v1.y == v2.y) && (v1.z == v2.z);
+    }
+
+    __device__ __forceinline__ bool
+    operator==(const int3& v1, const int3& v2)
+    {
+      return (v1.x == v2.x) && (v1.y == v2.y) && (v1.z == v2.z);
+    }
+
     __device__ __forceinline__ float3&
     operator+=(float3& vec, const float& v)
     {

@@ -110,7 +110,7 @@ const string plane_slice_str = "plane_slice_str";
 int fid_;
 bool png_source_;
 string pngDir_;
-vector<string> pngFnames_;
+vector<string> pngFnames_;  
 int pngSid_ = -1, 
 	pngEid_ = -1; //命令行参数, 设定起始终止帧序号, 调试用 2016-11-28 21:40:30
 int pngPauseId_ = -1; //-eval 时, 走到某帧之前, 暂停, 等待人工调试
@@ -975,7 +975,8 @@ struct SceneCloudView
 		if (!marching_cubes_)
 			marching_cubes_ = MarchingCubes::Ptr( new MarchingCubes() );
 
-		DeviceArray<PointXYZ> triangles_device = marching_cubes_->run(kinfu.volume(), triangles_buffer_device_);    
+		//DeviceArray<PointXYZ> triangles_device = marching_cubes_->run(kinfu.volume(), triangles_buffer_device_);    
+		DeviceArray<PointXYZ> triangles_device = marching_cubes_->run(kinfu.volume(), triangles_buffer_device_, kinfu.vxlDbg_);    
 		mesh_ptr_ = convertToMeshCompact(triangles_device);
 
 		cloud_viewer_.removeAllPointClouds ();
@@ -1960,6 +1961,8 @@ struct KinFuLSApp
 
 					//zc: cuOdo 放到最前面, 这样当用 cam2g 求解 kinfu_->cube_g_.cuVerts8_ 时, 用的是已求出的当前帧(i)姿态, 而非(i-1) 姿态
 					//2017-4-22 21:36:41
+
+					kinfu_->volume().create_init_cu_volume(); //移到这里, 避免初始化滞后, 导致空指针 @2018-12-4 12:54:53
 					tt0.tic(); //40~60ms
 					//|-> 目前版本, ~100~130ms, 是 f2mod+f2mkr+e2c (后两个只在 level_index==0 才做) @2017-10-7 16:43:04
 					has_image = kinfu_->cuOdometry(depth_device_, &image_view_.colors_device_);
@@ -2001,8 +2004,11 @@ struct KinFuLSApp
 						zcFindOrtho3tup(plvec, planeFitter_.membershipImg, fx, fy, cx, cy, cubeCandiPoses, dbgSegMat);
 
 						imshow(winNameAhc, dbgSegMat); //改放这里 @2017-4-19 11:32:30
-						if(!this->kinfu_->term_1_) //若仅 term_1_, 则不 waitKey
+						if(!this->kinfu_->term_1_){ //若仅 term_1_, 则不 waitKey
+							printf("this_kinfu__term_1_\n");
 							cv::waitKey(0);
+						}
+						cv::waitKey(0);
 
 						size_t crnrCnt = cubeCandiPoses.size();
 						bool isFoundCrnr = (crnrCnt != 0);
@@ -2019,6 +2025,7 @@ struct KinFuLSApp
 								crnrIdx = i;
 							}
 						}
+						printf("【【【crnrIdx: %d; minPxDist: %f\n", crnrIdx, minPxDist);
 
 						//3, 仅当找到四顶点, 才算定位到立方体
 						tt0.tic();
@@ -2112,7 +2119,7 @@ struct KinFuLSApp
 							//kinfu_->cuEdgeTree_.setInputCloud(edgeCloud); //放到 kinfu.cpp 内
 							kinfu_->cuContCloud_ = edgeCloud;
 							kinfu_->isCuInitialized_ = true;
-							kinfu_->volume().create_init_cu_volume();
+							//kinfu_->volume().create_init_cu_volume(); //挪到最外面, 避免 global_time=0 时候, 有部分尚未初始化 @2018-12-4 12:49:18
 
 							//zc: 求解用于分割基座、扫描物体的平面参数, @2017-8-13 17:18:53
 							//暂定朝上 (cam-coo Y负方向)
@@ -2386,8 +2393,10 @@ struct KinFuLSApp
 			const int fix_axis = kinfu_->vxlDbg_[3];
 			cv::Mat sliceGlobal32f,
 					sliceLocal32f;
-			sliceGlobal32f = tsdf_volume_.slice2D(kinfu_->vxlDbg_[0], kinfu_->vxlDbg_[1], kinfu_->vxlDbg_[2],
-				fix_axis, sliceLocal32f, true);
+			cv::Mat sliceGlobalWeights_16s;
+			sliceGlobal32f = tsdf_volume_.slice2D(kinfu_->vxlDbg_[0], kinfu_->vxlDbg_[1], kinfu_->vxlDbg_[2], fix_axis,
+				sliceGlobalWeights_16s,
+				sliceLocal32f, true);
 
 			cv::Mat sliceGlobal8u,
 					sliceLocal8u;
@@ -2404,6 +2413,13 @@ struct KinFuLSApp
 			//cv::namedWindow(sliceLocalCmap_win_str);
 			//cv::moveWindow(sliceLocalCmap_win_str, 1150, 650);
 			cv::imshow(sliceLocalCmap_win_str, sliceLocalCmap);
+			//printf("kinfu_->dbgKf_ here: %d\n", kinfu_->dbgKf_);
+			if(kinfu_->dbgKf_ == 3 /*&& frame_id_ % 10 == 0*/){ //隔10帧?
+				printf("imwrite-sliceLocalCmap\n");
+				char fnBuf[80] = {0};
+				sprintf(fnBuf, "image/slice/%06d.png", frame_id_);
+				cv::imwrite(fnBuf, sliceLocalCmap);
+			}
 
 			char *sliceGlobal8u_win_str = "sliceGlobal8u";
 			cv::namedWindow(sliceGlobal8u_win_str);
@@ -2411,6 +2427,8 @@ struct KinFuLSApp
 			cv::imshow(sliceGlobal8u_win_str, sliceGlobal8u);
 
 			if(print_nbr_){
+				print_nbr_ = false; //每次按键, 仅执行一次
+
 				int x2d, y2d;
 				if(0 == fix_axis){
 					x2d = kinfu_->vxlDbg_[2]; //z做img的X轴
@@ -2426,7 +2444,11 @@ struct KinFuLSApp
 				}
 
 				cv::Rect nbrRoi(x2d-2, y2d-2, 5,5);
-				cout << sliceGlobal32f(nbrRoi) << endl;
+				cout << "TSDF-Mat:\n"
+					<<sliceGlobal32f(nbrRoi) << endl
+					<< "WEIGHT-Mat:\n"
+					<< sliceGlobalWeights_16s(nbrRoi) << endl
+					;
 			}
 		}
 
@@ -2934,15 +2956,26 @@ struct KinFuLSApp
 				else if(key == 'd'){
 					//开启2D切片观察 tsdf 调试窗口 @2018-1-26 18:56:53
 					slice2d_ = !slice2d_;
+
+					//this->kinfu_->dbgKf_ = 1; //why? 忘了...
+
 					printf("slice2d_ = !slice2d_; --> %s\n", slice2d_ ? "TTT" : "FFF");
 				}
+				else if(key == 'i'){ //切换融合
+					kinfu_->is_integrate_ = !kinfu_->is_integrate_;
+					printf("SWITCH is_integrate_ ON/OFF\n");
+				}
 				else if(key == 'n'){
-					print_nbr_ = !print_nbr_;
+					print_nbr_ = true;
 					printf("print_nbr_ = !print_nbr_; --> %s\n", print_nbr_ ? "TTT" : "FFF");
 				}
 				else if(key >= '1' && key <= '7'){
 					PCL_WARN(">>>>>>>>>PRESSING: %d\n", key - '0');
 					kinfu_->setTerm123(key - '0');
+				}
+				else if(key == ','){
+					kinfu_->s2s_f2m_ = !kinfu_->s2s_f2m_;
+					printf("kinfu_->s2s_f2m_: %s\n", kinfu_->s2s_f2m_ ? "TTTrue" : "FFFalse");
 				}
 
 				if(currentIndex >= evaluation_ptr_->getStreamSize() - 5){
@@ -3623,6 +3656,15 @@ int
 
 	}
 
+	vector<int> dbgFidVec;
+	pc::parse_x_arguments(argc, argv, "-dbg_fid", dbgFidVec);
+	if(dbgFidVec.size() == 4){
+		app.kinfu_->dbgFid_ = dbgFidVec[0];
+		app.kinfu_->dbgLvlIdx_ = dbgFidVec[1];
+		app.kinfu_->dbgIter_ = dbgFidVec[2];
+		app.kinfu_->dbgV2_18_ = dbgFidVec[3];
+	}
+
 	if (pc::find_switch (argc, argv, "--current-cloud") || pc::find_switch (argc, argv, "-cc"))
 		app.initCurrentFrameView ();
 
@@ -3706,6 +3748,10 @@ int
 		app.toggleBdrAmplifier( amp );
 	}
 
+	//↓--下面挪上来的, 希望 cu / bdr 公用此参数 @2018-11-27 20:02:05
+	app.kinfu_->e2c_dist_ = 0.05;
+	pc::parse_argument(argc, argv, "-e2cDist", app.kinfu_->e2c_dist_);
+
 	//zc: 长方体三边尺寸做参数, 毫米尺度
 	pc::parse_x_arguments(argc, argv, "-cusz", cuSideLenVec_);
 	if(cuSideLenVec_.size() == 3){//仅仅 >0 还不够, 必须==3
@@ -3740,8 +3786,9 @@ int
 		app.kinfu_->term_2_ = pc::find_switch(argc, argv, "-2");
 		app.kinfu_->term_3_ = pc::find_switch(argc, argv, "-3");
 
-		app.kinfu_->e2c_dist_ = 0.05;
-		pc::parse_argument(argc, argv, "-e2cDist", app.kinfu_->e2c_dist_);
+		//app.kinfu_->e2c_dist_ = 0.05;
+		//pc::parse_argument(argc, argv, "-e2cDist", app.kinfu_->e2c_dist_);
+		//↑--放到外面, 因希望与 bdr 公用此参数
 
 		//对重建指定平面进行微调, 量纲毫米	@2017-8-14 02:44:48
 		app.kinfu_->isPlFilt_ = false;
@@ -3781,6 +3828,19 @@ int
 		init_pose_orig.translation() = t;
 		app.kinfu_->setInitialCameraPose(init_pose_orig);
 		}
+	}
+
+	vector<float> r3t3;
+	pc::parse_x_arguments(argc, argv, "-init_rt", r3t3);
+	if(r3t3.size() == 6){
+		//Eigen::Matrix3f R = AngleAxisf( pcl::deg2rad(r3t3[0]), Vector3f::UnitX());
+		//Eigen::Affine3f pose = Eigen::Translation3f (t) * Eigen::AngleAxisf (R);
+		Eigen::Affine3f pose = Eigen::Translation3f (r3t3[3], r3t3[4], r3t3[5]) 
+			* AngleAxisf( pcl::deg2rad(r3t3[2]), Vector3f::UnitZ()) 
+			* AngleAxisf( pcl::deg2rad(r3t3[1]), Vector3f::UnitY())
+			* AngleAxisf( pcl::deg2rad(r3t3[0]), Vector3f::UnitX())
+			;
+		app.kinfu_->setInitialCameraPose(pose);
 	}
 
 	app.kinfu_->incidAngleThresh_ = 75; //默认值, 按 pcc 的经验值  @2017-3-8 20:47:22

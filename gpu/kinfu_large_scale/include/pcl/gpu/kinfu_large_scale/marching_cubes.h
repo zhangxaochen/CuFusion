@@ -42,6 +42,9 @@
 #include <pcl/gpu/containers/device_array.h>
 #include <Eigen/Core>
 
+#include<vector>
+using std::vector;
+
 namespace pcl
 {
   namespace gpu
@@ -80,7 +83,8 @@ namespace pcl
           * \return Array with triangles. Each 3 consequent poits belond to a single triangle. The returned array points to 'triangles_buffer' data.
           */
       DeviceArray<PointType> 
-      run(const TsdfVolume& tsdf, DeviceArray<PointType>& triangles_buffer);
+      //run(const TsdfVolume& tsdf, DeviceArray<PointType>& triangles_buffer);
+      run(const TsdfVolume& tsdf, DeviceArray<PointType>& triangles_buffer, vector<int> vxlDbg=vector<int>(0) );
 
     private:             
       /** \brief Edge table for marching cubes  */

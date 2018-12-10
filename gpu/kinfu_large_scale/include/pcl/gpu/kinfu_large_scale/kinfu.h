@@ -646,9 +646,12 @@ namespace pcl
 		cv::Mat bdrodometry_interpmax( cv::Mat depth );
 		cv::Mat bdrodometry_getOcclusionBoundary( cv::Mat depth, float dist_threshold = 0.05f );
 
+		//@brief 仿照 bdrodometry_interpmax, 但 interpmax 纵横都做, 
+		cv::Mat interpmax_xy( cv::Mat depth );
+
 		//@brief 比 bdrodometry_getOcclusionBoundary 增加参数传出 edge_map_whole(所有边缘), 返回值一样
 		//@param[in] depth, in meters
-		//@param[in] edge_map_whole, 只要满足 |diff|>thresh, 就算 edge; 用于边缘不确定区域特殊处理 //【【必须 Mat& 传引用, 否则无法传出
+		//@param[in|out] edge_map_whole, 只要满足 |diff|>thresh, 就算 edge; 用于边缘不确定区域特殊处理 //【【必须 Mat& 传引用, 否则无法传出
 		//@param[in] dist_threshold, default 5cm
 		//@return ==bdrodometry_getOcclusionBoundary
 		cv::Mat edge_from_dmap(cv::Mat depth, cv::Mat &edge_map_whole, float dist_threshold = 0.05f );
@@ -811,6 +814,7 @@ namespace pcl
 
 		//bool dbgKf_;
 		int dbgKf_;
+		int dbgFid_, dbgLvlIdx_, dbgIter_, dbgV2_18_;
 
 		//有时候,某帧迭代配准会严重漂移, 需要step-in跟进调试观察; 如m7/05-f126失败
 		int regCuStepId_;
@@ -859,6 +863,8 @@ namespace pcl
 		typedef Eigen::Matrix<float, 3, 3, Eigen::RowMajor> Matrix3frm;
 		std::vector<Matrix3frm> gtRmats_;
 		std::vector<Vector3f> gtTvecs_;
+
+		bool is_integrate_; //zc: 键盘控制, 看不融合, ray-cast 什么样 @2018-9-29 11:28:31
 
       private:
 
@@ -977,7 +983,13 @@ namespace pcl
         //以下都仅是为了避免局部变量导致控制台调试输出 "[CUDA] Allocating memory..."
         MapArr vmap_model_, nmap_model_;
         MapArr vmap_g_model_, nmap_g_model_;
+
+        //↓--CuFusion2 中, vol-2 (ghost) 上做 rcast 用; 仅做占位符, 并没用到	@2018-11-29 17:43:07
+        MapArr vmap_g_model_vol2_, nmap_g_model_vol2_;
+
         DepthMap dmapModel_, dmapModel_inp_;
+        DepthMap dmapModel_vol2_;
+
         DeviceArray2D<short> diffDmap_; //zc: 用于处理 motionBlur   @2017-12-3 23:36:56
                                         //发现 v18 中, 处理全反射也能用!   @2018-3-9 14:55:36
         pcl::device::MaskMap largeIncidMask_model_; //大入射角mask, vmap_g_model_ 的
@@ -986,6 +998,10 @@ namespace pcl
         MapArr nmap_filt_, nmap_filt_g_;
         DeviceArray2D<float> edgeDistMap_device_;
         MapArr wmap_; //weight-map, 按: 1, 入射角cos; 2, D(u); 3, 到边缘距离 来加权
+
+        //DepthMap rcFlagMap_;
+        DeviceArray2D<short> rcFlagMap_;
+        DepthMap depthRcast_;
 
         //bdr方案求解nmap 用到
         DepthMap synCuDmap_device_;
@@ -999,6 +1015,7 @@ namespace pcl
         
         /** \brief Buffer for storing scaled depth image */
         DeviceArray2D<float> depthRawScaled_;
+        DeviceArray2D<float> depthRawScaled_prev_;
         
         /** \brief Temporary buffer for ICP */
         DeviceArray2D<float> gbuf_;
@@ -1080,7 +1097,7 @@ namespace pcl
 
         /** \brief Camera movement threshold. TSDF is integrated iff a camera movement metric exceedes some value. */
         float integration_metric_threshold_;
-        
+
         /** \brief Allocates all GPU internal buffers.
           * \param[in] rows_arg
           * \param[in] cols_arg          

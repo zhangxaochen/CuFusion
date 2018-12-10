@@ -191,7 +191,7 @@ pcl::TSDFVolume<VoxelT, WeightT>::convertToTsdfCloud (pcl::PointCloud<pcl::Point
 
 template <typename VoxelT, typename WeightT> cv::Mat
 //pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int x, int y, int z, int fix_which){
-pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_axis, cv::OutputArray dbgMat /*= cv::noArray()*/, bool doDbg /*= false*/){
+pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_axis, cv::OutputArray weiMat /*= cv::noArray()*/, cv::OutputArray dbgMat /*= cv::noArray()*/, bool doDbg /*= false*/){
     int sx = header_.resolution(0); //因为用到 private header_ 之类, 所以此函数才做成成员函数
     int sy = header_.resolution(1);
     int sz = header_.resolution(2);
@@ -223,6 +223,9 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
     //int nbr_idx = 0; //邻域填充索引下标, //错, 放弃
     if(0 == fix_axis){ //固定 X轴, 切片 YZ平面
         res = cv::Mat::zeros(sy, sz, CV_32F); //y 做 row, z 做 col; 因为相机坐标系 y 肉眼看总朝下
+        //weiMat = cv::Mat::zeros(sy, sz, CV_16S);
+        weiMat.create(res.size(), CV_16S);
+        cv::Mat weiMat_ = weiMat.getMat();
 
         int x = xcen;
         for (int z = 0; z < sz; z+=step){
@@ -234,6 +237,7 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
 
                 float tsdf_val = volume_->at(volume_idx);
                 res.at<float>(y, z) = tsdf_val; //纵轴: Y轴
+                weiMat_.at<short>(y, z) = weights_->at(volume_idx);
 
                 if(nbr_zmin <= z && z <= nbr_zmax  //不用考虑 vol 边界越界, 因为外层 for-for 已经确保
                     && nbr_ymin <= y && y <= nbr_ymax)
@@ -249,6 +253,9 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
     }
     else if(1 == fix_axis){ //固定 Y轴, 切片 XZ平面
         res = cv::Mat::zeros(sz, sx, CV_32F);
+        //weiMat = cv::Mat::zeros(sz, sx, CV_16S);
+        weiMat.create(res.size(), CV_16S);
+        cv::Mat weiMat_ = weiMat.getMat();
 
         int y = ycen;
         for (int z = 0; z < sz; z+=step){
@@ -264,6 +271,7 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
 
                 float tsdf_val = volume_->at(volume_idx);
                 res.at<float>(z, x) = tsdf_val; //纵轴: Z轴
+                weiMat_.at<short>(z, x) = weights_->at(volume_idx);
 
                 if(nbr_zmin <= z && z <= nbr_zmax
                     && nbr_xmin <= x && x <= nbr_xmax)
@@ -281,6 +289,9 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
     }
     else if(2 == fix_axis){ //固定 Z轴, 切片 XY平面
         res = cv::Mat::zeros(sy, sx, CV_32F);
+        //weiMat = cv::Mat::zeros(sy, sx, CV_16S);
+        weiMat.create(res.size(), CV_16S);
+        cv::Mat weiMat_ = weiMat.getMat();
 
         int z = zcen;
         for(int y = 0; y < sy; y+=step){
@@ -293,6 +304,7 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
                 float tsdf_val = volume_->at(volume_idx);
                 //res.at<float>(x, y) = tsdf_val;
                 res.at<float>(y, x) = tsdf_val;
+                weiMat_.at<short>(y, x) = weights_->at(volume_idx);
 
                 if(nbr_ymin <= y && y <= nbr_ymax
                     && nbr_xmin <= x && x <= nbr_xmax)
@@ -325,7 +337,8 @@ pcl::TSDFVolume<VoxelT, WeightT>::slice2D(int xcen, int ycen, int zcen, int fix_
 
     if(doDbg){
         cv::Point dbgPt(half_nbr_n * scale_factor + scale_factor / 2, half_nbr_n * scale_factor + scale_factor / 2);
-        cv::circle(dbgMat.getMat(), dbgPt, scale_factor / 2, 255, 1);
+        //cv::circle(dbgMat.getMat(), dbgPt, scale_factor / 2, 255, 1);
+        cv::circle(dbgMat.getMat(), dbgPt, scale_factor / 1.5, 255, 1); //圆圈略大一点, 便于肉眼观察到
     }
     return res;
 }//slice2D

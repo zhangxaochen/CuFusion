@@ -83,10 +83,13 @@ namespace pcl
     //enum { VOLUME_X = 392, VOLUME_Y = 392, VOLUME_Z = 392 };
 
     //zc: 限制在 1.5m--256分辨率  @2017-3-17 00:35:45
-    const int VRES = 64;
+    const int VRES = 256;
     enum { VOLUME_X = VRES, VOLUME_Y = VRES, VOLUME_Z = VRES };
 
-	
+    const int VOL1_FLAG_BIT_CNT = 3; //3 bits
+    const int VOL1_FLAG_TH = (1 << VOL1_FLAG_BIT_CNT);// - 1; //7
+    const int WEIGHT_CONFID_TH = (1 << 6); //64;
+
     // temprary constant (until we make it automatic) that holds the Kinect's focal lenght
     const float FOCAL_LENGTH = 575.816f;
   
@@ -328,6 +331,7 @@ namespace pcl
     //estimateCombined_s2s(const Mat33& Rcurr, const float3& tcurr, const MapArr& vmap_curr, const MapArr& nmap_curr, const Mat33& Rprev_inv, const float3& tprev, const Intr& intr,
     estimateCombined_s2s(const PtrStepSz<ushort>& depth_raw, const Intr& intr, const float3& volume_size, 
                         const Mat33& Rcurr_inv, const float3& tcurr, 
+                        const Mat33& Rprev_inv, const float3& tprev, PtrStep<float> vmap_g_prev,    //F2M_NEW_USE_RCAST @2018-11-25 00:47:27
                         const float3& volume000_gcoo, const float6& xi_prev, 
                         float tranc_dist, PtrStep<short2> volume, PtrStep<short2> volume2,
                         //float delta, 
@@ -338,6 +342,10 @@ namespace pcl
     //@brief extract method from old code, to de-coupling
     void
     scaleDepthDevice(const PtrStepSz<ushort>& depth_raw, const Intr& intr, DeviceArray2D<float>& depthScaled);
+
+    //@brief 加一个重载版, 直接用 rcast 输出的 vmap, 生成 dmap
+    void
+    scaleDepthDevice(const MapArr& vmap_g, const float3& tvec, const Intr& intr, DeviceArray2D<float>& depthScaled);
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // TSDF volume functions            
@@ -388,9 +396,12 @@ namespace pcl
                          const Mat33& Rcurr_inv, const float3& tcurr, float tranc_dist, PtrStep<short2> volume, const pcl::gpu::tsdf_buffer* buffer, DeviceArray2D<float>& depthScaled, int3 vxlDbg = int3()); //zc: 调试
 
     //大部分照搬, 仅仅 tranc_dist 用 (delta, eta) 逻辑, 去掉 *buffer (不考虑volume shift)
+    //@param[in]  use_eta_trunc, 指: 是否用 eta 做截断; //命名: s2s-v1.2	@2018-12-5 21:04:06
+    //      起因: 之前默认用 eta 截断, 太小则漂移, 太大则重建太厚, 但发现可以: 配准时调用integ时,大一点; 实际integ时,用小值
+    //      因为配准已经用 额外的 proxy vol-3, 所以实际 integ 时, 用小 tdist 不会有不良影响
     PCL_EXPORTS void 
     integrateTsdfVolume_s2s (/*const PtrStepSz<ushort>& depth,*/ const Intr& intr, const float3& volume_size, 
-            const Mat33& Rcurr_inv, const float3& tcurr, const float3& volume000_gcoo, float tranc_dist, float eta,
+            const Mat33& Rcurr_inv, const float3& tcurr, const float3& volume000_gcoo, float tranc_dist, float eta, bool use_eta_trunc,
             PtrStep<short2> volume, DeviceArray2D<float>& depthScaled, int3 vxlDbg = int3()); //zc: 调试
 
     //v11, 尝试融合 v9.4 + v10, 且
@@ -438,6 +449,9 @@ namespace pcl
                          const MapArr &weight_map, //v11.4
                          const PtrStepSz<ushort>& depth_model,
                          DeviceArray2D<short>& diffDmap,
+                         const PtrStepSz<ushort>& depth_model_vol2,
+                         //const PtrStepSz<ushort>& rc_flag_map,
+                         const PtrStepSz<short>& rc_flag_map,
                          DeviceArray2D<float>& depthScaled, int3 vxlDbg);
 
     /** \brief Function that clears the TSDF values. The clearing takes place from the origin (in indices) to an offset in X,Y,Z values accordingly
@@ -491,6 +505,14 @@ namespace pcl
     void 
     raycast (const Intr& intr, const Mat33& Rcurr, const float3& tcurr, float tranc_dist, const float3& volume_size, 
              const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, MapArr& vmap, MapArr& nmap);
+
+    //zc: 重载, 末尾增加正面/背面观测标记 map 参数    @2018-9-30 09:54:26
+    void
+    raycast (const Intr& intr, const Mat33& Rcurr, const float3& tcurr, float tranc_dist, const float3& volume_size, 
+             const PtrStep<short2>& volume, const pcl::gpu::tsdf_buffer* buffer, MapArr& vmap, MapArr& nmap, 
+             /*MapArr& edge_wmap,*/ /*DepthMap*/ DeviceArray2D<short>& rcFlagMap, int3 vxlDbg = int3());
+    //↑-- edge_wmap 本意是 edge 上 “v21.3.4: 边缘直视不折射, 避免太边缘反而无法检出 ->+, 造成棱边膨大”，
+    //但实际不靠谱, 从参数中去掉 @2018-11-29 16:45:00
 
     /** \brief Renders 3D image of the scene
       * \param[in] vmap vertex map
@@ -670,7 +692,8 @@ namespace pcl
       * \param[out] output triangle array            
       */
     void
-    generateTriangles(const PtrStep<short2>& volume, const DeviceArray2D<int>& occupied_voxels, const float3& volume_size, DeviceArray<PointType>& output);
+    //generateTriangles(const PtrStep<short2>& volume, const DeviceArray2D<int>& occupied_voxels, const float3& volume_size, DeviceArray<PointType>& output);
+    generateTriangles(const PtrStep<short2>& volume, const DeviceArray2D<int>& occupied_voxels, const float3& volume_size, DeviceArray<PointType>& output, float3 vxlDbg);
   }
 }
 

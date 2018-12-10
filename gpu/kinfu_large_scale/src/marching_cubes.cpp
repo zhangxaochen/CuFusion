@@ -57,7 +57,8 @@ pcl::gpu::MarchingCubes::MarchingCubes()
 pcl::gpu::MarchingCubes::~MarchingCubes() {}
 
 DeviceArray<pcl::gpu::MarchingCubes::PointType> 
-pcl::gpu::MarchingCubes::run(const TsdfVolume& tsdf, DeviceArray<PointType>& triangles_buffer)
+//pcl::gpu::MarchingCubes::run(const TsdfVolume& tsdf, DeviceArray<PointType>& triangles_buffer)
+pcl::gpu::MarchingCubes::run(const TsdfVolume& tsdf, DeviceArray<PointType>& triangles_buffer, vector<int> vxlDbg)
 {  
   if (triangles_buffer.empty())
     triangles_buffer.create(DEFAULT_TRIANGLES_BUFFER_SIZE);
@@ -77,7 +78,13 @@ pcl::gpu::MarchingCubes::run(const TsdfVolume& tsdf, DeviceArray<PointType>& tri
   int total_vertexes = device::computeOffsetsAndTotalVertexes(occupied_voxels);
   
   float3 volume_size = device_cast<const float3>(tsdf.getSize());
-  device::generateTriangles(tsdf.data(), occupied_voxels, volume_size, (DeviceArray<device::PointType>&)triangles_buffer);
+  //device::generateTriangles(tsdf.data(), occupied_voxels, volume_size, (DeviceArray<device::PointType>&)triangles_buffer);
+
+  float3 vxlDbg_;
+  vxlDbg_.x = vxlDbg[0];
+  vxlDbg_.y = vxlDbg[1];
+  vxlDbg_.z = vxlDbg[2];
+  device::generateTriangles(tsdf.data(), occupied_voxels, volume_size, (DeviceArray<device::PointType>&)triangles_buffer, vxlDbg_);
     
   device::unbindTextures();
   return DeviceArray<PointType>(triangles_buffer.ptr(), total_vertexes);

@@ -16,7 +16,7 @@ The synthetic data are generated with camera intrinsic $K_s$ ([synDep525.param])
 # Related Publications #
 
 If you find this **code** or [CU3D] dataset valuable for your research please cite this work:
-> Zhang, C.; Hu, Y. CuFusion: Accurate Real‐time Camera Tracking and Volumetric Scene Reconstruction with a Cuboid. Preprints 2017, 2017080022 (doi: 10.20944/preprints201708.0022.v1).
+> Zhang C, Hu Y. **[CuFusion: Accurate real-time camera tracking and volumetric scene reconstruction with a cuboid](https://www.mdpi.com/1424-8220/17/10/2260)**[J]. Sensors, 2017, 17(10): 2260.
 
 # How to build #
 We've tested our code on Windows 10, with Visual Studio 2010 (Though other configurations may work)
@@ -28,7 +28,7 @@ Additional prerequisites:
 - OpenCV: for image processing; we tested our code with version 2.4.x;
 - Cuda
 
-[CuFusion]: https://www.preprints.org/manuscript/201708.0022/v1
+[CuFusion]: https://www.mdpi.com/1424-8220/17/10/2260
 [cu3d]: https://drive.google.com/open?id=0B4vahSr3aGadN0ozUmE3dVNSXzA
 [peac]: https://github.com/zhangxaochen/peac
 [pcl_kinfu_largeScale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale/tools

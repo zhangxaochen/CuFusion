@@ -81,6 +81,8 @@ namespace pcl
     {
       PtrStep<short2> volume;
 
+      float3 vxlDbg;
+
 	  static __device__ __forceinline__ float isoValue() { return 0.f; }
 
       __device__ __forceinline__ void
@@ -103,7 +105,7 @@ namespace pcl
         readTsdf (x + 1, y,     z + 1, f[5], weight); if (weight == 0) return 0;
         readTsdf (x + 1, y + 1, z + 1, f[6], weight); if (weight == 0) return 0;
         readTsdf (x,     y + 1, z + 1, f[7], weight); if (weight == 0) return 0;
-#elif 10   //zc: tsdf-v18.15 重新启用 w 的末位, 所以判定要改 "weight < 2" or "weight / 2 == 0"
+#elif 0   //zc: tsdf-v18.15 重新启用 w 的末位, 所以判定要改 "weight < 2" or "weight / 2 == 0"
         int weight;
         readTsdf (x,     y,     z,     f[0], weight); if (weight < 2) return 0;
         readTsdf (x + 1, y,     z,     f[1], weight); if (weight < 2) return 0;
@@ -113,6 +115,64 @@ namespace pcl
         readTsdf (x + 1, y,     z + 1, f[5], weight); if (weight < 2) return 0;
         readTsdf (x + 1, y + 1, z + 1, f[6], weight); if (weight < 2) return 0;
         readTsdf (x,     y + 1, z + 1, f[7], weight); if (weight < 2) return 0;
+#elif 1 //zc: vxlDbg
+        int weight;
+        readTsdf (x,     y,     z,     f[0], weight); 
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x,y,z, f,w: %f, %d\n", f[0], weight);
+            return 0;
+        }
+
+        readTsdf (x + 1, y,     z,     f[1], weight);
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x+1,y,z, f,w: %f, %d\n", f[1], weight);
+            return 0;
+        }
+
+        readTsdf (x + 1, y + 1, z,     f[2], weight);
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x+1,y+1,z, f,w: %f, %d\n", f[2], weight);
+            return 0;
+        }
+
+        readTsdf (x,     y + 1, z,     f[3], weight);
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x,y+1,z, f,w: %f, %d\n", f[3], weight);
+            return 0;
+        }
+
+        readTsdf (x,     y,     z + 1, f[4], weight);
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x,y,z+1, f,w: %f, %d\n", f[4], weight);
+            return 0;
+        }
+
+        readTsdf (x + 1, y,     z + 1, f[5], weight);
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x+1,y,z+1, f,w: %f, %d\n", f[5], weight);
+            return 0;
+        }
+
+        readTsdf (x + 1, y + 1, z + 1, f[6], weight);
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x+1,y+1,z+1, f,w: %f, %d\n", f[6], weight);
+            return 0;
+        }
+
+        readTsdf (x,     y + 1, z + 1, f[7], weight);
+        if (weight < VOL1_FLAG_TH){
+            if(vxlDbg.x == x && vxlDbg.y == y && vxlDbg.z == z)
+                printf("x,y+1,z+1, f,w: %f, %d\n", f[7], weight);
+            return 0;
+        }
+
 #else   //zc: tsdf-v18.8:: 3D 中值滤波, @2018-3-15 03:19:39
           const int nbr_sz = 8;
           int w[nbr_sz] = {0};
@@ -409,7 +469,8 @@ namespace pcl
 
 
 void
-pcl::device::generateTriangles (const PtrStep<short2>& volume, const DeviceArray2D<int>& occupied_voxels, const float3& volume_size, DeviceArray<PointType>& output)
+//pcl::device::generateTriangles (const PtrStep<short2>& volume, const DeviceArray2D<int>& occupied_voxels, const float3& volume_size, DeviceArray<PointType>& output)
+pcl::device::generateTriangles (const PtrStep<short2>& volume, const DeviceArray2D<int>& occupied_voxels, const float3& volume_size, DeviceArray<PointType>& output, float3 vxlDbg)
 {
   TrianglesGenerator tg;
 
@@ -421,6 +482,8 @@ pcl::device::generateTriangles (const PtrStep<short2>& volume, const DeviceArray
   tg.cell_size.y = volume_size.y / VOLUME_Y;
   tg.cell_size.z = volume_size.z / VOLUME_Z;
   tg.output = output;
+
+  tg.vxlDbg = vxlDbg;
 
   dim3 block (TrianglesGenerator::CTA_SIZE);
   dim3 grid (divUp (tg.voxels_count, block.x));

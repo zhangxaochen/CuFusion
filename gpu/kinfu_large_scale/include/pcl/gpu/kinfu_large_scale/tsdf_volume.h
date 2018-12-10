@@ -201,6 +201,7 @@ public: //zc:
 
 	//tsdf-v10 中, 用于存储"混合均值滤波" 的[第二中心]
 	DeviceArray2D<int> volume2nd_;
+	DeviceArray2D<int> volume3rd_proxy_; //用作 s2s 方法中, model rcast 得到 proxy dmap, 再得到 proxy volume	@2018-11-14 11:53:30
 
 	//zc: 用作 tsdf-v8, 对每个晶格, 存储其上一次 视线=(晶格-视点) 向量
 	DeviceArray2D<int> vrayPrevVolume_;
