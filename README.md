@@ -7,7 +7,11 @@ This is the initial version of our algorithm with trial dirty code and redundant
 # Dataset #
 We introduce a dataset called **[CU3D]**, for the validation of our algorithm. 
 
-The dataset contains 3 noiseless synthetic sequences with both the ground-truth (GT) camera trajectories and GT mesh scene models, and 6 noisy real-world scanning sequences with ONLY the GT mesh models of the scanned objectives. 
+The dataset contains:
+
+- 3 noiseless synthetic sequences ***with*** both the ground-truth (GT) camera trajectories and GT mesh scene models;
+- 6 noisy real-world scanning sequences ***with*** ONLY the GT mesh models of the scanned objectives;
+- 5 noisy real-world scanning sequences ***without*** GT mesh models, we choose body parts of the scanned objects for measurement using a Vernier caliper (least count=0.02mm), and quantitatively compare them with the reconstructions of the algorithms.
 
 The synthetic data are generated with camera intrinsic $K_s$ ([synDep525.param]), while the real-world data are with intrinsic $K_r$ ([myKinectV1.param]).
 
