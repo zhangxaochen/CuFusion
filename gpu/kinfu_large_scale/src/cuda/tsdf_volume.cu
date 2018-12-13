@@ -6466,7 +6466,7 @@ namespace pcl
 
                   //↓--v21.3.7.c: 只要sdf_cos在 td 范围之内, 就用 sdf_cos; 目的: 使 cup6down1c 在 v21.3.7 也能把手连续不断开 @2018-11-19 16:43:29
                   //结果: 能达到"把手连续不断开", 但是表面不如 v21.3.7 光滑
-                  if(sdf_cos < tranc_dist)
+                  //if(sdf_cos < tranc_dist)
                   if(sdf > tranc_dist && sdf_cos < tranc_dist) //v21.3.7.f: 前面 v21.3.7.c 逻辑瑕疵: 即P&C-edge时, 希望 sdf_cos 是"替补", 而不是优先用
                       sdf = sdf_cos;
               }
