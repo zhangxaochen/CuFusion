@@ -20,7 +20,9 @@ The synthetic data are generated with camera intrinsic $K_s$ ([synDep525.param])
 # Related Publications #
 
 If you find this **code** or [CU3D] dataset valuable for your research please cite this work:
-> Zhang C, Hu Y. **[CuFusion: Accurate real-time camera tracking and volumetric scene reconstruction with a cuboid](https://www.mdpi.com/1424-8220/17/10/2260)**[J]. Sensors, 2017, 17(10): 2260.
+> Zhang C, Hu Y. [**CuFusion: Accurate real-time camera tracking and volumetric scene reconstruction with a cuboid**](https://www.mdpi.com/1424-8220/17/10/2260)[J]. Sensors, 2017, 17(10): 2260.
+> 
+> ZHANG, C. [**CuFusion2: Accurate and Denoised Volumetric 3D Object Reconstruction Using Depth Cameras**](https://www.preprints.org/manuscript/201812.0165/v1). Preprints 2018, 2018120165
 
 # How to build #
 We've tested our code on Windows 10, with Visual Studio 2010 (Though other configurations may work)
@@ -41,7 +43,8 @@ Additional prerequisites:
 [myKinectV1.param]: https://drive.google.com/open?id=0B4vahSr3aGadNGplM05pN3FqSGs
 
 # How to use #
-## 1. Our algorithm
+
+## 1. CuFusion
 To test our algorithm, run `pcl_kinfu_largeScale_release.exe` in command line:
 
 ```
@@ -57,7 +60,11 @@ Params explanation:
 - `--camera <param_file>`: launch parameters from the file, containing the camera intrinsic matrix
 - `-eval <eval_folder>`: folder containing the evaluation dataset.
 
+### 1.1. CuFusion2
+We have developed a *2nd* version of this work, namely **CuFusion2**. To use this version, set `-tsdfVer 18` (currently for this trial dirty code ...).
+
 ## 2. Algorithms for comparison in our work
+
 ### 2.1. KinectFusion [1]
 
 ```
@@ -78,6 +85,7 @@ To test this algorithm, we need to convert the image sequences to  `*.klg` files
 We have implemented a trial version of the sdf-2-sdf algorithm on GPU (cuda). This version includes only E_geom(xi) in the objective function for optimization, yet don't have E_norm(xi) with it. Neither global optimization is applied. You can simply choose frame-to-model / frame-to-frame camera tracking for comparison, using command line args "-s2s". 
 
 # References
+
 1. Newcombe, R. A.; Izadi, S.; Hilliges, O.; Molyneaux, D.; Kim, D.; Davison, A. J.; Kohli, P.; Shotton, J.; 				Hodges, S.; Fitzgibbon, A. KinectFusion: Real-time Dense Surface Mapping and Tracking. In Proceedings of the 2011 10th IEEE International Symposium on Mixed and Augmented Reality; ISMAR ’11; IEEE Computer Society: Washington, DC, USA, 2011; pp. 127–136.
 2. Zhou, Q.-Y.; Koltun, V. Depth camera tracking with contour cues. In 2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR); 2015; pp. 632–638.
 3. Whelan, T.; Leutenegger, S.; Moreno, R. S.; Glocker, B.; Davison, A. ElasticFusion: Dense SLAM Without A Pose Graph. In Proceedings of Robotics: Science and Systems; Rome, Italy, 2015.
