@@ -2314,8 +2314,8 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	//cv::imshow( "m8u", m8u );
 
 	m_filt.convertTo( md, CV_32FC1, 1.0 / 1000.0, 0.0 );
-	//md_mask = bdrodometry_getOcclusionBoundary( md );
-	md_mask = edge_from_dmap(md, edge_whole_mask, 0.01); 	//tsdf-v18.16
+	md_mask = bdrodometry_getOcclusionBoundary( md );
+	//md_mask = edge_from_dmap(md, edge_whole_mask, 0.01); 	//tsdf-v18.16
 
 	tt3.tic();
 	cv::Mat md_interp_xy = interpmax_xy(md);
@@ -2326,6 +2326,9 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	if(!isTsdfVer(18))
 		m8u.setTo(UCHAR_MAX, md_mask);
 	else{
+		edge_from_dmap2(md, edge_whole_mask, 0.01); 	//tsdf-v18.16
+		//md_mask = edge_whole_mask; //alias for *maskedpts* //slows down edge2contour alignment a lot due to maskedpts growth
+
 		m8u.setTo(UCHAR_MAX, edge_whole_mask);
 
 		cv::Mat md_interp_xy8u;
@@ -3837,50 +3840,55 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 // 					getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, rcFlagMap_, vxlPos);
 // 					//getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, wmap_, rcFlagMap_, vxlPos); //放弃在 rcast 中用 wmap_ 策略 @2018-11-29 16:52:01
 				printf("raycast_rcFlagMap_: "); tt1.toc_print(); //0ms
-				tt1.tic();
-				cv::Mat rcFlag16s(480, 640, CV_16S);
-				cv::Mat rcFlag8uc3(480, 640, CV_8UC3, cv::Scalar(0));
-				rcFlagMap_.download(rcFlag16s.data, rcFlagMap_.colsBytes());
+
+				if(dbgKf_ >= 1){
+					tt1.tic();
+					cv::Mat rcFlag16s(480, 640, CV_16S);
+					cv::Mat rcFlag8uc3(480, 640, CV_8UC3, cv::Scalar(0));
+					rcFlagMap_.download(rcFlag16s.data, rcFlagMap_.colsBytes());
 #if 0 //rcFlagMap_ 确实存几个 flag 的情形
-				//rcFlag16s.convertTo(rcFlag8u, CV_8U);
-				//cv::imshow("rcFlag8u", rcFlag8u);
-				rcFlag8uc3.setTo(cv::Scalar(255, 255, 255), rcFlag16s == 255);
-				rcFlag8uc3.setTo(cv::Scalar(255, 0, 0), rcFlag16s == 127);	//蓝色, ->+区域
-				rcFlag8uc3.setTo(cv::Scalar(0, 255, 0), rcFlag16s == 128);	//绿色, 0>-区域
-				rcFlag8uc3.setTo(cv::Scalar(0, 0, 255), rcFlag16s == 129);	//红色, ->0区域
-				rcFlag8uc3.setTo(cv::Scalar(255, 0, 255), rcFlag16s == 130);	//洋红色, 0>->0区域
+					//rcFlag16s.convertTo(rcFlag8u, CV_8U);
+					//cv::imshow("rcFlag8u", rcFlag8u);
+					rcFlag8uc3.setTo(cv::Scalar(255, 255, 255), rcFlag16s == 255);
+					rcFlag8uc3.setTo(cv::Scalar(255, 0, 0), rcFlag16s == 127);	//蓝色, ->+区域
+					rcFlag8uc3.setTo(cv::Scalar(0, 255, 0), rcFlag16s == 128);	//绿色, 0>-区域
+					rcFlag8uc3.setTo(cv::Scalar(0, 0, 255), rcFlag16s == 129);	//红色, ->0区域
+					rcFlag8uc3.setTo(cv::Scalar(255, 0, 255), rcFlag16s == 130);	//洋红色, 0>->0区域
 #elif 1 //rcFlagMap_ 改存正负深度值后
-				cv::Mat rcFlag8u_posi(rcFlag16s.size(), CV_8U, cv::Scalar(0));
-				cv::Mat rcFlag8u_nega(rcFlag16s.size(), CV_8U, cv::Scalar(0));
-				cv::Mat tmp16s = rcFlag16s.clone();
-				tmp16s.setTo(0, tmp16s < 0);
-				tmp16s.convertTo(rcFlag8u_posi, CV_8U, UCHAR_MAX/1500.);
+					cv::Mat rcFlag8u_posi(rcFlag16s.size(), CV_8U, cv::Scalar(0));
+					cv::Mat rcFlag8u_nega(rcFlag16s.size(), CV_8U, cv::Scalar(0));
+					cv::Mat tmp16s = rcFlag16s.clone();
+					tmp16s.setTo(0, tmp16s < 0);
+					tmp16s.convertTo(rcFlag8u_posi, CV_8U, UCHAR_MAX/1500.);
 
-				tmp16s = rcFlag16s.clone() * -1; //取反
-				tmp16s.setTo(0, tmp16s < 0);
-				tmp16s.convertTo(rcFlag8u_nega, CV_8U, UCHAR_MAX/1500.);
+					tmp16s = rcFlag16s.clone() * -1; //取反
+					tmp16s.setTo(0, tmp16s < 0);
+					tmp16s.convertTo(rcFlag8u_nega, CV_8U, UCHAR_MAX/1500.);
 
-				cv::Mat tmp_channel3[3] = {cv::Mat::zeros(rcFlag16s.size(), CV_8U), rcFlag8u_posi, rcFlag8u_nega};
-				cv::merge(tmp_channel3, 3, rcFlag8uc3);
+					cv::Mat tmp_channel3[3] = {cv::Mat::zeros(rcFlag16s.size(), CV_8U), rcFlag8u_posi, rcFlag8u_nega};
+					cv::merge(tmp_channel3, 3, rcFlag8uc3);
 
-				char filename[ 1024 ];
-				std::sprintf( filename, "image/rcFlag/%06d.png", global_time_ + 1 );
-				cv::imwrite(filename, rcFlag8uc3);
+					char filename[ 1024 ];
+					std::sprintf( filename, "image/rcFlag/%06d.png", global_time_ + 1 );
+					cv::imwrite(filename, rcFlag8uc3);
 #endif
-				cv::imshow("rcFlag8uc3", rcFlag8uc3);
-				printf("rcFlag8uc3 "); tt1.toc_print(); //~21ms
+					cv::imshow("rcFlag8uc3", rcFlag8uc3);
+					printf("rcFlag8uc3 "); tt1.toc_print(); //~21ms
+				}
 
-				tt1.tic();
-				//DepthMap depthRcast_;
-				generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_, dmapModel_);
-				vector<unsigned short> depthRcast_host_data;
-				int c;
-				dmapModel_.download(depthRcast_host_data, c);
-				cv::Mat depthRcast_host16u( 480, 640, CV_16UC1, (void *)&depthRcast_host_data[0] );
-				cv::Mat depthRcast_host8u;
-				depthRcast_host16u.convertTo(depthRcast_host8u, CV_8U, UCHAR_MAX/1500.);
-				cv::imshow("depthRcast@after_icp", depthRcast_host8u);
-				printf("depthRcast_host8u "); tt1.toc_print();
+				if(dbgKf_ >= 1){
+					tt1.tic();
+					//DepthMap depthRcast_;
+					generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_, dmapModel_);
+					vector<unsigned short> depthRcast_host_data;
+					int c;
+					dmapModel_.download(depthRcast_host_data, c);
+					cv::Mat depthRcast_host16u( 480, 640, CV_16UC1, (void *)&depthRcast_host_data[0] );
+					cv::Mat depthRcast_host8u;
+					depthRcast_host16u.convertTo(depthRcast_host8u, CV_8U, UCHAR_MAX/1500.);
+					cv::imshow("depthRcast@after_icp", depthRcast_host8u);
+					printf("depthRcast_host8u "); tt1.toc_print();
+				}
 
 				if(dbgKf_ >= 1)
 				{
