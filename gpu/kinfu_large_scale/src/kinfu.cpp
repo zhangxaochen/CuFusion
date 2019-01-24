@@ -2521,7 +2521,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		cubeCamBA.drawContour(m8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
 
 		tt0.tic(); //仅仅 zcRenderCubeDmap: ~130ms; 改用水平射线法后, 4~13ms
-		int step_tmp = 2; //间隔采样, 对生成图像速度有提升, 但对 ICP 速度没有提升, 因为是 dst, 不是src
+		int step_tmp = 1; //间隔采样, 对生成图像速度有提升, 但对 ICP 速度没有提升, 因为是 dst, 不是src
 		cv::Mat synCuDmapBA = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_, step_tmp); //cv16u
 		printf("zcRenderCubeDmap: "); tt0.toc_print();
 
@@ -2686,6 +2686,16 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 			cubeCamBA.drawContour(synCu8u, fx_, fy_, cx_, cy_, 255);
 			imshow("synCu8u", synCu8u);
+
+			{
+			int step_tmp2 = 2;
+			cv::Mat synCuDmapBA_s2 = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_, step_tmp2); //cv16u
+			cv::Mat synCu8u_s2;
+			synCuDmapBA_s2.convertTo(synCu8u_s2, CV_8U, UCHAR_MAX/2e3);
+
+			cubeCamBA.drawContour(synCu8u_s2, fx_, fy_, cx_, cy_, 255);
+			imshow("synCu8u_s2", synCu8u_s2);
+			}
 
 			if(dbgKf_ == 2){
 				char fnBuf[80] = {0};
@@ -2981,7 +2991,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 						//vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_f2mkr_, sumbuf_f2mkr_, A_f2mkr_.data(), b_f2mkr_.data()); //没用
 						vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
 					//vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
-				}//ScopeTime "icp-A_f2mkr_"
+				}//if-term_123_ or xx2_ //ScopeTime "icp-A_f2mkr_"
 				f2mkr_total_time += tt2.toc();
 
 				tt2.tic();
@@ -3062,8 +3072,8 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				if(term_123_){
 					result = (A_f2mod_ + w_f2mkr_ * A_f2mkr_ + e2c_weight_ * A_e2c_).llt()
 						.solve(b_f2mod_ + w_f2mkr_ * b_f2mkr_ + e2c_weight_ * b_e2c_).cast<float>();
-					if(dbgKf_ > 1)
-						PCL_WARN("\tw_f2mkr_: %f, e2c_weight_: %f\n", w_f2mkr_, e2c_weight_);
+					if(dbgKf_ > 1 && 0 == level_index && iter == iter_num - 1)
+						PCL_WARN("\tw_f2mkr_: %f, e2c_weight_: %f, ll: %d\n", w_f2mkr_, e2c_weight_, ll);
 				}
 				//两项组合: 
 				else if(term_12_){ //f2mod+f2mkr
