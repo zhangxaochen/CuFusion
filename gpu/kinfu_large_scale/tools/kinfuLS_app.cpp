@@ -3754,16 +3754,21 @@ int
 
 	//zc: 长方体三边尺寸做参数, 毫米尺度
 	pc::parse_x_arguments(argc, argv, "-cusz", cuSideLenVec_);
-	if(cuSideLenVec_.size() == 3){//仅仅 >0 还不够, 必须==3
+	if(cuSideLenVec_.size() >= 3){//仅仅 >0 还不够, 必须>=3
 		PCL_WARN("cube-side-lengths: [%.2f, %.2f, %.2f]\n", cuSideLenVec_[0], cuSideLenVec_[1], cuSideLenVec_[2]);
 		
 		//转成米:
-		for(size_t i=0; i<cuSideLenVec_.size(); i++)
+		for(size_t i = 0; i < 3; i++)
 			cuSideLenVec_[i] *= MM2M;
 
 		app.kinfu_->cuSideLenVec_ = cuSideLenVec_;
 		app.toggleCuOdometry();
-
+		
+		//若还有第四参数, 定义为 Mat synCuDmapBA 的采样间隔	@2019-1-24 19:51:39
+		app.kinfu_->sample_step_ = 1;
+		if(cuSideLenVec_.size() > 3){
+			app.kinfu_->sample_step_ = (int)(cuSideLenVec_[3]);
+		}
 		//zc: --bdr_amplifier 之前只在 -bdr 上生效, 现在 -cusz 也要用 @2017-7-19 10:32:22
 		//float amp = 4.0;
 		//pc::parse_argument( argc, argv, "--bdr_amplifier", amp );

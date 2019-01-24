@@ -622,7 +622,7 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	cuContCloudNormal_ = PointCloud<Normal>::Ptr(new PointCloud<Normal>());
 
 	genSynData_ = false;
-
+	sample_step_ = 1;
 	//图优化控制量
 	isLastFoundCrnr_ = false;
 
@@ -2351,6 +2351,8 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			}
 		}
 	}
+	if(dbgKf_ >= 1)
+		printf("maskedpts->size(): %d\n", maskedpts->size());
 
 	if (max_icp_distance_ > 0)
 		device::truncateDepth(depths_curr_[0], max_icp_distance_);
@@ -2427,7 +2429,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			finished_ = true;
 		++global_time_;
 		return (false);
-	}
+	}//if (global_time_ == 0)
 
 #if 0	//暂时放弃考虑 shift 问题 @2017-4-5 16:03:36
 	///////////////////////////////////////////////////////////////////////////////////////////
@@ -2524,8 +2526,8 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		cubeCamBA.drawContour(m8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
 
 		tt0.tic(); //仅仅 zcRenderCubeDmap: ~130ms; 改用水平射线法后, 4~13ms
-		int step_tmp = 1; //间隔采样, 对生成图像速度有提升, 但对 ICP 速度没有提升, 因为是 dst, 不是src
-		cv::Mat synCuDmapBA = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_, step_tmp); //cv16u
+		//int step_tmp = 1; //间隔采样, 对生成图像速度有提升, 但对 ICP 速度没有提升, 因为是 dst, 不是src
+		cv::Mat synCuDmapBA = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_, sample_step_); //cv16u
 		printf("zcRenderCubeDmap: "); tt0.toc_print();
 
 		if(genSynData_){ //键盘 't' 控制
@@ -2690,7 +2692,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			cubeCamBA.drawContour(synCu8u, fx_, fy_, cx_, cy_, 255);
 			imshow("synCu8u", synCu8u);
 
-			{
+			if(0){
 			int step_tmp2 = 2;
 			cv::Mat synCuDmapBA_s2 = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_, step_tmp2); //cv16u
 			cv::Mat synCu8u_s2;
@@ -3054,6 +3056,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 							}
 							ll++;
 						}//dist < distTh
+						else if(0){ //DBG: zcRenderCubeDmap 用sample_step_ 的后遗症 @2019-1-24 21:28:48
+							PointXYZ pt_s = maskedpts_g->points[k]; //src
+							printf("pt_s_%d:= (%f, %f, %f); pointNKNSquaredDistance[0]: %f, \n", k, pt_s.x, pt_s.y, pt_s.z, pointNKNSquaredDistance[0]);
+						}
 					}//for-each-edge-point
 				}//ScopeTime "icp-A_e2c_"
 				e2c_total_time += tt2.toc();

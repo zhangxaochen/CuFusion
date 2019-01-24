@@ -778,6 +778,8 @@ namespace pcl
 
 		//zc: 已知立方体三邻边长度, 命令行参数 -cusz //2017-1-2 11:57:19
 		vector<float> cuSideLenVec_; //meters
+		int sample_step_; //Mat synCuDmapBA 的间隔采样步长	@2019-1-24 20:03:21
+
 		bool isUseCube_; //若 cuSideLenVec_.size() >0, 则 true
 		Eigen::Affine3f camPoseUseCu_; //用立方体定位方式得到的相机姿态
 		bool isLastFoundCrnr_; //上一帧有没有看到顶角
