@@ -656,6 +656,9 @@ namespace pcl
 		//@return ==bdrodometry_getOcclusionBoundary
 		cv::Mat edge_from_dmap(cv::Mat depth, cv::Mat &edge_map_whole, float dist_threshold = 0.05f );
 
+		//@return void
+		void edge_from_dmap2(cv::Mat depth, cv::Mat &edge_map_whole, float dist_threshold = 0.05f );
+
         bool operator() (const DepthMap& depth, const View * pcolor = NULL, FramedTransformation * frame_ptr = NULL);
 
         bool operator() ( 

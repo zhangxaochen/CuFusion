@@ -593,6 +593,7 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	grid_init_pose( 2, 3 ) = -0.3;
 	grid_.Init( 12, 3, grid_init_pose );
 
+	//const int iters[] = {10, 5, 4};
 	const int iters[] = {10, 5, 4};
 	std::copy (iters, iters + LEVELS, icp_iterations_);
 
@@ -1511,7 +1512,7 @@ cv::Mat pcl::gpu::KinfuTracker::interpmax_xy( cv::Mat depth )
 				}
 			}
 		}
-	}//for-i
+	}//for-j
 
 	//return result;
 	//return interp_y_mat;
@@ -1607,7 +1608,7 @@ cv::Mat pcl::gpu::KinfuTracker::edge_from_dmap(cv::Mat depth, cv::Mat &edge_map_
 				for ( int k = 0; k < 8; k++ ) {
 					if ( abs(depth.at< float >( i + nbr[ k ][ 0 ], j + nbr[ k ][ 1 ] ) - depth.at< float >( i, j ) ) > dist_threshold ) { //注意 abs(depth...) 非 depth_max
 						edge_map_whole.at< unsigned char >( i, j ) = 255;
-						//不break
+						break;
 					}
 				}
 			}
@@ -1618,6 +1619,37 @@ cv::Mat pcl::gpu::KinfuTracker::edge_from_dmap(cv::Mat depth, cv::Mat &edge_map_
 	return mask;
 
 }//edge_from_dmap
+
+void pcl::gpu::KinfuTracker::edge_from_dmap2(cv::Mat depth, cv::Mat &edge_map_whole, float dist_threshold /*= 0.05f*/ ){
+	//cv::Mat mask( 480, 640, CV_8UC1 );
+	//mask.setTo( 0 );
+	edge_map_whole = cv::Mat::zeros(480, 640, CV_8UC1);
+
+	int nbr[ 8 ][ 2 ] = {
+		{ -1, -1 },
+		{ -1, 0 },
+		{ -1, 1 },
+		{ 0, -1 },
+		{ 0, 1 },
+		{ 1, -1 },
+		{ 1, 0 },
+		{ 1, 1 }
+	};
+
+	for ( int i = 1; i < 479; i++ ) {
+		for ( int j = 1; j < 639; j++ ) {
+			if ( depth.at< float >( i, j ) > 0.0f ) { //当前 px 要有效
+				for ( int k = 0; k < 8; k++ ) {
+					if ( abs(depth.at< float >( i + nbr[ k ][ 0 ], j + nbr[ k ][ 1 ] ) - depth.at< float >( i, j ) ) > dist_threshold ) { //注意 abs(depth...) 非 depth_max
+						edge_map_whole.at< unsigned char >( i, j ) = 255;
+						break;
+					}
+				}
+			}
+		}
+	}
+
+}//edge_from_dmap2
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 bool
@@ -2488,9 +2520,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		if(dbgKf_ >= 1)
 		cubeCamBA.drawContour(m8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
 
-		//tt0.tic(); //仅仅 zcRenderCubeDmap: ~130ms; 改用水平射线法后, 4~13ms
-		cv::Mat synCuDmapBA = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_); //cv16u
-		//printf("zcRenderCubeDmap: "); tt0.toc_print();
+		tt0.tic(); //仅仅 zcRenderCubeDmap: ~130ms; 改用水平射线法后, 4~13ms
+		int step_tmp = 2; //间隔采样, 对生成图像速度有提升, 但对 ICP 速度没有提升, 因为是 dst, 不是src
+		cv::Mat synCuDmapBA = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_, step_tmp); //cv16u
+		printf("zcRenderCubeDmap: "); tt0.toc_print();
 
 		if(genSynData_){ //键盘 't' 控制
 			//先确定 cu->g 矩阵 T_(g,cu), 其实该放在全局, 或说单例模式; 暂时不管
@@ -2653,6 +2686,12 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 			cubeCamBA.drawContour(synCu8u, fx_, fy_, cx_, cy_, 255);
 			imshow("synCu8u", synCu8u);
+
+			if(dbgKf_ == 2){
+				char fnBuf[80] = {0};
+				sprintf(fnBuf, "synCu8u-%06d.png", callCnt_);
+				cv::imwrite(fnBuf, synCu8u);
+			}
 		}
 
 		synCuDmap_device_.upload(synCuDmapBA.data, synCuDmapBA.cols * synCuDmapBA.elemSize(), synCuDmapBA.rows, synCuDmapBA.cols);
@@ -2761,6 +2800,38 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
         tt1.tic();
 	ScopeTime time(">>> icp-all");
 	bool doLvlIterBreak = false;
+
+	if(dbgKf_ > 1){ //icp-loop外, 调试
+		//三项组合 (默认):
+		if(term_123_){
+			PCL_WARN(">>>>>>>>>using term_123_<<<<<<<<<\n");
+		}
+		//两项组合: 
+		else if(term_12_){ //f2mod+f2mkr
+			PCL_WARN(">>>>>>>>>using term_12_<<<<<<<<<\n");
+		}
+		else if(term_13_){
+			PCL_WARN(">>>>>>>>>using term_13_<<<<<<<<<\n");
+		}
+		else if(term_23_){
+			PCL_WARN(">>>>>>>>>using term_23_<<<<<<<<<\n");
+		}
+		//若仅用一项测试
+		else if(term_1_){ //kf
+			PCL_WARN(">>>>>>>>>using term_1_<<<<<<<<<\n");
+		}
+		else if(term_2_){ //f2cuboid
+			PCL_WARN(">>>>>>>>>using term_2_<<<<<<<<<\n");
+		}
+		else if(term_3_){ //edge2contour
+			PCL_WARN(">>>>>>>>>using term_3_<<<<<<<<<\n");
+		}
+	}
+
+	double f2mod_total_time = 0,
+		f2mkr_total_time = 0,
+		e2c_total_time = 0;
+
 	for (int level_index = LEVELS-1; level_index>=0; --level_index){
 		int iter_num = icp_iterations_[level_index];
 
@@ -2781,8 +2852,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			//Eigen::Matrix<double, 6, 1> b;
 
 			//配准目标1: frame2model
+			tt2.tic();
 			estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr (level_index),
 				vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A_f2mod_.data (), b_f2mod_.data ());
+			f2mod_total_time += tt2.toc();
 
 			double det_f2mod = A_f2mod_.determinant();
 			//printf("det_f2mod: %f\n", det_f2mod);
@@ -2898,75 +2971,79 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			else{ //if-(this->isCuInitialized_)
 				//ScopeTime time("icp-A_f2mkr_-A_e2c_"); //不要在循环内
 
-				{
-				//ScopeTime time("icp-A_f2mkr_");
-				//配准目标2: frame2marker (3d cuboid fiducial marker)
-				A_f2mkr_.setZero(); //因为 estimateCombined 是赋值, 不是 "+=" 所以其实不必; 此处仅做保险
-				b_f2mkr_.setZero();
-				estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr(level_index),
-					//vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_f2mkr_, sumbuf_f2mkr_, A_f2mkr_.data(), b_f2mkr_.data()); //没用
-					vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
+				tt2.tic();
+				if(term_123_ || term_12_ || term_23_ || term_2_){
+					//ScopeTime time("icp-A_f2mkr_");
+					//配准目标2: frame2marker (3d cuboid fiducial marker)
+					A_f2mkr_.setZero(); //因为 estimateCombined 是赋值, 不是 "+=" 所以其实不必; 此处仅做保险
+					b_f2mkr_.setZero();
+					estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr(level_index),
+						//vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_f2mkr_, sumbuf_f2mkr_, A_f2mkr_.data(), b_f2mkr_.data()); //没用
+						vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
 					//vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
-				}//ScopeTime
+				}//ScopeTime "icp-A_f2mkr_"
+				f2mkr_total_time += tt2.toc();
 
+				tt2.tic();
 				int ll = 0; //匹配点计数器
-				{
-				//ScopeTime time("icp-A_e2c_");
-				//配准目标3: edge2cont; 这里不受金字塔影响, 始终 640*480
-				pcl::PointCloud<pcl::PointXYZ>::Ptr maskedpts_g(new pcl::PointCloud<pcl::PointXYZ>);
-				Eigen::Affine3f cam2g;
-				cam2g.linear() = Rcurr;
-				cam2g.translation() = tcurr;
-				pcl::transformPointCloud(*maskedpts, *maskedpts_g, cam2g);
-				vector<int> pointIdxNKNSearch(1);
-				vector<float> pointNKNSquaredDistance(1);
-				const float kdtreeDistTh = e2c_dist_; //5cm
-				
-				A_e2c_.setZero(); //因为 "+=", 所以必须!!!
-				b_e2c_.setZero();
-				//int ll = 0; //匹配点计数器 //移到 ScopeTime 外
-				for(int k = 0; k < maskedpts_g->size(); k++){
-					cuEdgeKdtree_.nearestKSearch(maskedpts_g->points[k], 1, pointIdxNKNSearch, pointNKNSquaredDistance);
+				if(term_123_ || term_13_ || term_23_ || term_3_){
+					//ScopeTime time("icp-A_e2c_");
+					//配准目标3: edge2cont; 这里不受金字塔影响, 始终 640*480
+					pcl::PointCloud<pcl::PointXYZ>::Ptr maskedpts_g(new pcl::PointCloud<pcl::PointXYZ>);
+					Eigen::Affine3f cam2g;
+					cam2g.linear() = Rcurr;
+					cam2g.translation() = tcurr;
+					pcl::transformPointCloud(*maskedpts, *maskedpts_g, cam2g);
+					vector<int> pointIdxNKNSearch(1);
+					vector<float> pointNKNSquaredDistance(1);
+					const float kdtreeDistTh = e2c_dist_; //5cm
 
-					
-					if(pointNKNSquaredDistance[0] < kdtreeDistTh * kdtreeDistTh){
-						int ptIdx = pointIdxNKNSearch[0];
+					A_e2c_.setZero(); //因为 "+=", 所以必须!!!
+					b_e2c_.setZero();
+					//int ll = 0; //匹配点计数器 //移到 ScopeTime 外
+					for(int k = 0; k < maskedpts_g->size(); k++){
+						cuEdgeKdtree_.nearestKSearch(maskedpts_g->points[k], 1, pointIdxNKNSearch, pointNKNSquaredDistance);
 
-						//与 bdr 不同, 这里 kdtree 没有 norm信息, 所以先去nmap 上确定法向:
-						PointXYZ pt_d = cuContCloud_->points[ptIdx]; //dst
-						Normal pt_d_n = cuContCloudNormal_->points[ptIdx];
-						if(pcl_isnan(pt_d_n.normal_x)) //可能触发, 已验证
-							continue;
 
-						PointXYZ pt_s = maskedpts_g->points[k]; //src
+						if(pointNKNSquaredDistance[0] < kdtreeDistTh * kdtreeDistTh){
+							int ptIdx = pointIdxNKNSearch[0];
 
-						//用 eigen 是因为 pcl 没有所需的运算
-						Eigen::Vector3f nn(pt_d_n.normal_x, pt_d_n.normal_y, pt_d_n.normal_z);
-						Eigen::Vector3f qq(pt_d.x, pt_d.y, pt_d.z);
-						Eigen::Vector3f pp(pt_s.x, pt_s.y, pt_s.z);
+							//与 bdr 不同, 这里 kdtree 没有 norm信息, 所以先去nmap 上确定法向:
+							PointXYZ pt_d = cuContCloud_->points[ptIdx]; //dst
+							Normal pt_d_n = cuContCloudNormal_->points[ptIdx];
+							if(pcl_isnan(pt_d_n.normal_x)) //可能触发, 已验证
+								continue;
 
-						float r = nn.dot(qq - pp);
-						Eigen::Vector3f pxn = pp.cross(nn);
-						float xx[6] = {pxn(0), pxn(1), pxn(2), nn(0), nn(1), nn(2)};
-						
-						//zc: dbg
-						if(pcl_isnan(r)){
-							printf("k, ptIdx: %d, %d\n", k, ptIdx);
-							cout << "nn: " << nn << endl
-								<< "qq: " << qq << endl
-								<< "pp: " << pp << endl;
-						}
+							PointXYZ pt_s = maskedpts_g->points[k]; //src
 
-						for(int ii = 0; ii < 6; ii++){
-							for(int jj = 0; jj < 6; jj++){
-								A_e2c_(ii, jj) += xx[ii] * xx[jj];
+							//用 eigen 是因为 pcl 没有所需的运算
+							Eigen::Vector3f nn(pt_d_n.normal_x, pt_d_n.normal_y, pt_d_n.normal_z);
+							Eigen::Vector3f qq(pt_d.x, pt_d.y, pt_d.z);
+							Eigen::Vector3f pp(pt_s.x, pt_s.y, pt_s.z);
+
+							float r = nn.dot(qq - pp);
+							Eigen::Vector3f pxn = pp.cross(nn);
+							float xx[6] = {pxn(0), pxn(1), pxn(2), nn(0), nn(1), nn(2)};
+
+							//zc: dbg
+							if(pcl_isnan(r)){
+								printf("k, ptIdx: %d, %d\n", k, ptIdx);
+								cout << "nn: " << nn << endl
+									<< "qq: " << qq << endl
+									<< "pp: " << pp << endl;
 							}
-							b_e2c_(ii) += xx[ii] * r;
-						}
-						ll++;
-					}//dist < distTh
-				}//for-each-edge-point
-				}//ScopeTime
+
+							for(int ii = 0; ii < 6; ii++){
+								for(int jj = 0; jj < 6; jj++){
+									A_e2c_(ii, jj) += xx[ii] * xx[jj];
+								}
+								b_e2c_(ii) += xx[ii] * r;
+							}
+							ll++;
+						}//dist < distTh
+					}//for-each-edge-point
+				}//ScopeTime "icp-A_e2c_"
+				e2c_total_time += tt2.toc();
 
 				//double det_f2mod = A_f2mod_.determinant(),
 				double det_f2mkr = A_f2mkr_.determinant(),
@@ -2982,10 +3059,11 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 				//const float amplifier_e2c = 10; //以下改借用 -bdr_amp :: amplifier_
 				//三项组合 (默认):
-				result = (A_f2mod_ + w_f2mkr_ * A_f2mkr_ + e2c_weight_ * A_e2c_).llt()
-					.solve(b_f2mod_ + w_f2mkr_ * b_f2mkr_ + e2c_weight_ * b_e2c_).cast<float>();
 				if(term_123_){
-					//PCL_WARN(">>>>>>>>>using term_123_<<<<<<<<<\n");
+					result = (A_f2mod_ + w_f2mkr_ * A_f2mkr_ + e2c_weight_ * A_e2c_).llt()
+						.solve(b_f2mod_ + w_f2mkr_ * b_f2mkr_ + e2c_weight_ * b_e2c_).cast<float>();
+					if(dbgKf_ > 1)
+						PCL_WARN("\tw_f2mkr_: %f, e2c_weight_: %f\n", w_f2mkr_, e2c_weight_);
 				}
 				//两项组合: 
 				else if(term_12_){ //f2mod+f2mkr
@@ -3067,7 +3145,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		if(doLvlIterBreak)
 			break;
 	}//level_index
-    printf("ScopeTime-icp-all "); tt1.toc_print();
+
+	PCL_WARN("f2mod_total_time, f2mkr_total_time, e2c_total_time: %f, %f, %f\n", f2mod_total_time, f2mkr_total_time, e2c_total_time);
+
+	printf("ScopeTime-icp-all "); tt1.toc_print();
 	}//ScopeTime-icp-all
 
 	//save tranform
@@ -3087,7 +3168,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 			if(dbgKf_ == 2){
 				char fnBuf[80] = {0};
-				sprintf(fnBuf, "m8uc3-%04d.png", callCnt_);
+				sprintf(fnBuf, "m8uc3-%06d.png", callCnt_);
 				cv::imwrite(fnBuf, m8uc3);
 			}
 		}
@@ -3512,7 +3593,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, rcFlagMap_, vxlPos);
 
 			//再对 vol-2nd, 即 ghost volume 做 rcast.orig, 为了在 cluster 时求稳定的 sdf_forward (之前用 dcurr 求, 但是 dcurr 是瞬时的, 本身当前时刻不可靠)	@2018-11-29 17:30:06
-			printf("DBG【【raycast_volume2nd_\n");
+			//printf("DBG【【raycast_volume2nd_\n");
 			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, 
 // 				tsdf_volume_->data(), 
 // 				getCyclicalBufferStructure(), //错, 对应的是 cyclical1_, 进而 vol1
@@ -3520,7 +3601,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				cyclical2_.getBuffer(),
 				vmap_g_model_vol2_, nmap_g_model_vol2_);
 			//device::generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_vol2_, dmapModel_vol2_); //model
-			printf("DBG【【AFTER-raycast_volume2nd_\n");
+			//printf("DBG【【AFTER-raycast_volume2nd_\n");
 
 			if(dbgKf_ >= 1){
 				//printf("isTsdfVer(12)-raycast: "); tt3.toc_print(); //0ms
@@ -3606,7 +3687,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 					if(dbgKf_ == 2){
 						char fnBuf[80] = {0};
-						sprintf(fnBuf, "diffDmapCmap-%04d.png", callCnt_);
+						sprintf(fnBuf, "diffDmapCmap-%06d.png", callCnt_);
 						cv::imwrite(fnBuf, diffDmapColormap);
 					}
 
@@ -3622,12 +3703,12 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			else //if-(isTsdfVer(18))
 				cv::distanceTransform(edge_whole_mask==0, edgeDistMap, CV_DIST_L1, 3); //tsdf v18.16
 
-			printf("DBG【【edgeDistMap_device_.upload: edgeDistMap.rows_cols: %d, %d; elemSize: %u (%%d: %d);\n", 
-				edgeDistMap.rows, edgeDistMap.cols, edgeDistMap.elemSize(), edgeDistMap.elemSize());
+			//printf("DBG【【edgeDistMap_device_.upload: edgeDistMap.rows_cols: %d, %d; elemSize: %u (%%d: %d);\n", 
+			//	edgeDistMap.rows, edgeDistMap.cols, edgeDistMap.elemSize(), edgeDistMap.elemSize());
 
 			//DeviceArray2D<float> edgeDistMap_device_;
 			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
-			printf("DBG【【AFTER-edgeDistMap_device_.upload\n");
+			//printf("DBG【【AFTER-edgeDistMap_device_.upload\n");
 			if(dbgKf_ >= 1){
 				printf("isTsdfVer(12)-distanceTransform: "); tt3.toc_print(); //4ms, 有没有 GPU上的 DistTrans 代码?
 
