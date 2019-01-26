@@ -801,8 +801,9 @@ namespace pcl
 // 
 //             if(!is_curr_edge_wide && !isnan(n_f3.x)){ //v21.3.4
             if(!isnan(n_f3.x)){
-                if(doDbgPrint)
-                    printf("ray_dir, n_f3: (%f, %f, %f), (%f, %f, %f); px_xy: (%d, %d)\n", ray_dir.x, ray_dir.y, ray_dir.z, n_f3.x, n_f3.y, n_f3.z, x, y);
+                //if(doDbgPrint)
+                //    printf("ray_dir, n_f3: (%f, %f, %f), (%f, %f, %f); px_xy: (%d, %d)\n", ray_dir.x, ray_dir.y, ray_dir.z, n_f3.x, n_f3.y, n_f3.z, x, y);
+
                 //ray_start + ray_dir * time_curr 三量都要改
                 ray_start = vetex_found;
                 //ray_dir = n_f3 * -1;
@@ -814,8 +815,8 @@ namespace pcl
                     ray_dir = ray_dir * 0.67f + n_f3 * -0.33f; //v21.3.3: 减小“折射率”，不沿角平分线，稍微(0.33)折射即可   【暂时最优】@2018-10-10 18:03:53
 
                 time_curr = 0;
-                if(doDbgPrint)
-                    printf("\tcos_vray_neg_norm: %f\n", cos_vray_neg_norm);
+                //if(doDbgPrint)
+                //    printf("\tcos_vray_neg_norm: %f\n", cos_vray_neg_norm);
 
                 //doDbgPrint2 = true; //与 doDbgPrint 定点调试无关
             }
