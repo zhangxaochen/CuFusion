@@ -594,7 +594,7 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	grid_.Init( 12, 3, grid_init_pose );
 
 	//const int iters[] = {10, 5, 4};
-	const int iters[] = {10, 5, 4};
+	const int iters[] = {7, 4, 3}; //icp3
 	std::copy (iters, iters + LEVELS, icp_iterations_);
 
 	const float default_distThres = 0.10f; //meters
@@ -1525,7 +1525,7 @@ cv::Mat pcl::gpu::KinfuTracker::bdrodometry_getOcclusionBoundary( cv::Mat depth,
 	mask.setTo( 0 );
 
 	cv::Mat depth_max = bdrodometry_interpmax( depth );
-    cv::imshow("depth_max", depth_max); //zc
+	//cv::imshow("depth_max", depth_max); //zc
 
 	int nbr[ 8 ][ 2 ] = {
 		{ -1, -1 },
@@ -2317,10 +2317,13 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 	md_mask = bdrodometry_getOcclusionBoundary( md );
 	//md_mask = edge_from_dmap(md, edge_whole_mask, 0.01); 	//tsdf-v18.16
 
-	tt3.tic();
-	cv::Mat md_interp_xy = interpmax_xy(md);
-	printf("md_interp_xy "); tt3.toc_print();
-	//cout << md_interp_xy(cv::Rect(260, 320, 10, 10)) << endl; //in meters
+	cv::Mat md_interp_xy;
+	if(dbgKf_ >= 1){
+		tt3.tic();
+		/*cv::Mat*/ md_interp_xy = interpmax_xy(md);
+		printf("md_interp_xy "); tt3.toc_print();
+		//cout << md_interp_xy(cv::Rect(260, 320, 10, 10)) << endl; //in meters
+	}
 
 	//cv::imshow( "md_mask", md_mask );
 	if(!isTsdfVer(18))
@@ -2329,13 +2332,16 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		edge_from_dmap2(md, edge_whole_mask, 0.01); 	//tsdf-v18.16
 		//md_mask = edge_whole_mask; //alias for *maskedpts* //slows down edge2contour alignment a lot due to maskedpts growth
 
-		m8u.setTo(UCHAR_MAX, edge_whole_mask);
+		if(dbgKf_ >= 1){
+			m8u.setTo(UCHAR_MAX, edge_whole_mask);
 
-		cv::Mat md_interp_xy8u;
-		md_interp_xy.convertTo(md_interp_xy8u, CV_8UC1, UCHAR_MAX/3.);
-		cv::imshow("md_interp_xy8u", md_interp_xy8u);
+			cv::Mat md_interp_xy8u;
+			md_interp_xy.convertTo(md_interp_xy8u, CV_8UC1, UCHAR_MAX/3.);
+			cv::imshow("md_interp_xy8u", md_interp_xy8u);
+		}
 	}
-	cv::cvtColor(m8u, m8uc3, cv::COLOR_GRAY2BGR);
+	if(dbgKf_ >= 1)
+		cv::cvtColor(m8u, m8uc3, cv::COLOR_GRAY2BGR);
 
 	//cv::imshow( "m8u", m8u );
 
@@ -2523,13 +2529,15 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		//cv::cvtColor(m8u, dmat8uc3, cv::COLOR_GRAY2BGR);
 		//cubeCamBA.drawContour(dmat8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
 		if(dbgKf_ >= 1)
-		cubeCamBA.drawContour(m8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
+			cubeCamBA.drawContour(m8uc3, fx_, fy_, cx_, cy_, 255); //蓝色轮廓图
 
 		tt0.tic(); //仅仅 zcRenderCubeDmap: ~130ms; 改用水平射线法后, 4~13ms
 		//int step_tmp = 1; //间隔采样, 对生成图像速度有提升, 但对 ICP 速度没有提升, 因为是 dst, 不是src
 		cv::Mat synCuDmapBA = zcRenderCubeDmap(cubeCamBA, fx_, fy_, cx_, cy_, sample_step_); //cv16u
+		//↑--icp2: sample_step_=2
 		printf("zcRenderCubeDmap: "); tt0.toc_print();
 
+#if 0	//genSynData_
 		if(genSynData_){ //键盘 't' 控制
 			//先确定 cu->g 矩阵 T_(g,cu), 其实该放在全局, 或说单例模式; 暂时不管
 			//记得先前添加 8顶点顺序: 0,123,456,7
@@ -2684,6 +2692,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 			genSynData_ = false; //重置false, 及每次按键仅当次生效
 		}//if-genSynData_
+#endif	//genSynData_
 
 		if(dbgKf_ >= 1){
 			cv::Mat synCu8u;
@@ -2843,9 +2852,13 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 		}
 	}
 
-	double f2mod_total_time = 0,
-		f2mkr_total_time = 0,
-		e2c_total_time = 0;
+	double f2mod_total_time = 0
+		,f2mkr_total_time = 0
+		,e2c_total_time = 0
+		,one_cycle_total_time = 0
+		,misc1_total_time = 0
+		,misc2_total_time = 0
+		;
 
 	for (int level_index = LEVELS-1; level_index>=0; --level_index){
 		int iter_num = icp_iterations_[level_index];
@@ -2867,6 +2880,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			//Eigen::Matrix<double, 6, 1> b;
 
 			//配准目标1: frame2model
+			tt0.tic();
 			tt2.tic();
 			estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr (level_index),
 				vmap_g_prev, nmap_g_prev, distThres_, angleThres_, gbuf_, sumbuf_, A_f2mod_.data (), b_f2mod_.data ());
@@ -2987,11 +3001,18 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				//ScopeTime time("icp-A_f2mkr_-A_e2c_"); //不要在循环内
 
 				tt2.tic();
-				if(term_123_ || term_12_ || term_23_ || term_2_){
+				A_f2mkr_.setZero(); //因为 estimateCombined 是赋值, 不是 "+=" 所以其实不必; 此处仅做保险
+				b_f2mkr_.setZero();
+
+				if((term_123_ || term_12_ || term_23_ || term_2_)
+					&& iter % sample_step_ == 0) //借用 sample_step_, 其本来是用于 synCuDmapBA 降采样的 @2019-1-25 10:24:25
+				{
 					//ScopeTime time("icp-A_f2mkr_");
 					//配准目标2: frame2marker (3d cuboid fiducial marker)
-					A_f2mkr_.setZero(); //因为 estimateCombined 是赋值, 不是 "+=" 所以其实不必; 此处仅做保险
-					b_f2mkr_.setZero();
+
+					//↓--改放 if外面, 因为 if不总是执行
+					//A_f2mkr_.setZero(); //因为 estimateCombined 是赋值, 不是 "+=" 所以其实不必; 此处仅做保险
+					//b_f2mkr_.setZero();
 					estimateCombined (device_Rcurr, device_tcurr, vmap_curr, nmap_curr, device_Rprev_inv, device_tprev, intr(level_index),
 						//vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_f2mkr_, sumbuf_f2mkr_, A_f2mkr_.data(), b_f2mkr_.data()); //没用
 						vmaps_cu_g_prev_[level_index], nmaps_cu_g_prev_[level_index], distThres_, angleThres_, gbuf_, sumbuf_, A_f2mkr_.data(), b_f2mkr_.data());
@@ -3000,8 +3021,15 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				f2mkr_total_time += tt2.toc();
 
 				tt2.tic();
+				A_e2c_.setZero(); //因为 "+=", 所以必须!!!
+				b_e2c_.setZero();
+
 				int ll = 0; //匹配点计数器
-				if(term_123_ || term_13_ || term_23_ || term_3_){
+				if((term_123_ || term_13_ || term_23_ || term_3_)
+					//&& iter % sample_step_ == 0) //icp4: 借用 sample_step_, 其本来是用于 synCuDmapBA 降采样的 @2019-1-25 10:24:25
+					//&& iter == 0) //icp4.2: 改用仅每次内循环开始时用 e2c, 结果long4 上BAD	@2019-1-25 17:00:53
+					&& iter == iter_num - 1) //icp4.3: 改用每次内循环终止时用 e2c; 已验证: long4上 OK, 且增大权重好一点-cuAmp 4,4->4,24	@2019-1-25 17:05:56
+				{
 					//ScopeTime time("icp-A_e2c_");
 					//配准目标3: edge2cont; 这里不受金字塔影响, 始终 640*480
 					pcl::PointCloud<pcl::PointXYZ>::Ptr maskedpts_g(new pcl::PointCloud<pcl::PointXYZ>);
@@ -3013,8 +3041,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					vector<float> pointNKNSquaredDistance(1);
 					const float kdtreeDistTh = e2c_dist_; //5cm
 
-					A_e2c_.setZero(); //因为 "+=", 所以必须!!!
-					b_e2c_.setZero();
+					//↓--改放 if外面, 因为 if不总是执行
+					//A_e2c_.setZero(); //因为 "+=", 所以必须!!!
+					//b_e2c_.setZero();
+
 					//int ll = 0; //匹配点计数器 //移到 ScopeTime 外
 					for(int k = 0; k < maskedpts_g->size(); k++){
 						cuEdgeKdtree_.nearestKSearch(maskedpts_g->points[k], 1, pointIdxNKNSearch, pointNKNSquaredDistance);
@@ -3064,6 +3094,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				}//ScopeTime "icp-A_e2c_"
 				e2c_total_time += tt2.toc();
 
+				tt2.tic(); //misc1...
 				//double det_f2mod = A_f2mod_.determinant(),
 				double det_f2mkr = A_f2mkr_.determinant(),
 						det_e2c = A_e2c_.determinant();
@@ -3133,9 +3164,10 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 						<< "\tresult_e2c:\n" << result_e2c <<endl;
 				}
 #endif
-
+				misc1_total_time += tt2.toc();
 			}//if-isCuInitialized_
 
+			tt2.tic();
 			float alpha = result (0);
 			float beta  = result (1);
 			float gamma = result (2);
@@ -3160,12 +3192,17 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			//compose
 			tcurr = Rinc * tcurr + tinc;
 			Rcurr = Rinc * Rcurr;
+
+			misc2_total_time += tt2.toc();
+			one_cycle_total_time += tt0.toc();
 		}//iter
 		if(doLvlIterBreak)
 			break;
 	}//level_index
 
-	PCL_WARN("f2mod_total_time, f2mkr_total_time, e2c_total_time: %f, %f, %f\n", f2mod_total_time, f2mkr_total_time, e2c_total_time);
+	double icp3sum = f2mod_total_time + f2mkr_total_time + e2c_total_time;
+	printf("f2mod_total_time, f2mkr_total_time, e2c_total_time: %f, %f, %f; icp3sum= %f\n", f2mod_total_time, f2mkr_total_time, e2c_total_time, icp3sum);
+	printf("\tmisc1_2_total_time: %f, %f; one_cycle_total_time: %f\n", misc1_total_time, misc2_total_time, one_cycle_total_time);
 
 	printf("ScopeTime-icp-all "); tt1.toc_print();
 	}//ScopeTime-icp-all
@@ -3455,6 +3492,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 
 		//ScopeTime time("tsdf");
 		//integrateTsdfVolume(depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tranc_dist, volume_);
+#pragma region NOT tv18
 		if(isTsdfVer(2)){
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_);
 			integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
@@ -3597,30 +3635,42 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			//integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
 
 		}//elif-isTsdfVer(11)
+#pragma endregion 
 		else if(isTsdfVer(12) || isTsdfVer(13) || isTsdfVer(14) || isTsdfVer(15) || isTsdfVer(16) || isTsdfVer(17) || isTsdfVer(18)){
 			//v12 核心目的: 运动模糊在 fusion 阶段造成薄片结构损坏, 改进他 @2017-12-1 11:04:32
 			//部分照搬tsdfVer11; 
 
 			//1, fusion 前, 用新T & 旧tsdf, 投射半新 vmap_g_model_, nmap_g_model_
 			//存疑: 直接用旧的行不行? 因为 dT 很小	//试试!!!
-			if(dbgKf_ >= 1)
-				tt3.tic();
+			double rcFlagMap_total_time = 0
+				,rcOrig_vol2_total_time = 0
+				,genDmap_total_time = 0
+				,dist_trans_total_time = 0
+				,distMap_upload_total_time = 0
+				,nmap_filt_g_total_time = 0
+				,integ18_total_time = 0
+				;
 
+			tt2.tic();
+			tt3.tic();
 			//raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_);
 			//↓--rcast-through (折射+穿透) 策略提前到这里 @2018-11-29 16:59:34
 			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), 
 				getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, rcFlagMap_, vxlPos);
+			rcFlagMap_total_time = tt3.toc();
 
+			tt3.tic();
 			//再对 vol-2nd, 即 ghost volume 做 rcast.orig, 为了在 cluster 时求稳定的 sdf_forward (之前用 dcurr 求, 但是 dcurr 是瞬时的, 本身当前时刻不可靠)	@2018-11-29 17:30:06
 			//printf("DBG【【raycast_volume2nd_\n");
-			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, 
-// 				tsdf_volume_->data(), 
-// 				getCyclicalBufferStructure(), //错, 对应的是 cyclical1_, 进而 vol1
-				tsdf_volume_->volume2nd_, 
-				cyclical2_.getBuffer(),
-				vmap_g_model_vol2_, nmap_g_model_vol2_);
+// 			raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, 
+// // 				tsdf_volume_->data(), 
+// // 				getCyclicalBufferStructure(), //错, 对应的是 cyclical1_, 进而 vol1
+// 				tsdf_volume_->volume2nd_, 
+// 				cyclical2_.getBuffer(),
+// 				vmap_g_model_vol2_, nmap_g_model_vol2_);
 			//device::generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_vol2_, dmapModel_vol2_); //model
 			//printf("DBG【【AFTER-raycast_volume2nd_\n");
+			rcOrig_vol2_total_time = tt3.toc();
 
 			if(dbgKf_ >= 1){
 				//printf("isTsdfVer(12)-raycast: "); tt3.toc_print(); //0ms
@@ -3628,14 +3678,16 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				tt3.tic();
 			}
 
+			tt3.tic();
 			device::generateDepth(device_Rcurr_inv, device_tcurr, vmap_g_model_, dmapModel_);
+			genDmap_total_time = tt3.toc();
 
 			if(dbgKf_ >= 1){
 				//printf("isTsdfVer(12)-generateDepth: "); tt3.toc_print(); //cudaSyn 8~12ms; 去掉syn后 0ms
 
 				tt3.tic();
 			}
-
+#pragma region tv12【DEPRECATED】
 			//【DEPRECATED】	@2018-2-25 22:13:37
 			if(isTsdfVer(12)){	//v12 单独一版, 主要观察、测试 depth-uncertainty
 #if 0	//opencv CPU
@@ -3714,6 +3766,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					tt3.tic();
 				}//if-(dbgKf_ >= 1)
 			}//if-isTsdfVer(12)	【DEPRECATED】
+#pragma endregion 
 
 			tt3.tic();
 			cv::Mat edgeDistMap;
@@ -3721,12 +3774,27 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 				cv::distanceTransform(md_mask==0, edgeDistMap, CV_DIST_L1, 3);
 			else //if-(isTsdfVer(18))
 				cv::distanceTransform(edge_whole_mask==0, edgeDistMap, CV_DIST_L1, 3); //tsdf v18.16
+			dist_trans_total_time = tt3.toc();
 
 			//printf("DBG【【edgeDistMap_device_.upload: edgeDistMap.rows_cols: %d, %d; elemSize: %u (%%d: %d);\n", 
 			//	edgeDistMap.rows, edgeDistMap.cols, edgeDistMap.elemSize(), edgeDistMap.elemSize());
 
+			tt3.tic();
 			//DeviceArray2D<float> edgeDistMap_device_;
 			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
+			distMap_upload_total_time += tt3.toc();
+			printf("distMap_upload_total_time: %f\n", distMap_upload_total_time);
+#if 0	//【DBG: 多次 upload 并不耗时间， 说明 <1ms, 但为什么统计第一次为 10ms? @2019-1-27 00:29:23
+			tt3.tic();
+			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
+			distMap_upload_total_time += tt3.toc();
+			tt3.tic();
+			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
+			distMap_upload_total_time += tt3.toc();
+			tt3.tic();
+			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
+			distMap_upload_total_time += tt3.toc();
+#endif
 			//printf("DBG【【AFTER-edgeDistMap_device_.upload\n");
 			if(dbgKf_ >= 1){
 				printf("isTsdfVer(12)-distanceTransform: "); tt3.toc_print(); //4ms, 有没有 GPU上的 DistTrans 代码?
@@ -3742,8 +3810,11 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			t_tmp.x=t_tmp.y=t_tmp.z=0;
 
 			nmap_filt_ = nmaps_curr_[0];
+			tt3.tic();
 			zc::transformVmap(nmap_filt_, device_Rcurr, t_tmp, nmap_filt_g_); //对 curr 就用 local, 不用 global, 
+			nmap_filt_g_total_time = tt3.toc();
 
+#pragma region NOT tv18
 			if(!isTsdfVer(18)){ //if-not-v18, 即, v18.x 放弃 largeIncidMask_model_, computeNormalsContourcue, largeIncidMask_total_ @2018-3-25 23:27:28
 
 				zc::contourCorrespCandidate(device_tcurr, vmap_g_model_, nmap_g_model_, this->incidAngleThresh_, largeIncidMask_model_); //tv11里已放弃? @2017-12-3 19:31:47
@@ -3832,20 +3903,22 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					diffDmap_,
 					depthRawScaled_, vxlPos);
 			}
+#pragma endregion 
 			else if(isTsdfVer(18)){
+				tt3.tic();
 				//zc::edge2wmap(vmaps_curr_[0], edgeDistMap_device_, fx_, wmap_); //for tsdf-v18.4
 				//float maxEdgeDist = tsdf_volume_->getTsdfTruncDist() * 6e3; //in mm
 				float maxEdgeDist = 30; //in mm, 定死
 				zc::edge2wmap(vmaps_curr_[0], edgeDistMap_device_, fx_, maxEdgeDist, wmap_); //增加 maxEdgeDist 控制量, 暂定 2~3 倍 tdist @2018-8-17 17:42:08
 
-				tt1.tic();
+				//tt1.tic();
 				//DepthMap rcFlagMap_;
 				//rcFlagMap_.create(rows_, cols_); //放到 rcast 里
 				//↓--放到前面
 // 				raycast (intr, device_Rcurr, device_tcurr, tsdf_volume_->getTsdfTruncDist(), device_volume_size, tsdf_volume_->data(), 
 // 					getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, rcFlagMap_, vxlPos);
 // 					//getCyclicalBufferStructure(), vmap_g_model_, nmap_g_model_, wmap_, rcFlagMap_, vxlPos); //放弃在 rcast 中用 wmap_ 策略 @2018-11-29 16:52:01
-				printf("raycast_rcFlagMap_: "); tt1.toc_print(); //0ms
+				//printf("raycast_rcFlagMap_: "); tt1.toc_print(); //0ms
 
 				if(dbgKf_ >= 1){
 					tt1.tic();
@@ -3909,7 +3982,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					tt3.tic();
 				}
 
-				printf("DBG【【BEFORE-integrateTsdfVolume_v18\n");
+				//printf("DBG【【BEFORE-integrateTsdfVolume_v18\n");
 
 				if(dbgV2_18_ >0)
 					integrateTsdfVolume (depth_raw, intr, device_volume_size, device_Rcurr_inv, device_tcurr, tsdf_volume_->getTsdfTruncDist(), tsdf_volume_->data(), getCyclicalBufferStructure(), depthRawScaled_, vxlPos);
@@ -3930,11 +4003,14 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 					dmapModel_vol2_, //用作 sdf-forward/back 二分类, 之前用的第一形参 depth_raw (dcurr), 但是噪声大, 太不可靠 @2018-11-29 17:50:32
 					rcFlagMap_,
 					depthRawScaled_, vxlPos);
+				integ18_total_time = tt3.toc();
+				
+				printf("rcFlagMap_total_time, rcOrig_vol2, genDmap, dist_trans, distMap_upload, nmap_filt_g, integ18: %f, %f, %f, %f, %f, %f, %f\n", 
+					rcFlagMap_total_time, rcOrig_vol2_total_time, genDmap_total_time, dist_trans_total_time, distMap_upload_total_time, nmap_filt_g_total_time, integ18_total_time);
 			}
 
-			if(dbgKf_ >= 1){
-				printf("integrateTsdfVolume_v18 "); tt3.toc_print(); //很快, 5ms
-			}
+			//if(dbgKf_ >= 1)
+				printf("integrateTsdfVolume_v18 "); tt2.toc_print(); //很快, 5ms
 		}//elif-isTsdfVer(12)~18
 	}//if-(integrate)
 
