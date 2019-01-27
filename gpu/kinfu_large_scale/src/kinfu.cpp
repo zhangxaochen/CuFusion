@@ -58,7 +58,7 @@
 
 //zc: @2017-3-22 17:45:39
 #include <pcl/console/time.h> //zc: tictoc
-#include "contour_cue_impl.h"
+//#include "contour_cue_impl.h"
 
 //for g2o   //不能放 @kinfu.h; //拷贝自之前 pcl/gpu/.../kinfu.cpp; @2017-11-13 10:51:02
 #include <g2o/core/sparse_optimizer.h>
@@ -84,6 +84,39 @@ bool cuTreeInited_ = false;
 
 //图优化
 g2o::SparseOptimizer g2oOptmizer_;
+
+namespace zc{
+	//copy from "contour_cue_impl.h" to avoid extra header file	@2019-1-27 17:48:04
+
+	using namespace pcl::device;
+
+	//@brief generate the contour correspondence candidates (a MaskMap repr.) using the "tangency property": "for all points along the contour generator, the normal is orthogonal to the view ray."
+	//@param[in] camPos, the camera coords in global reference frame
+	//@param[in] vmap, the vertex map in *GLOBAL FRAME*, to compute "view ray" with *camPos*
+	//@param[in] nmap, the normal map in *GLOBAL FRAME*
+	//@param[in] angleThresh, angle threshold of the "tangency property" in *degree*.
+	//@param[out] outMask, contour mask
+	void contourCorrespCandidate(const float3 &camPos, const MapArr &vmap, const MapArr &nmap, int angleThresh, MaskMap &outMask);
+
+	//@brief Perform affine transform of vmap (part of @tranformMaps), also can be used on Nmaps.
+	//@param[in] vmap_src source vertex map
+	//@param[in] Rmat rotation mat
+	//@param[in] tvec translation
+	//@param[out] vmap_dst destination vertex map
+	void transformVmap(const MapArr &vmap_src, const Mat33 &Rmat, const float3 &tvec, MapArr &vmap_dst);
+
+	//@brief 构造 wmap: 原则: weight 正比于 cos/D(u), 最初用于 tsdf-v11.4  @2017-3-13 17:09:42
+	//@param[in] nmapLocal 相机坐标系下, 这样就不用传相机坐标 t
+	//@param[in] contMask, 本意是 wei 正比于 到边缘距离, 以便削弱边缘翻翘的权重, 这里用边缘蒙板近似
+	PCL_EXPORTS void calcWmap(const MapArr &vmapLocal, const MapArr &nmapLocal, const zc::MaskMap &contMask, MapArr &wmap_out);
+
+	//@brief v2, 修改原 calcWmap 参数, 之前 contMask 算作二分类权重 mask, 改成浮点型, 平滑过渡权重 (控制量 edgeDistMap)
+	PCL_EXPORTS void calcWmap(const MapArr &vmapLocal, const MapArr &nmapLocal, const DeviceArray2D<float> &edgeDistMap, const float fxy, MapArr &wmap_out);
+
+	//@brief 截取自 calcWmap, 只用 edge, 其他控制量不够稳定; 目的: 为了 tsdf-v18.4 @2018-3-9 22:43:18
+	PCL_EXPORTS void edge2wmap(const MapArr &vmapLocal, const DeviceArray2D<float> &edgeDistMap, const float fxy, float maxEdgeDist, MapArr &wmap_out);
+
+}//namespace zc
 
 /**
  * @brief CameraPoseWriter writes all camera poses computed by
