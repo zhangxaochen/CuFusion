@@ -627,7 +627,10 @@ pcl::gpu::KinfuTracker::KinfuTracker (const Eigen::Vector3f &volume_size, const 
 	grid_.Init( 12, 3, grid_init_pose );
 
 	//const int iters[] = {10, 5, 4};
-	const int iters[] = {7, 4, 3}; //icp3
+	//const int iters[] = {7, 4, 3}; //icp3
+	//const int iters[] = {3, 4, 3}; //icp4.4
+	//const int iters[] = {2, 1, 1}; //icp4.4.2 -BAD
+	const int iters[] = {1, 4, 3}; //icp4.4.3 -GOOD;
 	std::copy (iters, iters + LEVELS, icp_iterations_);
 
 	const float default_distThres = 0.10f; //meters
