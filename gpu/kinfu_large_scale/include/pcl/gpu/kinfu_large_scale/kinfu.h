@@ -871,6 +871,12 @@ namespace pcl
 
 		bool is_integrate_; //zc: 键盘控制, 看不融合, ray-cast 什么样 @2018-9-29 11:28:31
 
+		void set_icp_iters(std::vector<int> iters){
+			if(iters.size() != LEVELS)
+				PCL_WARN("+++++++++++++++@set_icp_iters: ERROR: \"iters.size() != LEVELS\"\n");
+			std::copy (iters.begin(), iters.end(), icp_iterations_);
+		}//set_icp_iters
+
       private:
 
 		DeviceArray2D<unsigned short> bdr_temp_depth_;

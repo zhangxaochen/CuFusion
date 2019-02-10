@@ -3748,6 +3748,16 @@ int
 		app.toggleBdrAmplifier( amp );
 	}
 
+	vector<int> iter_num;
+	int iter_param_num = pc::parse_x_arguments(argc, argv, "-iter", iter_num);
+	if(iter_param_num > 0){
+		PCL_WARN("iter_param_num: %d\n", iter_param_num);
+
+		//std::copy (iters, iters + LEVELS, icp_iterations_);
+		//std::copy (iter_num.begin(), iter_num.end(), icp_iterations_);
+		app.kinfu_->set_icp_iters(iter_num);
+	}
+
 	//↓--下面挪上来的, 希望 cu / bdr 公用此参数 @2018-11-27 20:02:05
 	app.kinfu_->e2c_dist_ = 0.05;
 	pc::parse_argument(argc, argv, "-e2cDist", app.kinfu_->e2c_dist_);
