@@ -833,6 +833,7 @@ void
 	//zc:
 	vmaps_cu_g_prev_.resize(LEVELS); //立方体 v/nmap-vec 初始化, 但不必 .create
 	nmaps_cu_g_prev_.resize(LEVELS);
+	edgeDistMap_device_.create(rows, cols);
 	dmapModel_.create(rows, cols);
 	diffDmap_.create(rows, cols);
 
