@@ -951,5 +951,5 @@ pcl::device::raycast (const Intr& intr, const Mat33& Rcurr, const float3& tcurr,
   int dummy = 0;
   rayCastKernel<<<grid, block>>>(rc, *buffer, dummy);
   cudaSafeCall (cudaGetLastError ());
-  //cudaSafeCall(cudaDeviceSynchronize());
+  cudaSafeCall(cudaDeviceSynchronize());
 }
