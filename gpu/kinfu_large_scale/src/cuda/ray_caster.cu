@@ -908,9 +908,9 @@ pcl::device::raycast (const Intr& intr, const Mat33& Rcurr, const float3& tcurr,
   rc.Rcurr = Rcurr;
   rc.tcurr = tcurr;
 
-  //rc.time_step = tranc_dist * 0.8f;
+  rc.time_step = tranc_dist * 0.8f;
   //rc.time_step = tranc_dist * 0.1f; //zc:
-  rc.time_step = tranc_dist * 0.4f; //zc: 按 td~5mm csz~2mm 估算, 希望每 step 跨过一个cell, 增大步长避免走得太慢,擦边视线周边错误cell    @2018-10-9 01:03:26
+  //rc.time_step = tranc_dist * 0.4f; //zc: 按 td~5mm csz~2mm 估算, 希望每 step 跨过一个cell, 增大步长避免走得太慢,擦边视线周边错误cell    @2018-10-9 01:03:26
 
   rc.volume_size = volume_size;
 
