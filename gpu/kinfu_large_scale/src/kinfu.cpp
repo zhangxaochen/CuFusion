@@ -3820,7 +3820,7 @@ pcl::gpu::KinfuTracker::cuOdometry( const DepthMap &depth_raw, const View *pcolo
 			//DeviceArray2D<float> edgeDistMap_device_;
 			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
 			distMap_upload_total_time += tt3.toc();
-			printf("distMap_upload_total_time: %f\n", distMap_upload_total_time);
+			//printf("distMap_upload_total_time: %f\n", distMap_upload_total_time);
 #if 0	//【DBG: 多次 upload 并不耗时间， 说明 <1ms, 但为什么统计第一次为 10ms? @2019-1-27 00:29:23
 			tt3.tic();
 			edgeDistMap_device_.upload(edgeDistMap.data, edgeDistMap.cols * edgeDistMap.elemSize(), edgeDistMap.rows, edgeDistMap.cols);
