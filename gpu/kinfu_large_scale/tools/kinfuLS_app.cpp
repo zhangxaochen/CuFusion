@@ -136,6 +136,11 @@ Eigen::Affine3f camPoseUseCu_; //用立方体定位方式得到的相机姿态
 bool isLastFoundCrnr_; //上一帧有没有看到顶角
 //bool isCuInitialized_ = false; //若第一次定位到立方体: 1, 设定 cu2gPose_
 
+bool crnr_write_csv_ = false; //"-crnr" 开关控制 是否把 cu的顶角存到 csv	@2019-2-15 23:28:54
+const string crnr_csv_fn_ = "cube-crnr-axes.csv";
+ofstream crnr_fout_;
+#define CAM_POSE_WRITER 01
+
 void dbgAhcPeac_app( const RGBDImage *rgbdObj, PlaneFitter *pf){
 	cv::Mat dbgSegMat(rgbdObj->height(), rgbdObj->width(), CV_8UC3); //分割结果可视化
 	vector<vector<int>> idxss;
@@ -188,6 +193,9 @@ using namespace pcl;
 using namespace pcl::gpu;
 using namespace Eigen;
 namespace pc = pcl::console;
+
+typedef Eigen::Matrix<double, 3, 3, Eigen::RowMajor> Matrix3drm;
+typedef Eigen::Matrix<float, 3, 3, Eigen::RowMajor> Matrix3frm;
 
 namespace pcl
 {
@@ -1968,7 +1976,9 @@ struct KinFuLSApp
 					has_image = kinfu_->cuOdometry(depth_device_, &image_view_.colors_device_);
 					printf("kinfu_->cuOdometry: "); tt0.toc_print();
 
-					if(!kinfu_->isCuInitialized_){ //若全局 cu 没有初始化、定位
+					if(!kinfu_->isCuInitialized_	//若全局 cu 没有初始化、定位
+						|| crnr_write_csv_)	//或命令行 "-crnr" 存cu
+					{
 						ScopeTimeT time("NOT kinfu_->isCuInitialized_");
 
 						//1, 平面分割,拟合:
@@ -1999,164 +2009,209 @@ struct KinFuLSApp
 
 						vector<PlaneSeg> plvec; //存放各个平面参数
 						plvec = zcRefinePlsegParam(rgbdObj, idxss); //决定是否 refine 平面参数
-						vector<vector<double>> cubeCandiPoses; //内vec必有size=12=(t3+R9), 是cube在相机坐标系的姿态, 且规定row-major; 外vec表示多个候选顶角的姿态描述
+						vector<vector<double>> cubeCandiPoses; //内vec必有size=12=(t3+R9), 是cube在相机坐标系的姿态, 且规定col-major; 外vec表示多个候选顶角的姿态描述
 						//2, 正交三邻面查找:
 						zcFindOrtho3tup(plvec, planeFitter_.membershipImg, fx, fy, cx, cy, cubeCandiPoses, dbgSegMat);
-
-						imshow(winNameAhc, dbgSegMat); //改放这里 @2017-4-19 11:32:30
-						if(!this->kinfu_->term_1_){ //若仅 term_1_, 则不 waitKey
-							printf("this_kinfu__term_1_\n");
-							cv::waitKey(0);
-						}
-						cv::waitKey(0);
-
 						size_t crnrCnt = cubeCandiPoses.size();
 						bool isFoundCrnr = (crnrCnt != 0);
-						size_t crnrIdx = 0; //鼠标选中的下标
 
-						//遍历找到的顶角, 看鼠标选中了哪一个: //2017-2-20 17:45:36
-						double minPxDist = 1e5; //鼠标双击坐标与【候选顶角】像素坐标距离，的平方, 用于标记更近的【候选点序号】
-						for(size_t i=0; i<crnrCnt; i++){
-							Vector3d pti(cubeCandiPoses[i].data()); //候选顶角3D坐标
-							cv::Point pxi = getPxFrom3d(pti, fx, fy, cx, cy);
-							double dist = cv::norm(pxSelect - pxi);
-							if(dist < minPxDist){
-								minPxDist = dist;
-								crnrIdx = i;
-							}
-						}
-						printf("【【【crnrIdx: %d; minPxDist: %f\n", crnrIdx, minPxDist);
-
-						//3, 仅当找到四顶点, 才算定位到立方体
-						tt0.tic();
-						vector<double> cu4pts; //meters, 因为↓传入的 cuSideLenVec_ 已是量纲米
-						bool isFoundCu4pts = false;
-						if(isFoundCrnr)
-							isFoundCu4pts = getCu4Pts(cubeCandiPoses[crnrIdx], cuSideLenVec_, dm_raw, planeFitter_.membershipImg, fx, fy, cx, cy, cu4pts);
-						//找到 crnr 未必 isFoundCu4pts, 因为可能显示不全
-						printf("getCu4Pts: "); tt0.toc_print();
-
-						if(isFoundCu4pts){
-							//调试观察:
-							for(size_t i=0; i<4; i++){
-								Vector3d pti(cu4pts.data() + i*3);
-								cv::Point pxi = getPxFrom3d(pti, fx, fy, cx, cy);
-								cv::circle(dbgSegMat, pxi, 2, 255, 1); //蓝小圆圈
-								cv::circle(dbgSegMat, pxi, 12, cv::Scalar(0,255,0), 2); //绿大圆圈,
-							}
-
-							kinfu_->cubeCandiPoses_ = cubeCandiPoses;
-							kinfu_->crnrIdx_ = crnrIdx;
-							//kinfu_->isFirstFoundCube_ = true;
-
-							//8顶点, 固化编号: 0,123,456,7
-							//各面顶点分组: 0142/3675, 0253/1476, 0361/2574;
-							//最初4个:
-							vector<Vector3d> cuVerts8_c;
-							for(size_t i=0; i<4; i++){
-								Vector3d pti(cu4pts.data() + i*3);
-								cuVerts8_c.push_back(pti);
-							}
-							//再3个:
-							//for(size_t i=1; i<4; i++)
-							cuVerts8_c.push_back(cuVerts8_c[1] + cuVerts8_c[2] - cuVerts8_c[0]);
-							cuVerts8_c.push_back(cuVerts8_c[2] + cuVerts8_c[3] - cuVerts8_c[0]);
-							cuVerts8_c.push_back(cuVerts8_c[3] + cuVerts8_c[1] - cuVerts8_c[0]);
-							//最后最远一个:
-							//cuVerts8_c.push_back(cuVerts8_c[4] + cuVerts8_c[5] + cuVerts8_c[6] - 2 * cuVerts8_c[0]); //-2倍, 非3倍 //×!!!!
-							cuVerts8_c.push_back(cuVerts8_c[1] + cuVerts8_c[2] + cuVerts8_c[3] - 2 * cuVerts8_c[0]);
-
+						imshow(winNameAhc, dbgSegMat); //改放这里 @2017-4-19 11:32:30
+						//cv::waitKey(0);
+						
+						//↓--若找到顶角(一帧可能有多个), 则存到csv	(txyz+qwxyz)	@2019-2-16 18:15:35
+						if(crnr_write_csv_){
+							//if(crnr_fout_.is_open()){
+#if !CAM_POSE_WRITER
+							Eigen::Affine3d cam2g = kinfu_->getCameraPose().cast<double>();
+#else
 							Eigen::Affine3f cam2g = kinfu_->getCameraPose();
-							//转到世界坐标系, 填充 cube_g_:
-							//8顶点:
-							for(size_t i=0; i<8; i++){
-								Vector3d cuVerti_g = cam2g.cast<double>() * cuVerts8_c[i];
-								kinfu_->cube_g_.cuVerts8_.push_back(cuVerti_g);
+							static CameraPoseWriter crnrPoseWriter(crnr_csv_fn_);
+#endif
+							cout<<"cam2g\n"<<cam2g.matrix()<<endl;
+
+							for(size_t i=0; i<crnrCnt; i++){
+								vector<double> &rt = cubeCandiPoses[i]; //size=12=(t3+R9), 且规定col-major //cam-coo 下
+#if !CAM_POSE_WRITER
+								Eigen::Vector3d tvec(rt.data());
+								cout<<"tvec-BBB\n"<<tvec<<endl;
+								tvec = cam2g * tvec; //t-c2g
+								cout<<"tvec-AAA\n"<<tvec<<endl;
+
+								//Eigen::Matrix3d rmat = Matrix3drm::Map(rt.data()+3);
+								//Matrix3drm rmat = Matrix3drm::Map(rt.data()+3); //仍错, 无用
+								Eigen::Matrix3d rmat = Eigen::Matrix3d::Map(rt.data()+3); //正确
+								cout<<"rmat-BBB\n"<<rmat<<endl;
+								//rmat = cam2g * rmat; //错, 此乘法导致 t 按列加在了 r里
+								rmat = cam2g.rotation() * rmat;
+								cout<<"rmat-AAA\n"<<rmat<<endl;
+								Eigen::Quaternionf q(rmat.cast<float>());
+								crnr_fout_ << tvec.x() << "," << tvec.y() << "," << tvec.z()
+									<< "," << q.w() << "," << q.x() << "," << q.y() << "," << q.z() << endl;
+#else //if CAM_POSE_WRITER	//copy from @E:\Github\pcl\gpu\kinfu\tools\kinfu_app.cpp	@2019-2-16 23:40:36
+								Affine3f crnrPose_2cam; //各顶角(R,t)
+								crnrPose_2cam.translation() = Map<Vector3d>(rt.data()).cast<float>();
+								crnrPose_2cam.linear() = Map<Matrix3d>(rt.data()+3).cast<float>();
+
+								Affine3f crnrPose_2g;
+								crnrPose_2g = cam2g.matrix() * crnrPose_2cam.matrix();
+								//同一帧若多顶角, 顺次写作多行, 因此此 csv 行数与相机姿态 csv 基本不同
+								crnrPoseWriter.processPose(crnrPose_2g);
+#endif
+							}
+							//}//if-crnr_fout_
+						}//if-crnr_write_csv_
+
+						if(!kinfu_->isCuInitialized_){ //若全局 cu 没有初始化、定位
+							if(!this->kinfu_->term_1_){ //若仅 term_1_, 则不 waitKey
+								printf("this_kinfu__term_1_\n");
+								cv::waitKey(0);
 							}
 
-							//6个面: //各面顶点分组: 0142/3675, 0253/1476, 0361/2574;
-							int faceVertIdxs[] = {0,1,4,2, 3,6,7,5, 0,2,5,3, 1,4,7,6, 0,3,6,1, 2,5,7,4};
-							for(size_t i=0; i<6; i++){
-								//Facet facet_i;
-								//facet_i.vertIds_.insert(facet_i.vertIds_.end(), faceVertIdxs+4*i, faceVertIdxs+4*(i+1));
-								//cube_g_.facetVec_.push_back(facet_i);
-								vector<int> vertIds(faceVertIdxs+4*i, faceVertIdxs+4*(i+1) );
-								kinfu_->cube_g_.addFacet(vertIds);
-							}
-							//12棱边:
-							int lineVertIds[] = {0,1, 1,4, 4,2, 2,0, 
-													3,6, 6,7, 7,5, 5,3, 
-													0,3, 1,6, 4,7, 2,5};
-							pcl::PointCloud<PointXYZ>::Ptr edgeCloud(new pcl::PointCloud<PointXYZ>);
-							edgeCloud->reserve(3000);
+							size_t crnrIdx = 0; //鼠标选中的下标
 
-							for(size_t i=0; i<12; i++){
-								vector<int> edgeIds(lineVertIds+2*i, lineVertIds+2*(i+1) ); 
-								kinfu_->cube_g_.addEdgeId(edgeIds);
-
-								Vector3d begPt = kinfu_->cube_g_.cuVerts8_[lineVertIds[2*i] ];
-								Vector3d endPt = kinfu_->cube_g_.cuVerts8_[lineVertIds[2*i+1] ];
-								Vector3d edgeVec = endPt - begPt;
-								Vector3d edgeVecNormed = edgeVec.normalized();
-								double edgeVecNorm = edgeVec.norm();
-								Vector3d pos = begPt;
-
-								const float STEP = 0.003; //1MM
-								float len = 0;
-								while(len < edgeVecNorm){
-									PointXYZ pt;
-									pt.x = pos[0];
-									pt.y = pos[1];
-									pt.z = pos[2];
-
-									edgeCloud->push_back(pt);
-
-									len += STEP;
-									pos += len * edgeVecNormed;
+							//遍历找到的顶角, 看鼠标选中了哪一个: //2017-2-20 17:45:36
+							double minPxDist = 1e5; //鼠标双击坐标与【候选顶角】像素坐标距离，的平方, 用于标记更近的【候选点序号】
+							for(size_t i=0; i<crnrCnt; i++){
+								Vector3d pti(cubeCandiPoses[i].data()); //候选顶角3D坐标
+								cv::Point pxi = getPxFrom3d(pti, fx, fy, cx, cy);
+								double dist = cv::norm(pxSelect - pxi);
+								if(dist < minPxDist){
+									minPxDist = dist;
+									crnrIdx = i;
 								}
 							}
-							PCL_WARN("edgeCloud->size:= %d\n", edgeCloud->size());
-							//kinfu_->cuEdgeTree_.setInputCloud(edgeCloud); //放到 kinfu.cpp 内
-							kinfu_->cuContCloud_ = edgeCloud;
-							kinfu_->isCuInitialized_ = true;
-							//kinfu_->volume().create_init_cu_volume(); //挪到最外面, 避免 global_time=0 时候, 有部分尚未初始化 @2018-12-4 12:49:18
+							printf("【【【crnrIdx: %d; minPxDist: %f\n", crnrIdx, minPxDist);
 
-							//zc: 求解用于分割基座、扫描物体的平面参数, @2017-8-13 17:18:53
-							//暂定朝上 (cam-coo Y负方向)
-							//注意: 此平面求解转到 g-coo
-							Vector3d pt0(cu4pts.data());
-							for(size_t i=1; i<4; i++){
-								Vector3d pti(cu4pts.data() + i*3);
+							//3, 仅当找到四顶点, 才算定位到立方体
+							tt0.tic();
+							vector<double> cu4pts; //meters, 因为↓传入的 cuSideLenVec_ 已是量纲米
+							bool isFoundCu4pts = false;
+							if(isFoundCrnr)
+								isFoundCu4pts = getCu4Pts(cubeCandiPoses[crnrIdx], cuSideLenVec_, dm_raw, planeFitter_.membershipImg, fx, fy, cx, cy, cu4pts);
+							//找到 crnr 未必 isFoundCu4pts, 因为可能显示不全
+							printf("getCu4Pts: "); tt0.toc_print();
 
-								//假设相机水平, 斜俯视, 123 号只有一个点在 0号点下方
-								if(pt0.y() < pti.y()){ //此时还在相机坐标系下
-									//计算 ABCD 务必在全局坐标系下
-									Affine3d cam2gd = cam2g.cast<double>();
-									Vector3d pt0g = cam2gd * pt0;
-									Vector3d pti_g = cam2gd * pti;
-
-									Vector3d nvec_g = pt0g - pti_g; //0-i 反着做差, 量纲=米
-									nvec_g.normalize();
-
-									double D = -(nvec_g.dot(pt0g) + kinfu_->plFiltShiftMM_ * MM2M);
-									kinfu_->planeFiltParam_ << nvec_g.x(), nvec_g.y(), nvec_g.z(), D;
-									//调试观察:
-									cout << "kinfu_->planeFiltParam_: " << kinfu_->planeFiltParam_ << endl;
-									cout << "(pt0-pti).dot(pt0): " << (pt0-pti).dot(pt0) << endl;
-									cv::Point px0 = getPxFrom3d(pt0, fx, fy, cx, cy);
-									cv::Point pxnvec = getPxFrom3d(pt0+cam2gd.rotation().transpose()*nvec_g*5e-2, fx, fy, cx, cy);
-									cv::line(dbgSegMat, px0, pxnvec, 255, 2);
-
-									break;
+							if(isFoundCu4pts){
+								//调试观察:
+								for(size_t i=0; i<4; i++){
+									Vector3d pti(cu4pts.data() + i*3);
+									cv::Point pxi = getPxFrom3d(pti, fx, fy, cx, cy);
+									cv::circle(dbgSegMat, pxi, 2, 255, 1); //蓝小圆圈
+									cv::circle(dbgSegMat, pxi, 12, cv::Scalar(0,255,0), 2); //绿大圆圈,
 								}
-							}
 
-						}//if-(isFoundCu4pts)
+								kinfu_->cubeCandiPoses_ = cubeCandiPoses;
+								kinfu_->crnrIdx_ = crnrIdx;
+								//kinfu_->isFirstFoundCube_ = true;
 
-						imshow(winNameAhc, dbgSegMat);
+								//8顶点, 固化编号: 0,123,456,7
+								//各面顶点分组: 0142/3675, 0253/1476, 0361/2574;
+								//最初4个:
+								vector<Vector3d> cuVerts8_c;
+								for(size_t i=0; i<4; i++){
+									Vector3d pti(cu4pts.data() + i*3);
+									cuVerts8_c.push_back(pti);
+								}
+								//再3个:
+								//for(size_t i=1; i<4; i++)
+								cuVerts8_c.push_back(cuVerts8_c[1] + cuVerts8_c[2] - cuVerts8_c[0]);
+								cuVerts8_c.push_back(cuVerts8_c[2] + cuVerts8_c[3] - cuVerts8_c[0]);
+								cuVerts8_c.push_back(cuVerts8_c[3] + cuVerts8_c[1] - cuVerts8_c[0]);
+								//最后最远一个:
+								//cuVerts8_c.push_back(cuVerts8_c[4] + cuVerts8_c[5] + cuVerts8_c[6] - 2 * cuVerts8_c[0]); //-2倍, 非3倍 //×!!!!
+								cuVerts8_c.push_back(cuVerts8_c[1] + cuVerts8_c[2] + cuVerts8_c[3] - 2 * cuVerts8_c[0]);
 
-					}//if-(!isCuInitialized_)
+								Eigen::Affine3f cam2g = kinfu_->getCameraPose();
+								//转到世界坐标系, 填充 cube_g_:
+								//8顶点:
+								for(size_t i=0; i<8; i++){
+									Vector3d cuVerti_g = cam2g.cast<double>() * cuVerts8_c[i];
+									kinfu_->cube_g_.cuVerts8_.push_back(cuVerti_g);
+								}
 
+								//6个面: //各面顶点分组: 0142/3675, 0253/1476, 0361/2574;
+								int faceVertIdxs[] = {0,1,4,2, 3,6,7,5, 0,2,5,3, 1,4,7,6, 0,3,6,1, 2,5,7,4};
+								for(size_t i=0; i<6; i++){
+									//Facet facet_i;
+									//facet_i.vertIds_.insert(facet_i.vertIds_.end(), faceVertIdxs+4*i, faceVertIdxs+4*(i+1));
+									//cube_g_.facetVec_.push_back(facet_i);
+									vector<int> vertIds(faceVertIdxs+4*i, faceVertIdxs+4*(i+1) );
+									kinfu_->cube_g_.addFacet(vertIds);
+								}
+								//12棱边:
+								int lineVertIds[] = {0,1, 1,4, 4,2, 2,0, 
+														3,6, 6,7, 7,5, 5,3, 
+														0,3, 1,6, 4,7, 2,5};
+								pcl::PointCloud<PointXYZ>::Ptr edgeCloud(new pcl::PointCloud<PointXYZ>);
+								edgeCloud->reserve(3000);
+
+								for(size_t i=0; i<12; i++){
+									vector<int> edgeIds(lineVertIds+2*i, lineVertIds+2*(i+1) ); 
+									kinfu_->cube_g_.addEdgeId(edgeIds);
+
+									Vector3d begPt = kinfu_->cube_g_.cuVerts8_[lineVertIds[2*i] ];
+									Vector3d endPt = kinfu_->cube_g_.cuVerts8_[lineVertIds[2*i+1] ];
+									Vector3d edgeVec = endPt - begPt;
+									Vector3d edgeVecNormed = edgeVec.normalized();
+									double edgeVecNorm = edgeVec.norm();
+									Vector3d pos = begPt;
+
+									const float STEP = 0.003; //1MM
+									float len = 0;
+									while(len < edgeVecNorm){
+										PointXYZ pt;
+										pt.x = pos[0];
+										pt.y = pos[1];
+										pt.z = pos[2];
+
+										edgeCloud->push_back(pt);
+
+										len += STEP;
+										pos += len * edgeVecNormed;
+									}
+								}
+								PCL_WARN("edgeCloud->size:= %d\n", edgeCloud->size());
+								//kinfu_->cuEdgeTree_.setInputCloud(edgeCloud); //放到 kinfu.cpp 内
+								kinfu_->cuContCloud_ = edgeCloud;
+								kinfu_->isCuInitialized_ = true;
+								//kinfu_->volume().create_init_cu_volume(); //挪到最外面, 避免 global_time=0 时候, 有部分尚未初始化 @2018-12-4 12:49:18
+
+								//zc: 求解用于分割基座、扫描物体的平面参数, @2017-8-13 17:18:53
+								//暂定朝上 (cam-coo Y负方向)
+								//注意: 此平面求解转到 g-coo
+								Vector3d pt0(cu4pts.data());
+								for(size_t i=1; i<4; i++){
+									Vector3d pti(cu4pts.data() + i*3);
+
+									//假设相机水平, 斜俯视, 123 号只有一个点在 0号点下方
+									if(pt0.y() < pti.y()){ //此时还在相机坐标系下
+										//计算 ABCD 务必在全局坐标系下
+										Affine3d cam2gd = cam2g.cast<double>();
+										Vector3d pt0g = cam2gd * pt0;
+										Vector3d pti_g = cam2gd * pti;
+
+										Vector3d nvec_g = pt0g - pti_g; //0-i 反着做差, 量纲=米
+										nvec_g.normalize();
+
+										double D = -(nvec_g.dot(pt0g) + kinfu_->plFiltShiftMM_ * MM2M);
+										kinfu_->planeFiltParam_ << nvec_g.x(), nvec_g.y(), nvec_g.z(), D;
+										//调试观察:
+										cout << "kinfu_->planeFiltParam_: " << kinfu_->planeFiltParam_ << endl;
+										cout << "(pt0-pti).dot(pt0): " << (pt0-pti).dot(pt0) << endl;
+										cv::Point px0 = getPxFrom3d(pt0, fx, fy, cx, cy);
+										cv::Point pxnvec = getPxFrom3d(pt0+cam2gd.rotation().transpose()*nvec_g*5e-2, fx, fy, cx, cy);
+										cv::line(dbgSegMat, px0, pxnvec, 255, 2);
+
+										break;
+									}
+								}
+
+							}//if-(isFoundCu4pts)
+
+							imshow(winNameAhc, dbgSegMat);
+
+						}//if-(!isCuInitialized_)
+					}//if-(!isCuInitialized_ or crnr_write_csv_)
 				}//elif-(cu_odometry_)
 				else if (s2s_odometry_){
 					kinfu_->volume().create_init_s2s_volume();
@@ -3748,6 +3803,12 @@ int
 		app.toggleBdrAmplifier( amp );
 	}
 
+	crnr_write_csv_ = pc::find_switch(argc, argv, "-crnr");
+	if(crnr_write_csv_){
+#if !CAM_POSE_WRITER
+		/*ofstream*/ crnr_fout_.open(crnr_csv_fn_);
+#endif
+	}
 	vector<int> iter_num;
 	int iter_param_num = pc::parse_x_arguments(argc, argv, "-iter", iter_num);
 	if(iter_param_num > 0){
