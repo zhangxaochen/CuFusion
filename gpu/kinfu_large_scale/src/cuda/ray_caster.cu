@@ -801,6 +801,7 @@ namespace pcl
 // 
 //             if(!is_curr_edge_wide && !isnan(n_f3.x)){ //v21.3.4
             if(!isnan(n_f3.x)){
+            //if(0){ //对比测试: 不折射会怎样? :A: 入射角过大, 导致误检出"背面穿透"	@2019-2-24 01:09:57
                 //if(doDbgPrint)
                 //    printf("ray_dir, n_f3: (%f, %f, %f), (%f, %f, %f); px_xy: (%d, %d)\n", ray_dir.x, ray_dir.y, ray_dir.z, n_f3.x, n_f3.y, n_f3.z, x, y);
 

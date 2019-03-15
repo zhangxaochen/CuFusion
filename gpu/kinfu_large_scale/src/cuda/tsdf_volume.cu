@@ -7232,7 +7232,7 @@ namespace pcl
 
                       //v20.1.16:
                       weight_new1 = (weight_new1 << VOL1_FLAG_BIT_CNT) + non_edge_ccnt; //v19.8.1
-                      pack_tsdf (tsdf_new1, weight_new1, *pos1);
+                      pack_tsdf (tsdf_new1, weight_new1, *pos1); //denoising
                   }
 
                   //v21.5.11
