@@ -22,7 +22,7 @@ The synthetic data are generated with camera intrinsic $K_s$ ([synDep525.param])
 If you find this **code** or [CU3D] dataset valuable for your research please cite this work:
 > Zhang C, Hu Y. [**CuFusion: Accurate real-time camera tracking and volumetric scene reconstruction with a cuboid**](https://www.mdpi.com/1424-8220/17/10/2260)[J]. Sensors, 2017, 17(10): 2260.
 > 
-> ZHANG, C. [**CuFusion2: Accurate and Denoised Volumetric 3D Object Reconstruction Using Depth Cameras**](https://www.preprints.org/manuscript/201812.0165/v1). Preprints 2018, 2018120165
+> Zhang C. [**CuFusion2: Accurate and Denoised Volumetric 3D Object Reconstruction Using Depth Cameras[J]**](https://ieeexplore.ieee.org/document/8691436/). IEEE Access, 2019, 7: 49882-49893.
 
 # How to build #
 We've tested our code on Windows 10, with Visual Studio 2010 (Though other configurations may work)
