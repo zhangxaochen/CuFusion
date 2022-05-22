@@ -35,7 +35,7 @@ Additional prerequisites:
 - Cuda
 
 [CuFusion]: https://www.mdpi.com/1424-8220/17/10/2260
-[cu3d]: https://drive.google.com/open?id=0B4vahSr3aGadN0ozUmE3dVNSXzA
+[cu3d]: https://drive.google.com/drive/folders/0B4vahSr3aGadN0ozUmE3dVNSXzA?resourcekey=0-TOWaH05SS-g8KURmj_GiTQ&usp=sharing
 [peac]: https://github.com/zhangxaochen/peac
 [pcl_kinfu_largeScale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale/tools
 [pcl_gpu_kinfu_large_scale]: https://github.com/zhangxaochen/CuFusion/tree/master/gpu/kinfu_large_scale
